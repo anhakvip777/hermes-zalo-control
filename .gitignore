@@ -1,0 +1,94 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.backup*
+.env.*.backup*
+.env.local
+.env.development.local
+.env.test.local
+.env.production
+.env.production.local
+.env.*.local
+!.env.example
+
+# Prisma / Database
+packages/backend/prisma/*.db
+packages/backend/prisma/*.db-journal
+packages/backend/prisma/*.sqlite
+packages/backend/prisma/*.sqlite3
+packages/backend/dev.db
+*.db
+*.sqlite
+*.sqlite3
+
+# DB Backups
+backup-*/
+packages/backend/backups/
+*.db.backup*
+*.sqlite.backup*
+
+# Zalo sessions — NEVER commit
+zalo-session/
+*.zalo.session
+zalo_creds/
+sessions/
+cookies/
+*.cookie
+*.cookies.json
+
+# Backend local runtime secrets
+packages/backend/zalo-session/
+zalo-session.json
+packages/backend/sessions/
+packages/backend/cookies/
+
+# Secrets / credentials
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+credentials.json
+service-account*.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Coverage
+coverage/
+
+# Cache
+.cache/
+.turbo/
+.vercel/
+.eslintcache
+.next/cache/
+
+# Misc
+*.tgz
+tmp/
+temp/

@@ -1,0 +1,123 @@
+================================================================================
+BOT 1 (NHÀ CHUNG NAM) — DANH SÁCH CHỨC NĂNG
+================================================================================
+UID: 621835795753666607 | Profile: bot-zalo-1 | Gateway: PID 833, uptime 1.5d
+Zalo: CHẾT từ 24/6 (session expired) | Telegram: HOẠT ĐỘNG (@zalo1_bot)
+Admin Center: ĐANG CHIẾM session (cùng UID) → bot 1 không dùng được Zalo
+================================================================================
+
+A. KẾT NỐI NỀN TẢNG (5)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+ 1  Gateway Hermes                     [✓]   [✓]        PID 833, systemd, uptime 1.5d
+ 2  Zalo connect                       [✓]   [✗]        Session expired 24/6, gateway từ bỏ sau 20 retry
+ 3  Telegram connect                   [✓]   [✓]        @zalo1_bot, network flaky nhưng tự recover
+ 4  Zalo session auto-restore          [✓]   [✗]        Cookie hết hạn, cần QR login lại
+ 5  File-based listener persistence    [✓]   [✗]        Listener log 1.2MB toàn "Đăng nhập thất bại"
+
+B. NHẮN TIN (11)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+ 6  DM text (Zalo)                     [✓]   [✗]        Qua openzca CLI → session chết
+ 7  DM text (Telegram)                 [✓]   [✓]        Gateway deliver
+ 8  Group text @mention (Zalo)         [✓]   [✗]        Mention gate + outbound gate → cần session
+ 9  Split-send >1800 chars             [✓]   [✗]        5 guardrails (Unicode, rich, dedup, sent-context, audit)
+10  Unicode sanitizer                  [✓]   [✗]        —→--, "→", …→...
+11  Auto rich detect (>=5 dòng)        [✓]   [✗]        Wrap title {big}{red}
+12  Duplicate detection (60s)          [✓]   [✗]        MD5(threadId+content)
+13  Sent-context memory                [✓]   [✗]        Ghi file → bot đọc trước reply
+14  Outbound audit log                 [✓]   [✗]        JSONL mọi quyết định gửi
+15  Adapter dedup (5s)                 [✓]   [✗]        Chặn double-send trong 5s
+16  Voice message (TTS)                [✓]   [✓]        Edge TTS → .mp3 → Telegram (Zalo offline)
+
+C. TƯƠNG TÁC (6)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+17  Auto-react ♥                       [✓]   [✗]        openzca msg react → cần session
+18  Reaction detection (inbound)       [✓]   [✗]        WebSocket CMD 612 → synthetic text
+19  Group mention gate (inbound)       [✓]   [✗]        Chỉ forward khi @mentioned
+20  Group outbound gate (2-tier)       [✓]   [✗]        TTL 600s, cần @mention gần đây
+21  System message filter              [✓]   [✗]        Block group, translate admin DM
+22  Message recall/undo                [✓]   [✗]        Time window ~1-2h
+
+D. MEDIA & AI (5)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+23  Vision/OCR (đọc ảnh)               [✓]   [✓]        gemini-2.5-flash qua OpenRouter
+24  Image generation                   [✓]   [✓]        flux-2-klein-9b qua ChiaseGPU
+25  Gửi ảnh Zalo                       [✓]   [✗]        openzca msg image → session chết
+26  Gửi ảnh Telegram                   [✓]   [✓]        Gateway deliver
+27  Gửi sticker/video/file             [✓]   [✗]        Zalo only
+
+E. CONTEXT & MEMORY (5)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+28  Chat-log JSONL                     [✓]   [✗]        Không nhận được msg mới
+29  Gender detection + xưng hô         [✓]   [~]        Cache sẵn, dùng được qua Telegram
+30  DM reply checking                  [✓]   [✗]        check-dm.py → cần chat-log có data
+31  Response classification            [✓]   [✗]        Phân loại confirmed/reaction_only/no_response
+32  AgentTask audit (Admin Center)     [✓]   [✓]        Độc lập với Hermes plugin
+
+F. CRON JOBS (8)
+-------------------------------------------------------------------
+ #  Job                                Schedule (VN)      Status   Note
+33  22h vote+lễ Phật                   22:00 daily        [✓] OK   LLM, skill zalo-hermes-plugin-v3
+34  20h tổng hợp Chiasegpu             20:00 daily        [✓] OK   LLM
+35  23h tổng kết cuối ngày             23:00 daily        [✓] OK   LLM
+36  Trực nhật (T4+6)                   06:00 Wed+Fri      [✗] HTTP 402 (DeepSeek balance?)
+37  Nội quy trực nhật (T2)             08:00 Mon          [✓] OK   Last Jun 22
+38  Watchdog 8h+20h                    08:00, 20:00       [✗] FAIL "No live adapter for platform 'zalo'"
+39  Gửi lễ Phật riêng                  22:00 daily        [?] ?    Script — chưa verify
+40  Auth health check 6h               Mỗi 6h             [?] ?    check-openzca-auth.sh
+
+G. SAFETY & SECURITY (7)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+41  Rate limit per-user                [✓]   [✗]        quota-log.json, admin=-1, member=20, khach=5
+42  User/thread block                  [✓]   [~]        phan-quyen.json
+43  Anti-loop (isSelf check)           [✓]   [✗]
+44  Inbound dedup (5min TTL)           [✓]   [✗]
+45  Outbound system msg filter         [✓]   [✗]
+46  Reminder silence pattern           [✓]   [✓]        deliver=local + log + tổng kết
+47  Follow-up reminders                [✓]   [~]        Cần followup-fire.js cron
+
+H. ADMIN CENTER (dùng chung Zalo account) (5)
+-------------------------------------------------------------------
+ #  Chức năng                          Code  Đang chạy  Ghi chú
+48  Zalo session (zca-js)              [✓]   [✓]        ĐANG CHIẾM UID 621835795753666607
+49  Auto-reply pipeline                [✓]   [✓]        RealHermesChatAdapter CLI, dryRun=false
+50  Web dashboard                      [✓]   [✓]        Cloudflare Tunnel + Next.js
+51  Schedule management                [✓]   [✓]        CRUD + version + revision log
+52  Message monitor                    [✓]   [✓]        Socket.IO realtime
+
+================================================================================
+TỔNG KẾT
+================================================================================
+
+ Nhóm               Tổng   Hoạt động   Offline   Ghi chú
+ Kết nối              5        2          3
+ Nhắn tin            11        2          9
+ Tương tác            6        0          6
+ Media & AI           5        3          2
+ Context              5        2          3
+ Cron                 8        3          5       (2 unknown)
+ Safety               7        2          5
+ Admin Center         5        5          0
+ -------------------------------------------------
+ TỔNG                52       19         33
+
+================================================================================
+NÚT THẮT
+================================================================================
+
+ 1. Zalo session hết hạn → 33/52 chức năng offline
+ 2. Admin Center đang giữ session → bot 1 không dùng được Zalo
+ 3. Chỉ 1 system/Zalo account tại 1 thời điểm
+ 4. Cần chọn: Admin Center HOẶC Bot 1 → không chạy được cả 2
+
+ Để bot 1 Zalo sống lại:
+   - Stop Admin Center Zalo listener
+   - QR login cho bot 1: openzca auth login --qr-path ~/.hermes/zalo/qr.png
+   - Restart gateway: hermes --profile bot-zalo-1 gateway restart
+   - Verify: openzca auth status → "Đăng nhập thành công"
+================================================================================

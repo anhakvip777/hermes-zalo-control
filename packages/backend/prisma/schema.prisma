@@ -1,0 +1,522 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// Core — Schedules
+// =============================================================================
+
+model Schedule {
+  id              String         @id @default(cuid())
+  version         Int            @default(1)
+  name            String
+  type            String         @default("zalo_message") // ScheduleType
+  status          String         @default("draft") // ScheduleStatus
+  cronExpression  String?
+  scheduledAt     DateTime?
+  nextRunAt       DateTime?
+  messageContent  String
+  targetId        String
+  targetName      String?
+  createdBy       String         @default("user") // user | ai | system
+  originalCommand String?
+  metadata        String?
+  repeatEnabled   Boolean        @default(false)
+  repeatCron      String?
+  pausedAt        DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  executions ScheduleExecution[]
+  revisions  ScheduleRevision[]
+  jobs       ScheduleJob[]
+
+  @@index([status])
+  @@index([nextRunAt])
+  @@index([scheduledAt])
+}
+
+// =============================================================================
+// Executions — one per run attempt
+// =============================================================================
+
+model ScheduleExecution {
+  id              String    @id @default(cuid())
+  scheduleId      String
+  scheduleVersion Int
+  scheduleJobId   String?
+  mode            String    @default("scheduled") // ExecutionMode
+  plannedRunAt    DateTime
+  actualRunAt     DateTime?
+  finishedAt      DateTime?
+  status          String    @default("pending") // ExecutionStatus
+  targetId        String
+  targetName      String?
+  messageContent  String
+  zaloMessageId   String?
+  errorMessage    String?
+  errorCode       String?
+  retryCount      Int       @default(0)
+  maxRetries      Int       @default(3)
+  nextRetryAt     DateTime?
+  dryRun          Boolean   @default(false)
+  metadata        String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id])
+
+  @@index([scheduleId])
+  @@index([status])
+  @@index([plannedRunAt])
+}
+
+// =============================================================================
+// Revisions — change history for schedules
+// =============================================================================
+
+model ScheduleRevision {
+  id              String   @id @default(cuid())
+  scheduleId      String
+  scheduleVersion Int
+  field           String
+  oldValue        String?
+  newValue        String?
+  changedBy       String   @default("user") // user | ai | system
+  createdAt       DateTime @default(now())
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id])
+
+  @@index([scheduleId])
+}
+
+// =============================================================================
+// Schedule Jobs — queue job mapping
+// =============================================================================
+
+model ScheduleJob {
+  id              String    @id @default(cuid())
+  scheduleId      String
+  scheduleVersion Int
+  queueJobId      String?
+  type            String    @default("scheduled") // JobType
+  status          String    @default("queued") // JobStatus
+  scheduledAt     DateTime?
+  createdAt       DateTime  @default(now())
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id])
+
+  @@index([scheduleId])
+  @@index([queueJobId])
+}
+
+// =============================================================================
+// Messages — Zalo messages (incoming + outgoing)
+// =============================================================================
+
+model Message {
+  id            String   @id @default(cuid())
+  zaloMessageId String?  @unique
+  threadId      String
+  threadType    String   @default("group") // user | group
+  senderId      String?
+  senderName    String?
+  content       String
+  isFromBot     Boolean  @default(false)
+  messageType   String?  @default("text") // text | sticker | image | poll
+  /** Conversation role: user, assistant, system */
+  role          String   @default("user")
+  /** Related message ID (e.g. original message for an assistant reply) */
+  relatedMessageId String?
+  metadata      String?
+  receivedAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([threadId])
+  @@index([zaloMessageId])
+  @@index([receivedAt])
+  @@index([threadId, createdAt])
+}
+
+// =============================================================================
+// Zalo Threads — known groups/users
+// =============================================================================
+
+model ZaloThread {
+  id            String    @id
+  type          String    @default("group") // user | group
+  name          String?
+  avatarUrl     String?
+  memberCount   Int?
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([type])
+}
+
+// =============================================================================
+// Thread Settings — per-thread configuration for auto-reply behavior
+// =============================================================================
+
+model ThreadSetting {
+  id                       String   @id @default(cuid())
+  threadId                 String   @unique
+  autoReplyEnabled         Boolean  @default(true)
+  groupMentionRequired     Boolean  @default(false)
+  groupReplyWindowSeconds   Int     @default(600)
+  allowCreateReminder      Boolean  @default(true)
+  allowMedia               Boolean  @default(false)
+  allowImageUnderstanding  Boolean  @default(false)
+  notes                    String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([threadId])
+}
+
+// =============================================================================
+// Outbound Records — sent-context memory for dedup + audit
+// =============================================================================
+
+model OutboundRecord {
+  id             String   @id @default(cuid())
+  threadId       String
+  threadType     String   @default("user") // user | group
+  content        String
+  contentHash    String
+  sentMessageId  String?
+  source         String   @default("auto_reply") // auto_reply | schedule | media | manual | create_reminder
+  dryRun         Boolean  @default(false)
+  errorCode      String?
+  decision       String   @default("allow") // allow | skip | block
+  reason         String
+  createdAt      DateTime @default(now())
+
+  @@index([threadId, createdAt])
+  @@index([contentHash])
+}
+
+// =============================================================================
+// Thread Conversation State — multi-turn pending intent tracking
+// =============================================================================
+
+model ThreadConversationState {
+  id           String   @id @default(cuid())
+  threadId     String   @unique
+  pendingIntent String? // e.g. "weather_location", "schedule_create", "poll_options"
+  missingSlots  String?  // JSON array: ["location", "time"]
+  collectedSlots String? // JSON object: {"topic": "thời tiết"}
+  lastAssistantQuestion String?
+  expiresAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([threadId])
+  @@index([expiresAt])
+}
+
+// =============================================================================
+// Agent Tasks — tasks from Hermes AI
+// =============================================================================
+
+model AgentTask {
+  id           String   @id @default(cuid())
+  agentName    String   @default("hermes") // hermes | ...
+  taskType     String   // create_schedule | update_schedule | search_messages | ...
+  input        String   // JSON
+  result       String?  // JSON
+  status       String   @default("pending") // pending | processing | completed | failed
+  scheduleId   String?
+  messageId    String?
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Audit Logs — system-wide change tracking
+// =============================================================================
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String   // schedule.created | schedule.updated | message.sent | ...
+  entityType String
+  entityId   String?
+  actor      String   @default("system") // user | ai | system
+  details    String?  // JSON
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Attendance
+// =============================================================================
+
+model AttendanceSession {
+  id            String    @id @default(cuid())
+  name          String
+  targetId      String
+  targetName    String?
+  status        String    @default("draft") // AttendanceStatus
+  scheduledAt   DateTime?
+  startedAt     DateTime?
+  endedAt       DateTime?
+  reminderSent  Boolean   @default(false)
+  expectedCount Int?
+  actualCount   Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  records AttendanceRecord[]
+
+  @@index([status])
+}
+
+model AttendanceRecord {
+  id          String   @id @default(cuid())
+  sessionId   String
+  userId      String
+  userName    String?
+  response    String?
+  messageId   String?
+  checkedInAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id])
+
+  @@unique([sessionId, userId])
+}
+
+// =============================================================================
+// App Settings — key-value configuration
+// =============================================================================
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
+// =============================================================================
+// Runtime Settings — runtime-overridable config (e.g. dryRun toggle)
+// =============================================================================
+
+model RuntimeSetting {
+  key       String   @id
+  value     String
+  updatedBy String   @default("admin")
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
+// =============================================================================
+// Runtime Config Audit — audit trail for config changes
+// =============================================================================
+
+model RuntimeConfigAudit {
+  id              String   @id @default(cuid())
+  key             String
+  oldValue        String?
+  newValue        String
+  changedBy       String
+  reason          String?
+  confirmTextHash String?
+  backupName      String?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime @default(now())
+
+  @@index([key])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// System Heartbeats — monitor worker, listener, connection liveness
+// =============================================================================
+
+model SystemHeartbeat {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  status        String   @default("ok") // ok | stale | down
+  lastBeatAt    DateTime @default(now())
+  lastSuccessAt DateTime?
+  lastErrorAt   DateTime?
+  lastError     String?
+  metadata      String?  // JSON
+  updatedAt     DateTime @updatedAt
+
+  @@index([name])
+  @@index([status])
+}
+
+// =============================================================================
+// Rules — Rule Engine for auto-reply matching
+// =============================================================================
+
+model Rule {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  enabled         Boolean  @default(true)
+  priority        Int      @default(100)
+  triggerType     String   // keyword_contains | keyword_regex | message_type | thread_type | sender_id
+  conditions      String   // JSON
+  actionType      String   // fixed_reply | route_to_hermes | ignore
+  actionConfig    String   // JSON
+  targetThreadIds String?  // JSON array
+  cooldownSeconds Int?
+  matchCount      Int      @default(0)
+  lastMatchedAt   DateTime?
+  createdBy       String?
+  updatedBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  versions   RuleVersion[]
+  executions RuleExecution[]
+
+  @@index([enabled])
+  @@index([priority])
+  @@index([triggerType])
+}
+
+model RuleVersion {
+  id           String   @id @default(cuid())
+  ruleId       String
+  version      Int
+  snapshot     String   // JSON
+  changedBy    String?
+  changeReason String?
+  createdAt    DateTime @default(now())
+
+  rule Rule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId])
+}
+
+model RuleExecution {
+  id           String   @id @default(cuid())
+  ruleId       String?
+  messageId    String?
+  threadId     String?
+  matched      Boolean
+  actionTaken  String?
+  result       String?
+  errorCode    String?
+  errorMessage String?
+  metadata     String?  // JSON
+  createdAt    DateTime @default(now())
+
+  rule Rule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  @@index([ruleId])
+  @@index([threadId])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Documents — Docling-powered document understanding
+// =============================================================================
+
+model Document {
+  id            String   @id @default(cuid())
+  fileName      String
+  originalPath  String
+  mimeType      String?
+  extension     String
+  sizeBytes     Int
+  sha256        String
+  status        String   @default("pending") // pending | processing | completed | failed
+  markdownPath  String?
+  jsonPath      String?
+  textPreview   String?
+  provider      String   @default("docling")
+  errorCode     String?
+  errorMessage  String?
+  source        String?
+  threadId      String?
+  messageId     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  chunks DocumentChunk[]
+  jobs   DocumentIngestionJob[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model DocumentChunk {
+  id            String   @id @default(cuid())
+  documentId    String
+  chunkIndex    Int
+  heading       String?
+  text          String
+  pageStart     Int?
+  pageEnd       Int?
+  tokenEstimate Int?
+  metadata      String?  // JSON
+  createdAt     DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, chunkIndex])
+}
+
+model DocumentIngestionJob {
+  id            String    @id @default(cuid())
+  documentId    String
+  status        String    @default("pending") // pending | processing | completed | failed
+  errorCode     String?
+  errorMessage  String?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+}
+
+// =============================================================================
+// System Alerts — dedup + audit trail for automated error alerts
+// =============================================================================
+
+model SystemAlert {
+  id          String   @id @default(cuid())
+  alertType   String   // error_summary | heartbeat_down | config_error | custom
+  fingerprint String   // unique dedup key: source+errorCode+window
+  severity    String   @default("medium") // low | medium | high
+  status      String   @default("active") // active | resolved | muted
+  dryRun      Boolean  @default(true)
+  message     String   // formatted alert message
+  source      String?  // module source (AgentTask, Heartbeat, etc.)
+  errorCode   String?  // specific error code
+  errorCount  Int      @default(0)
+  windowHours Int      @default(24)
+  sentAt      DateTime @default(now())
+  resolvedAt  DateTime?
+  metadata    String?  // JSON
+  createdAt   DateTime @default(now())
+
+  @@index([fingerprint, createdAt])
+  @@index([alertType])
+  @@index([status])
+  @@index([sentAt])
+}
