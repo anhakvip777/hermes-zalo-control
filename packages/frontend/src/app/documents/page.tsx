@@ -8,6 +8,8 @@ import {
   getDocumentMarkdown,
   getDocumentChunks,
   askDocument,
+  reingestDocument,
+  deleteDocument,
   type DocumentOutput,
   type DocumentChunkOutput,
   type AskResult,
@@ -26,11 +28,15 @@ export default function DocumentsPage() {
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [chunks, setChunks] = useState<DocumentChunkOutput[]>([]);
+  const [jobs, setJobs] = useState<{ id: string; status: string; errorCode?: string | null }[]>([]);
 
   // Ask panel
   const [question, setQuestion] = useState("");
   const [askResult, setAskResult] = useState<AskResult | null>(null);
   const [asking, setAsking] = useState(false);
+
+  // Action states
+  const [actioning, setActioning] = useState<string | null>(null);
 
   const fetchDocs = useCallback(async () => {
     try {
@@ -69,21 +75,69 @@ export default function DocumentsPage() {
       setSelectedDoc(null);
       setMarkdown(null);
       setChunks([]);
+      setJobs([]);
       setAskResult(null);
       return;
     }
     setSelectedDoc(docId);
     setAskResult(null);
     try {
-      const [mdRes, chRes] = await Promise.all([
+      const [mdRes, chRes, docRes] = await Promise.all([
         getDocumentMarkdown(docId).catch(() => ({ data: null })),
         getDocumentChunks(docId).catch(() => ({ data: [] })),
+        getDocument(docId).catch(() => ({ data: null })),
       ]);
       setMarkdown(mdRes.data ?? null);
       setChunks(chRes.data ?? []);
+
+      // Fetch jobs
+      if (docRes.data) {
+        fetchJobs(docId);
+      }
     } catch {
       setMarkdown(null);
       setChunks([]);
+      setJobs([]);
+    }
+  };
+
+  const fetchJobs = async (docId: string) => {
+    try {
+      const res = await fetch(`/api/documents/${docId}/jobs`);
+      const json = await res.json();
+      setJobs(json.data ?? []);
+    } catch {
+      setJobs([]);
+    }
+  };
+
+  // ── Re-ingest ───────────────────────────────────────────────
+  const handleReingest = async (docId: string) => {
+    if (!confirm("Re-ingest tài liệu này? Job mới sẽ được tạo mà không xóa dữ liệu cũ.")) return;
+    setActioning(docId);
+    try {
+      await reingestDocument(docId);
+      fetchDocs();
+      if (selectedDoc === docId) fetchJobs(docId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Re-ingest failed");
+    } finally {
+      setActioning(null);
+    }
+  };
+
+  // ── Delete ──────────────────────────────────────────────────
+  const handleDelete = async (docId: string) => {
+    if (!confirm("Xóa tài liệu này? Tất cả chunks và jobs sẽ bị xóa vĩnh viễn.")) return;
+    setActioning(docId);
+    try {
+      await deleteDocument(docId);
+      if (selectedDoc === docId) setSelectedDoc(null);
+      fetchDocs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setActioning(null);
     }
   };
 
@@ -118,6 +172,7 @@ export default function DocumentsPage() {
       case "completed": return "text-green-600 bg-green-50";
       case "processing": return "text-blue-600 bg-blue-50";
       case "failed": return "text-red-600 bg-red-50";
+      case "queued": return "text-yellow-600 bg-yellow-50";
       default: return "text-gray-500 bg-gray-100";
     }
   };
@@ -144,6 +199,19 @@ export default function DocumentsPage() {
     return { level: "medium", label: "⚠️ Other" };
   };
 
+  const fileIcon = (ext: string) => {
+    switch (ext.toLowerCase()) {
+      case "pdf": return "📕";
+      case "docx": return "📘";
+      case "pptx": return "📊";
+      case "xlsx": return "📈";
+      case "txt": return "📄";
+      case "md": return "📝";
+      case "csv": return "📊";
+      default: return "📎";
+    }
+  };
+
   // ── Render ───────────────────────────────────────────────────
   return (
     <div className="space-y-6">
@@ -151,9 +219,15 @@ export default function DocumentsPage() {
         <div>
           <h1 className="text-2xl font-bold">📄 Documents</h1>
           <p className="text-gray-600 mt-1">
-            Docling — đọc PDF, DOCX, PPTX, XLSX, TXT, MD...
+            Docling — đọc PDF, DOCX, PPTX, XLSX, TXT, MD, CSV
           </p>
         </div>
+        <button
+          onClick={fetchDocs}
+          className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50"
+        >
+          🔄 Refresh
+        </button>
       </div>
 
       {error && (
@@ -201,9 +275,10 @@ export default function DocumentsPage() {
               <tr className="bg-gray-100 text-left">
                 <th className="p-3 font-medium">File</th>
                 <th className="p-3 font-medium">Status</th>
+                <th className="p-3 font-medium">Chunks</th>
                 <th className="p-3 font-medium">Size</th>
-                <th className="p-3 font-medium">Preview</th>
                 <th className="p-3 font-medium">Date</th>
+                <th className="p-3 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -214,8 +289,13 @@ export default function DocumentsPage() {
                   onClick={() => viewDetail(doc.id)}
                 >
                   <td className="p-3">
-                    <span className="font-medium">{doc.fileName}</span>
-                    <span className="text-xs text-gray-400 ml-2">.{doc.extension}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{fileIcon(doc.extension)}</span>
+                      <div>
+                        <span className="font-medium block">{doc.fileName}</span>
+                        <span className="text-xs text-gray-400">.{doc.extension} · {doc.provider}</span>
+                      </div>
+                    </div>
                   </td>
                   <td className="p-3">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(doc.status)}`}>
@@ -230,12 +310,41 @@ export default function DocumentsPage() {
                       </div>
                     )}
                   </td>
-                  <td className="p-3 text-xs text-gray-500">{formatBytes(doc.sizeBytes)}</td>
-                  <td className="p-3 text-xs text-gray-500 max-w-xs truncate">
-                    {doc.textPreview?.slice(0, 80) ?? "—"}
+                  <td className="p-3 text-sm text-gray-600">
+                    {doc.status === "completed" ? (
+                      <span
+                        className="text-blue-600 underline cursor-pointer"
+                        onClick={(e) => { e.stopPropagation(); viewDetail(doc.id); }}
+                      >
+                        View chunks →
+                      </span>
+                    ) : doc.status === "processing" || doc.status === "queued" ? (
+                      "⏳"
+                    ) : "—"}
                   </td>
+                  <td className="p-3 text-xs text-gray-500">{formatBytes(doc.sizeBytes)}</td>
                   <td className="p-3 text-xs text-gray-500">
                     {new Date(doc.createdAt).toLocaleString("vi-VN")}
+                  </td>
+                  <td className="p-3">
+                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                      {doc.status === "failed" && (
+                        <button
+                          onClick={() => handleReingest(doc.id)}
+                          disabled={actioning === doc.id}
+                          className="px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded hover:bg-amber-200 disabled:opacity-50"
+                        >
+                          {actioning === doc.id ? "..." : "🔄 Re-ingest"}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleDelete(doc.id)}
+                        disabled={actioning === doc.id}
+                        className="px-2 py-1 text-xs bg-red-50 text-red-600 rounded hover:bg-red-100 disabled:opacity-50"
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -247,7 +356,25 @@ export default function DocumentsPage() {
       {/* ── Detail Panel ───────────────────────────────────────── */}
       {selectedDoc && (
         <div className="p-4 bg-white border rounded-lg space-y-4">
-          <h2 className="font-semibold">📋 Document Detail</h2>
+          <div className="flex justify-between items-center">
+            <h2 className="font-semibold">📋 Document Detail</h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleReingest(selectedDoc)}
+                disabled={actioning === selectedDoc}
+                className="px-3 py-1 text-sm bg-amber-100 text-amber-700 rounded hover:bg-amber-200 disabled:opacity-50"
+              >
+                {actioning === selectedDoc ? "..." : "🔄 Re-ingest"}
+              </button>
+              <button
+                onClick={() => handleDelete(selectedDoc)}
+                disabled={actioning === selectedDoc}
+                className="px-3 py-1 text-sm bg-red-50 text-red-600 rounded hover:bg-red-100 disabled:opacity-50"
+              >
+                🗑️ Delete
+              </button>
+            </div>
+          </div>
 
           {/* Error info for failed docs */}
           {(() => {
@@ -262,6 +389,38 @@ export default function DocumentsPage() {
               </div>
             );
           })()}
+
+          {/* File info */}
+          {(() => {
+            const selected = docs.find(d => d.id === selectedDoc);
+            if (!selected) return null;
+            return (
+              <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
+                <div><span className="font-medium">File:</span> {fileIcon(selected.extension)} {selected.fileName}</div>
+                <div><span className="font-medium">Size:</span> {formatBytes(selected.sizeBytes)}</div>
+                <div><span className="font-medium">Type:</span> {selected.mimeType ?? "." + selected.extension}</div>
+                <div><span className="font-medium">Provider:</span> {selected.provider}</div>
+                <div><span className="font-medium">Source:</span> {selected.source ?? "manual"}</div>
+                <div><span className="font-medium">Created:</span> {new Date(selected.createdAt).toLocaleString("vi-VN")}</div>
+              </div>
+            );
+          })()}
+
+          {/* Ingestion Jobs */}
+          {jobs.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium mb-2">🔄 Ingestion Jobs ({jobs.length})</h3>
+              <div className="space-y-1">
+                {jobs.map((j) => (
+                  <div key={j.id} className="flex items-center gap-2 text-xs">
+                    <span className={`px-1.5 py-0.5 rounded font-medium ${statusColor(j.status)}`}>{j.status}</span>
+                    <code className="text-gray-400">{j.id.slice(0, 12)}...</code>
+                    {j.errorCode && <span className="text-red-500">{j.errorCode}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Ask panel */}
           <div className="p-3 bg-yellow-50 border border-yellow-200 rounded">

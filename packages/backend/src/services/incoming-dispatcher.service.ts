@@ -109,7 +109,7 @@ function safetyCheck(msg: NormalizedMessage, selfUserId?: string | null): Safety
     return { allowed: false, reason: "empty_content" };
   }
 
-  if (msg.messageType !== "text" && msg.messageType !== "image") {
+  if (msg.messageType !== "text" && msg.messageType !== "image" && msg.messageType !== "file") {
     return { allowed: false, reason: "non_text_message" };
   }
 
@@ -833,6 +833,177 @@ export async function handleIncomingMessage(
       });
       setCooldown(msg.threadId);
       return { dispatched: false, reason: "image_pipeline_error" };
+    }
+  }
+
+  // ── Zalo File Ingestion Pipeline (Batch 13) ──────────────────
+  if (msg.messageType === "file" && msg.fileUrl) {
+    // Check thread settings for document understanding permission
+    if (!group.settings?.allowDocumentUnderstanding) {
+      console.log(`[dispatcher] skip: document understanding not allowed (thread=${msg.threadId})`);
+      await agentTaskService.markAgentTaskCompleted(task.id, {
+        skipped: true,
+        reason: "document_understanding_disabled",
+        dryRun: getCurrentEffectiveDryRun(),
+      });
+      return { dispatched: false, reason: "document_understanding_disabled" };
+    }
+
+    if (!config.document?.enabled) {
+      console.log(`[dispatcher] skip: document ingestion disabled (thread=${msg.threadId})`);
+      await agentTaskService.markAgentTaskCompleted(task.id, {
+        skipped: true,
+        reason: "document_ingestion_disabled",
+        dryRun: getCurrentEffectiveDryRun(),
+      });
+      return { dispatched: false, reason: "document_ingestion_disabled" };
+    }
+
+    // Validate file extension
+    const ext = msg.fileExtension;
+    if (!ext || !config.document.allowedExtensions.includes(ext)) {
+      console.log(`[dispatcher] skip: unsupported file extension .${ext ?? "?"} (thread=${msg.threadId})`);
+      await agentTaskService.markAgentTaskCompleted(task.id, {
+        skipped: true,
+        reason: "unsupported_extension",
+        fileExtension: ext ?? "unknown",
+        dryRun: getCurrentEffectiveDryRun(),
+      });
+      // Notify user about unsupported file
+      if (!getCurrentEffectiveDryRun()) {
+        const sender = new ZaloMessageSender();
+        await sender.sendMessage(
+          `Mình chưa hỗ trợ đọc file .${ext ?? "này"}. Các định dạng hỗ trợ: PDF, DOCX, TXT, MD, CSV, PPTX, XLSX.`,
+          msg.threadId,
+          msg.threadType,
+        );
+      }
+      setCooldown(msg.threadId);
+      return { dispatched: false, reason: "unsupported_extension" };
+    }
+
+    try {
+      // Download file safely
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const { basename } = await import("node:path");
+
+      const safeDir = config.document.allowedBaseDir;
+      await mkdir(safeDir, { recursive: true });
+
+      // Determine safe filename
+      const safeFileName = msg.fileName || `zalo-file-${Date.now()}.${ext}`;
+      // Block sensitive filenames
+      const blockedPatterns = [/^\.env/i, /session/i, /credentials/i, /token/i, /secret/i, /key$/i, /passwd/i, /shadow/i];
+      for (const p of blockedPatterns) {
+        if (p.test(safeFileName)) {
+          throw new Error(`Blocked file name pattern: ${safeFileName}`);
+        }
+      }
+
+      const destPath = `${safeDir}/${safeFileName}`;
+
+      // Download file from Zalo URL
+      console.log(`[dispatcher] downloading file: ${msg.fileUrl} → ${destPath}`);
+      const response = await fetch(msg.fileUrl, {
+        signal: AbortSignal.timeout(30_000), // 30s download timeout
+      });
+      if (!response.ok) {
+        throw new Error(`Download failed: HTTP ${response.status}`);
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const fileSize = buffer.length;
+
+      // Size check
+      const maxBytes = (config.document.maxSizeMB || 50) * 1024 * 1024;
+      if (fileSize > maxBytes) {
+        throw new Error(`File too large: ${(fileSize / 1024 / 1024).toFixed(1)}MB > ${config.document.maxSizeMB}MB`);
+      }
+
+      await writeFile(destPath, buffer);
+      console.log(`[dispatcher] file downloaded: ${safeFileName} (${fileSize}B)`);
+
+      // Create document + job via ingestDocument
+      const { ingestDocument: docIngest } = await import("./document-ingestion.service.js");
+      const ingestResult = await docIngest(destPath, {
+        source: "zalo",
+        threadId: msg.threadId,
+        messageId: msg.zaloMessageId ?? undefined,
+      });
+
+      const fileResult: Record<string, unknown> = {
+        documentId: ingestResult.documentId,
+        jobId: ingestResult.jobId,
+        method: ingestResult.method,
+        fileName: ingestResult.fileName,
+        fileSize,
+        fileExtension: ext,
+        dryRun: getCurrentEffectiveDryRun(),
+        source: "zalo_file",
+        zaloMessageId: msg.zaloMessageId,
+      };
+
+      if (getCurrentEffectiveDryRun()) {
+        await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
+        console.log(
+          `[dispatcher] document queued (dry-run): ${ingestResult.documentId} ` +
+          `file=${ingestResult.fileName} method=${ingestResult.method} (thread=${msg.threadId})`,
+        );
+      } else {
+        // Send confirmation to user
+        const sender = new ZaloMessageSender();
+        const replyText = `✅ Đã nhận tài liệu "${ingestResult.fileName}" và đang xử lý.\nSau khi xong bạn có thể hỏi mình về nội dung.`;
+        const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
+        fileResult.sentMessageId = sendResult.messageId ?? null;
+        fileResult.sendSuccess = sendResult.success;
+        fileResult.replyPreview = replyText.slice(0, 200);
+        await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
+        console.log(
+          `[dispatcher] document queued + sent: ${ingestResult.documentId} ` +
+          `file=${ingestResult.fileName} msgId=${sendResult.messageId}`,
+        );
+
+        // Save outbound to conversation history
+        saveOutboundMessage({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          content: replyText,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          metadata: {
+            source: "auto_reply_file",
+            sentMessageId: sendResult.messageId,
+            documentId: ingestResult.documentId,
+            taskId: task.id,
+          },
+        }).catch(() => {});
+      }
+
+      setCooldown(msg.threadId);
+      return { dispatched: true };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[dispatcher] file ingestion error: ${errorMsg}`);
+
+      await agentTaskService.markAgentTaskCompleted(task.id, {
+        skipped: true,
+        reason: "file_ingestion_error",
+        error: errorMsg.slice(0, 500),
+        fileUrl: msg.fileUrl?.slice(0, 200),
+        dryRun: getCurrentEffectiveDryRun(),
+      });
+
+      if (!getCurrentEffectiveDryRun()) {
+        const sender = new ZaloMessageSender();
+        await sender.sendMessage(
+          "Mình nhận được file nhưng chưa xử lý được. Bạn thử lại sau nhé.",
+          msg.threadId,
+          msg.threadType,
+        );
+      }
+
+      setCooldown(msg.threadId);
+      return { dispatched: false, reason: "file_ingestion_error" };
     }
   }
 

@@ -90,4 +90,68 @@ export async function documentRoutes(app: FastifyInstance) {
       return reply.status(status).send({ error: "ASK_FAILED", message });
     }
   });
+
+  // ── POST /api/documents/:id/reingest ───────────────────────────
+  // Batch 13: Re-ingest a previously ingested document.
+  // Creates a new job without deleting the old document.
+  // Only works if no active job is running for this document.
+  app.post("/documents/:id/reingest", async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const doc = await docService.getDocument(req.params.id);
+    if (!doc) {
+      return reply.status(404).send({ error: "NOT_FOUND", message: "Document not found" });
+    }
+
+    try {
+      // Check for active jobs
+      const jobs = await docService.getDocumentJobs(req.params.id);
+      const activeJob = jobs.find(j => j.status === "queued" || j.status === "processing");
+      if (activeJob) {
+        return reply.status(409).send({
+          error: "ACTIVE_JOB_EXISTS",
+          message: `Document has an active job (status: ${activeJob.status}). Wait for it to finish or fail.`,
+        });
+      }
+
+      // Re-ingest the file
+      const result = await docService.ingestDocument(doc.originalPath, {
+        source: "reingest",
+        threadId: doc.threadId ?? undefined,
+        messageId: undefined,
+      });
+      return reply.status(202).send({ data: result });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(400).send({ error: "REINGEST_FAILED", message });
+    }
+  });
+
+  // ── DELETE /api/documents/:id ──────────────────────────────────
+  // Batch 13: Delete a document and all its chunks + jobs (cascading).
+  app.delete("/documents/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const doc = await docService.getDocument(req.params.id);
+    if (!doc) {
+      return reply.status(404).send({ error: "NOT_FOUND", message: "Document not found" });
+    }
+
+    try {
+      // Delete from DB (cascades to chunks and jobs via Prisma onDelete: Cascade)
+      const { prisma } = await import("../db.js");
+      await prisma.document.delete({ where: { id: req.params.id } });
+
+      // Clean up files if they exist
+      const { unlink } = await import("node:fs/promises");
+      if (doc.markdownPath) {
+        unlink(doc.markdownPath).catch(() => {});
+      }
+      if (doc.originalPath && doc.source === "reingest") {
+        // Only clean up re-ingested files
+        unlink(doc.originalPath).catch(() => {});
+      }
+
+      return reply.send({ data: { id: req.params.id, deleted: true } });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(500).send({ error: "DELETE_FAILED", message });
+    }
+  });
 }

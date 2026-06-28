@@ -12,6 +12,7 @@ export interface ThreadSettingData {
   allowCreateReminder: boolean;
   allowMedia: boolean;
   allowImageUnderstanding: boolean;
+  allowDocumentUnderstanding: boolean;
   notes?: string | null;
 }
 
@@ -24,6 +25,7 @@ const DM_DEFAULTS: ThreadSettingData = {
   allowCreateReminder: true,
   allowMedia: false,
   allowImageUnderstanding: false,
+  allowDocumentUnderstanding: false,
 };
 
 const GROUP_DEFAULTS: ThreadSettingData = {
@@ -34,12 +36,11 @@ const GROUP_DEFAULTS: ThreadSettingData = {
   allowCreateReminder: true,
   allowMedia: false,
   allowImageUnderstanding: false,
+  allowDocumentUnderstanding: false,
 };
 
 /**
  * Get thread settings, creating defaults if not yet saved.
- * DM threads: groupMentionRequired=false, groupReplyWindowSeconds=0.
- * Group threads: groupMentionRequired=true, groupReplyWindowSeconds=600.
  */
 export async function getThreadSettings(
   threadId: string,
@@ -55,6 +56,7 @@ export async function getThreadSettings(
       allowCreateReminder: s.allowCreateReminder,
       allowMedia: s.allowMedia,
       allowImageUnderstanding: (s as any).allowImageUnderstanding ?? false,
+      allowDocumentUnderstanding: (s as any).allowDocumentUnderstanding ?? false,
       notes: s.notes,
     };
   }
@@ -70,6 +72,7 @@ export async function getThreadSettings(
       allowCreateReminder: defaults.allowCreateReminder,
       allowMedia: defaults.allowMedia,
       allowImageUnderstanding: defaults.allowImageUnderstanding,
+      allowDocumentUnderstanding: defaults.allowDocumentUnderstanding,
     },
   });
   return {
@@ -80,6 +83,7 @@ export async function getThreadSettings(
     allowCreateReminder: s.allowCreateReminder,
     allowMedia: s.allowMedia,
     allowImageUnderstanding: (s as any).allowImageUnderstanding ?? false,
+    allowDocumentUnderstanding: (s as any).allowDocumentUnderstanding ?? false,
     notes: s.notes,
   };
 }
@@ -102,6 +106,7 @@ export async function updateThreadSettings(
       ...(updates.allowCreateReminder !== undefined && { allowCreateReminder: updates.allowCreateReminder }),
       ...(updates.allowMedia !== undefined && { allowMedia: updates.allowMedia }),
       ...(updates.allowImageUnderstanding !== undefined && { allowImageUnderstanding: updates.allowImageUnderstanding }),
+      ...(updates.allowDocumentUnderstanding !== undefined && { allowDocumentUnderstanding: updates.allowDocumentUnderstanding }),
       ...(updates.notes !== undefined && { notes: updates.notes }),
     },
     create: {
@@ -112,6 +117,7 @@ export async function updateThreadSettings(
       allowCreateReminder: updates.allowCreateReminder ?? true,
       allowMedia: updates.allowMedia ?? false,
       allowImageUnderstanding: updates.allowImageUnderstanding ?? false,
+      allowDocumentUnderstanding: updates.allowDocumentUnderstanding ?? false,
       notes: updates.notes,
     },
   });
@@ -123,6 +129,7 @@ export async function updateThreadSettings(
     allowCreateReminder: s.allowCreateReminder,
     allowMedia: s.allowMedia,
     allowImageUnderstanding: (s as any).allowImageUnderstanding ?? false,
+    allowDocumentUnderstanding: (s as any).allowDocumentUnderstanding ?? false,
     notes: s.notes,
   };
 }

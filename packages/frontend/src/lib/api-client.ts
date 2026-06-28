@@ -622,3 +622,18 @@ export function askDocument(id: string, question: string) {
     body: JSON.stringify({ question }),
   });
 }
+
+// Batch 13: Re-ingest and delete
+export function reingestDocument(id: string) {
+  return apiFetch<{ data: { documentId: string; jobId: string; status: string; method: string; fileName: string } }>(
+    `/api/documents/${id}/reingest`,
+    { method: "POST" },
+  );
+}
+
+export function deleteDocument(id: string) {
+  return apiFetch<{ data: { id: string; deleted: boolean } }>(
+    `/api/documents/${id}`,
+    { method: "DELETE" },
+  );
+}

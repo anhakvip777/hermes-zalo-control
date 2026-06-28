@@ -1,6 +1,7 @@
 // =============================================================================
 // Zalo Receive — normalize, dedup, anti-loop, save incoming messages
 // =============================================================================
+// Batch 13: Added file/document message type detection for Zalo attachments.
 
 import { prisma } from "../db.js";
 
@@ -23,15 +24,24 @@ export interface NormalizedMessage {
   /** Image attachment info (set when messageType=image). */
   imageUrl?: string;
   imageThumbnailUrl?: string;
+  /** File/document attachment info (set when messageType=file). */
+  fileUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+  fileExtension?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Normalize incoming Zalo message
 // ═══════════════════════════════════════════════════════════════════
 
+/** Document file extensions we support for automated ingestion. */
+const DOCUMENT_EXTENSIONS = new Set([
+  "pdf", "docx", "pptx", "xlsx", "txt", "md", "csv", "html",
+  "png", "jpg", "jpeg", "webp",
+]);
+
 export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessage | null {
-  // zca-js v2 message shape:
-  // { type: ThreadType, threadId: string, data: { content, ... }, isSelf: boolean }
   if (!raw || typeof raw !== "object") return null;
 
   const data = (raw.data ?? raw) as Record<string, unknown>;
@@ -41,10 +51,6 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
 
   if (!threadId) return null;
 
-  // Extract image attachment info for image messages
-  // Zalo sends photo messages with:
-  //   data.type = "chat.photo" (or msgType = "chat.photo")
-  //   data.content = { title, description, href: "https://...", thumb: "https://..." }
   const msgType = String(data.type ?? data.msgType ?? raw.messageType ?? "").toLowerCase();
   const isPhoto = msgType.includes("photo") || msgType.includes("image");
   
@@ -60,10 +66,69 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
     imageUrl = rawContent;
   }
 
-  // Detect image messages by content URL pattern or attachment  
-  const detectedType = isPhoto && imageUrl ? "image" : msgType.includes("photo") || msgType.includes("image") ? "image" : String(data.type ?? raw.messageType ?? "text");
-  // For image messages, use a placeholder instead of the URL as content
-  const displayContent = detectedType === "image" ? "[Ảnh Zalo]" : content;
+  // Batch 13: Detect file/document attachments
+  // Zalo may send files via:
+  // - msgType: "chat.file" / "chat.document" / "chat.attachment"
+  // - data.attach: { href, fileName, fileSize, ... }
+  // - data.content: object with file info
+  const isFile = msgType.includes("file") || msgType.includes("document") || msgType.includes("attach");
+  let fileUrl: string | undefined;
+  let fileName: string | undefined;
+  let fileSize: number | undefined;
+  let fileExtension: string | undefined;
+
+  if (isFile) {
+    // Try structured attachment data
+    const attach = (data.attach ?? data.attachment ?? data.file) as Record<string, unknown> | undefined;
+    if (attach) {
+      fileUrl = typeof attach.href === "string" ? attach.href : typeof attach.url === "string" ? attach.url : undefined;
+      fileName = typeof attach.fileName === "string" ? attach.fileName : typeof attach.name === "string" ? attach.name : undefined;
+      fileSize = typeof attach.fileSize === "number" ? attach.fileSize : typeof attach.size === "number" ? attach.size : undefined;
+    }
+    // Try content as object (alternate format)
+    if (!fileUrl && typeof rawContent === "object" && rawContent !== null) {
+      const c = rawContent as Record<string, unknown>;
+      fileUrl = typeof c.href === "string" ? c.href : typeof c.url === "string" ? c.url : undefined;
+      fileName = typeof c.fileName === "string" ? c.fileName : typeof c.name === "string" ? c.name : undefined;
+      fileSize = typeof c.fileSize === "number" ? c.fileSize : typeof c.size === "number" ? c.size : undefined;
+    }
+    // Try content as URL string (direct file link)
+    if (!fileUrl && typeof rawContent === "string" && rawContent.startsWith("http")) {
+      fileUrl = rawContent;
+    }
+
+    // Extract extension from filename
+    if (fileName) {
+      const dotIdx = fileName.lastIndexOf(".");
+      if (dotIdx > 0) {
+        fileExtension = fileName.slice(dotIdx + 1).toLowerCase();
+      }
+    }
+  }
+
+  // Determine the display type
+  let detectedType: string;
+  if (isPhoto && imageUrl) {
+    detectedType = "image";
+  } else if (isFile && fileUrl) {
+    detectedType = "file";
+  } else if (msgType.includes("photo") || msgType.includes("image")) {
+    detectedType = "image";
+  } else if (msgType.includes("file") || msgType.includes("document")) {
+    detectedType = "file";
+  } else {
+    detectedType = String(data.type ?? raw.messageType ?? "text");
+  }
+
+  // Display content
+  let displayContent: string;
+  if (detectedType === "image") {
+    displayContent = "[Ảnh Zalo]";
+  } else if (detectedType === "file") {
+    displayContent = fileName ? `[File: ${fileName}]` : "[File Zalo]";
+  } else {
+    displayContent = content;
+  }
 
   return {
     zaloMessageId: String(data.messageId ?? data.msgId ?? raw.msgId ?? raw.messageId ?? ""),
@@ -74,17 +139,20 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
     senderName: (data.senderName ?? raw.senderName ?? data.fromName ?? raw.fromName) as string | undefined,
     content: displayContent,
     messageType: detectedType,
-    isSelf: raw.isSelf === true || raw.isSelf === "true" || data.isSelf === true || data.isSelf === "true",
-    isFromBot: raw.isFromBot === true || raw.isFromBot === "true" || data.isFromBot === true || data.isFromBot === "true",
+    isSelf: (raw.isSelf ?? data.isSelf) as boolean | undefined,
+    isFromBot: (data.isFromBot ?? raw.isFromBot) as boolean | undefined,
     mentions: extractMentions(raw, data),
     rawMetadata: sanitizeMetadata(raw),
     imageUrl,
     imageThumbnailUrl,
+    fileUrl,
+    fileName,
+    fileSize,
+    fileExtension,
   };
 }
 
 // M10: Handle numeric ThreadType enum values from zca-js v2
-// ThreadType: { '0': 'User', '1': 'Group', User: 0, Group: 1 }
 function resolveThreadType(rawType: unknown): "user" | "group" {
   if (rawType === undefined || rawType === null) return "group";
   if (typeof rawType === "number") return rawType === 0 ? "user" : "group";
@@ -93,14 +161,11 @@ function resolveThreadType(rawType: unknown): "user" | "group" {
 
 /**
  * Extract mentioned user IDs from raw Zalo event.
- * zca-js v2 provides mentions as an array of { userId, displayName, ... } objects.
- * Returns an array of userId strings, or undefined if no mentions found.
  */
 function extractMentions(
   raw: Record<string, unknown>,
   data: Record<string, unknown>,
 ): string[] | undefined {
-  // Check multiple possible locations for mentions data
   const mentionsRaw =
     data.mentions ?? raw.mentions ?? data.mentionList ?? raw.mentionList;
 
@@ -121,7 +186,7 @@ function extractMentions(
   return ids.length > 0 ? ids : undefined;
 }
 
-// H9: Sanitize raw Zalo metadata — strip potentially sensitive fields
+// H9: Sanitize raw Zalo metadata
 function sanitizeMetadata(raw: Record<string, unknown>): string {
   const safe: Record<string, unknown> = {};
   const ALLOWED_KEYS = new Set([
@@ -162,19 +227,14 @@ function sanitizeDataField(data: Record<string, unknown>): Record<string, unknow
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Generate dedup key (fallback when zaloMessageId is missing)
+// Dedup and save incoming message
 // ═══════════════════════════════════════════════════════════════════
 
 export function dedupKey(msg: NormalizedMessage): string {
   if (msg.zaloMessageId) return `zmid:${msg.zaloMessageId}`;
-  // Fallback: content hash + sender + thread + timestamp approximate
   const hash = simpleHash(`${msg.threadId}|${msg.senderId}|${msg.content}`);
   return `fallback:${msg.threadId}:${msg.senderId}:${hash}`;
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// Dedup and save incoming message
-// ═══════════════════════════════════════════════════════════════════
 
 const recentDedupKeys = new Set<string>();
 const DEDUP_MAX_SIZE = 10000;

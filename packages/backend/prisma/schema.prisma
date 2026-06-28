@@ -176,6 +176,7 @@ model ThreadSetting {
   allowCreateReminder      Boolean  @default(true)
   allowMedia               Boolean  @default(false)
   allowImageUnderstanding  Boolean  @default(false)
+  allowDocumentUnderstanding Boolean @default(false)
   notes                    String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
