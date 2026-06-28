@@ -58,10 +58,55 @@ npm run db:studio        # prisma studio
 - **frontend**: `module: "ESNext"`, `moduleResolution: "bundler"`, `jsx: "preserve"`
 - **base**: No `module`/`moduleResolution` — each package overrides
 
+## Document Ingestion (Batch 12)
+
+**Status**: ✅ PRODUCTION READY (live-tested 2026-06-28)
+
+### Supported Formats
+
+| Format | Method | Status |
+|--------|--------|--------|
+| TXT, MD, CSV | Direct text ingestion | ✅ Stable |
+| PDF (text-based, small/medium) | Docling spawn with `--no-ocr` | ✅ Stable |
+| PDF (scanned/image-only) | Docling + OCR | ❌ Requires RapidOCR torch model |
+
+### Architecture
+
+```
+POST /api/documents/ingest → 202 (queued) → Document Worker (separate process)
+  → TXT/MD/CSV: direct read + chunk (no spawn)
+  → PDF: spawn `docling --no-ocr` with 60s hard timeout + 5s kill grace
+  → Markdown → chunks → completed
+```
+
+### Error Codes
+
+**System errors (CRITICAL)** — backend/worker issue:
+- `DOCLING_TIMEOUT` — Docling process killed after timeout
+- `DOCLING_SPAWN_ERROR` — Failed to start docling process
+- `DOCLING_POSTPROCESS_FAILED` — Chunk/DB write failed after successful conversion
+- `DOCUMENT_NOT_FOUND` — Document record disappeared
+
+**Document errors (MEDIUM)** — document limitation, not system crash:
+- `DOCLING_FAILED` — Docling exit code != 0 (corrupted PDF, missing OCR model, etc.)
+- `DOCLING_NO_OUTPUT` — Docling ran successfully but no markdown (image-only PDF)
+- `PROCESSING_FAILED` — Catch-all for unclassified errors
+
+### Known Limitations
+
+1. **No OCR**: `--no-ocr` flag means scanned/image PDFs will fail with `DOCLING_NO_OUTPUT` or `DOCLING_FAILED`
+2. **No retry**: Failed jobs are final — no automatic retry
+3. **No parallel PDFs**: Worker processes 5 jobs max per poll cycle
+4. **Safe dir only**: Files must be under `DOCUMENT_ALLOWED_BASE_DIR`
+
 ## Key Files
 
 | File                                        | Purpose                                      |
 | ------------------------------------------- | -------------------------------------------- |
+| `packages/backend/src/services/document-ingestion.service.ts` | Docling spawn, chunking, ask document API  |
+| `packages/backend/src/workers/document-worker.ts` | Document worker (separate process, poll loop) |
+| `packages/backend/src/routes/documents.ts`  | Document REST API routes                     |
+| `packages/frontend/src/app/documents/page.tsx` | Document dashboard with error classification |
 | `PLAN.md`                                   | Full architecture, phases, database schema   |
 | `packages/backend/prisma/schema.prisma`     | Database schema                              |
 | `packages/shared/src/schemas/`              | Shared Zod validation                        |
@@ -70,7 +115,7 @@ npm run db:studio        # prisma studio
 
 ## Database Tables
 
-`schedules` → `schedule_executions` → `schedule_revisions` → `schedule_jobs` → `messages` → `zalo_threads` → `agent_tasks` → `audit_logs` → `attendance_sessions` → `attendance_records` → `app_settings`
+`schedules` → `schedule_executions` → `schedule_revisions` → `schedule_jobs` → `messages` → `zalo_threads` → `agent_tasks` → `audit_logs` → `attendance_sessions` → `attendance_records` → `app_settings` → `documents` → `document_ingestion_jobs` → `document_chunks`
 
 ## Phases
 

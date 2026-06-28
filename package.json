@@ -15,6 +15,7 @@
     "dev:backend": "npm run dev -w packages/backend",
     "dev:frontend": "npm run dev -w packages/frontend",
     "dev:worker": "npm run dev:worker -w packages/backend",
+    "worker:documents": "npm run worker:documents -w packages/backend",
     "build": "npm run build -w packages/shared && npm run build -w packages/backend && npm run build -w packages/frontend",
     "typecheck": "npm run typecheck -w packages/shared && npm run typecheck -w packages/backend && npm run typecheck -w packages/frontend",
     "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\"",

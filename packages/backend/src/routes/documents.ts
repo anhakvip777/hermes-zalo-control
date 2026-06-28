@@ -1,5 +1,6 @@
 // =============================================================================
 // Document Routes — admin-only ingestion + query
+// Fix Batch 12.1: ingest returns immediately (202), processing in background
 // =============================================================================
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -7,6 +8,8 @@ import * as docService from "../services/document-ingestion.service.js";
 
 export async function documentRoutes(app: FastifyInstance) {
   // ── POST /api/documents/ingest ────────────────────────────────
+  // Returns 202 Accepted immediately with documentId + jobId.
+  // Processing (Docling spawn or direct text) continues in background.
   app.post("/documents/ingest", async (req: FastifyRequest, reply: FastifyReply) => {
     const body = req.body as Record<string, unknown>;
     const filePath = body.path as string;
@@ -19,8 +22,8 @@ export async function documentRoutes(app: FastifyInstance) {
     }
 
     try {
-      const doc = await docService.ingestDocument(filePath, { source, threadId, messageId });
-      return reply.status(201).send({ data: doc });
+      const result = await docService.ingestDocument(filePath, { source, threadId, messageId });
+      return reply.status(202).send({ data: result });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return reply.status(400).send({ error: "INGEST_FAILED", message });
@@ -42,6 +45,16 @@ export async function documentRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "NOT_FOUND", message: "Document not found" });
     }
     return reply.send({ data: doc });
+  });
+
+  // ── GET /api/documents/:id/jobs — ingestion job history ───────
+  app.get("/documents/:id/jobs", async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const doc = await docService.getDocument(req.params.id);
+    if (!doc) {
+      return reply.status(404).send({ error: "NOT_FOUND", message: "Document not found" });
+    }
+    const jobs = await docService.getDocumentJobs(req.params.id);
+    return reply.send({ data: jobs, total: jobs.length });
   });
 
   // ── GET /api/documents/:id/markdown ───────────────────────────

@@ -122,6 +122,28 @@ export default function DocumentsPage() {
     }
   };
 
+  type ErrorLevel = "critical" | "medium";
+  const classifyError = (errorCode: string | null): { level: ErrorLevel; label: string } => {
+    if (!errorCode) return { level: "medium", label: "Unknown error" };
+    const CRITICAL_CODES = [
+      "DOCLING_TIMEOUT", "DOCLING_SPAWN_ERROR", "DOCLING_POSTPROCESS_FAILED",
+      "DOCUMENT_NOT_FOUND",
+    ];
+    if (CRITICAL_CODES.includes(errorCode)) {
+      return { level: "critical", label: "⚡ System error" };
+    }
+    if (errorCode === "DOCLING_FAILED") {
+      return { level: "medium", label: "📄 Conversion failed" };
+    }
+    if (errorCode === "DOCLING_NO_OUTPUT") {
+      return { level: "medium", label: "📄 No extractable text" };
+    }
+    if (errorCode === "PROCESSING_FAILED") {
+      return { level: "medium", label: "⚠️ Processing error" };
+    }
+    return { level: "medium", label: "⚠️ Other" };
+  };
+
   // ── Render ───────────────────────────────────────────────────
   return (
     <div className="space-y-6">
@@ -199,6 +221,14 @@ export default function DocumentsPage() {
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(doc.status)}`}>
                       {doc.status}
                     </span>
+                    {doc.status === "failed" && doc.errorCode && (
+                      <div className="mt-1 flex flex-col gap-0.5">
+                        <span className={`text-[10px] font-medium ${classifyError(doc.errorCode).level === "critical" ? "text-red-700" : "text-orange-600"}`}>
+                          {classifyError(doc.errorCode).label}
+                        </span>
+                        <code className="text-[10px] text-gray-400">{doc.errorCode}</code>
+                      </div>
+                    )}
                   </td>
                   <td className="p-3 text-xs text-gray-500">{formatBytes(doc.sizeBytes)}</td>
                   <td className="p-3 text-xs text-gray-500 max-w-xs truncate">
@@ -218,6 +248,20 @@ export default function DocumentsPage() {
       {selectedDoc && (
         <div className="p-4 bg-white border rounded-lg space-y-4">
           <h2 className="font-semibold">📋 Document Detail</h2>
+
+          {/* Error info for failed docs */}
+          {(() => {
+            const selected = docs.find(d => d.id === selectedDoc);
+            if (!selected || selected.status !== "failed") return null;
+            const cls = classifyError(selected.errorCode);
+            return (
+              <div className={`p-3 rounded border text-sm ${cls.level === "critical" ? "bg-red-50 border-red-300 text-red-800" : "bg-orange-50 border-orange-300 text-orange-800"}`}>
+                <div className="font-medium">{cls.label}</div>
+                {selected.errorCode && <code className="text-xs block mt-1">{selected.errorCode}</code>}
+                {selected.errorMessage && <div className="text-xs mt-1 opacity-80">{selected.errorMessage}</div>}
+              </div>
+            );
+          })()}
 
           {/* Ask panel */}
           <div className="p-3 bg-yellow-50 border border-yellow-200 rounded">

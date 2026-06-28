@@ -1,16 +1,16 @@
 // =============================================================================
 // Document Ingestion Service — Docling-powered document understanding
 // =============================================================================
+// Fix Batch 12.1: Process isolation — Docling runs as spawned child process
+// with hard timeout. TXT/MD/CSV ingested directly without Docling.
+// API returns documentId/jobId immediately, processing continues in background.
 
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-import { readFile, access, stat, mkdir } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { readFile, access, stat, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename, extname, resolve, normalize, relative, dirname } from "node:path";
+import { basename, extname, resolve, normalize } from "node:path";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
-
-const execAsync = promisify(exec);
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -52,6 +52,20 @@ export interface AskResult {
   chunksUsed: number;
   provider: string;
 }
+
+export interface DocumentJobOutput {
+  id: string;
+  documentId: string;
+  status: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+// ── Extensions that don't need Docling / ML conversion ─────────────
+const DIRECT_TEXT_EXTENSIONS = new Set(["txt", "md", "csv"]);
 
 // ── Blocked path patterns ──────────────────────────────────────────
 
@@ -199,12 +213,42 @@ export async function getDocumentChunks(id: string): Promise<DocumentChunkOutput
   }));
 }
 
-// ── Ingestion pipeline ─────────────────────────────────────────────
+export async function getDocumentJobs(docId: string): Promise<DocumentJobOutput[]> {
+  const jobs = await prisma.documentIngestionJob.findMany({
+    where: { documentId: docId },
+    orderBy: { createdAt: "desc" },
+  });
+  return jobs.map((j) => ({
+    id: j.id,
+    documentId: j.documentId,
+    status: j.status,
+    errorCode: j.errorCode,
+    errorMessage: j.errorMessage,
+    startedAt: j.startedAt?.toISOString() ?? null,
+    finishedAt: j.finishedAt?.toISOString() ?? null,
+    createdAt: j.createdAt.toISOString(),
+  }));
+}
 
+// ── Ingestion pipeline (non-blocking) ──────────────────────────────
+
+export interface IngestResult {
+  documentId: string;
+  jobId: string;
+  status: "queued";
+  method: "direct" | "docling";
+  fileName: string;
+}
+
+/**
+ * Main ingest entry point — validates, creates DB records, and returns immediately.
+ * Processing happens in background (direct for TXT/MD/CSV, spawned Docling for PDF/etc).
+ * NEVER blocks the HTTP request waiting for Docling.
+ */
 export async function ingestDocument(
   filePath: string,
   options?: { source?: string; threadId?: string; messageId?: string },
-): Promise<DocumentOutput> {
+): Promise<IngestResult> {
   const cfg = config.document;
 
   if (!cfg.enabled) {
@@ -240,8 +284,11 @@ export async function ingestDocument(
   const fileBuffer = await readFile(resolved);
   const sha256 = createHash("sha256").update(fileBuffer).digest("hex");
 
-  // 5. Create document record
+  // 5. Determine method
+  const isDirectText = DIRECT_TEXT_EXTENSIONS.has(extension);
   const mimeType = detectMimeType(extension);
+
+  // 6. Create document record
   const doc = await prisma.document.create({
     data: {
       fileName,
@@ -251,143 +298,323 @@ export async function ingestDocument(
       sizeBytes,
       sha256,
       status: "processing",
-      provider: "docling",
+      provider: isDirectText ? "direct" : "docling",
       source: options?.source ?? null,
       threadId: options?.threadId ?? null,
       messageId: options?.messageId ?? null,
     },
   });
 
-  // 6. Create ingestion job
+  // 7. Create ingestion job (status=queued — picked up by document worker)
   const job = await prisma.documentIngestionJob.create({
     data: {
       documentId: doc.id,
-      status: "processing",
-      startedAt: new Date(),
+      status: "queued",
     },
   });
 
-  // 7. Run Docling
+  console.log(`[docling] ingest queued: ${fileName} → ${doc.id} job=${job.id} method=${isDirectText ? "direct" : "docling"}`);
+
+  return {
+    documentId: doc.id,
+    jobId: job.id,
+    status: "queued",
+    method: isDirectText ? "direct" : "docling",
+    fileName,
+  };
+}
+
+// ── Background processing ──────────────────────────────────────────
+
+async function processDocumentBackground(
+  docId: string,
+  jobId: string,
+  resolvedPath: string,
+  fileName: string,
+  extension: string,
+  sizeBytes: number,
+  fileBuffer: Buffer,
+  isDirectText: boolean,
+): Promise<void> {
   try {
-    await mkdir(cfg.processedDir, { recursive: true });
-
-    const doclingBin = cfg.doclingBin;
-    console.log(`[docling] config: enabled=${cfg.enabled} bin=${cfg.doclingBin} baseDir=${cfg.allowedBaseDir} processedDir=${cfg.processedDir}`);
-    const outputFile = `${cfg.processedDir}/${doc.id}.md`;
-
-    console.log(`[docling] running: ${doclingBin} "${resolved}" --to md --output "${cfg.processedDir}"`);
-    const cmd = `${doclingBin} ${resolved} --to md --output ${cfg.processedDir}`;
-    const { stdout: doclingStdout, stderr: doclingStderr } = await execAsync(cmd, { 
-      timeout: 120_000, maxBuffer: 10 * 1024 * 1024,
-      cwd: cfg.processedDir,
-    });
-
-    if (doclingStderr && !doclingStderr.includes("INFO")) {
-      console.warn(`[docling] stderr: ${doclingStderr.slice(0, 200)}`);
+    if (isDirectText) {
+      await processDirectText(docId, jobId, fileName, sizeBytes, fileBuffer);
+    } else {
+      await runDoclingWithSpawn(docId, jobId, resolvedPath, fileName, extension, sizeBytes);
     }
-
-    // Docling outputs <basename>.md (replaces original extension with .md)
-    // For "test.txt" → "test.md", for "doc.md" → "doc.md", for "noext" → "noext.md"
-    const baseName = fileName.includes(".") ? fileName.slice(0, fileName.lastIndexOf(".")) : fileName;
-    const outputName = `${baseName}.md`;
-    const doclingOutput = `${cfg.processedDir}/${outputName}`;
-
-    // Fallback: also try <original>.md in case docling appends
-    const fallbackOutput = `${cfg.processedDir}/${fileName}.md`;
-
-    let markdownContent: string | null = null;
-    let actualOutputPath: string | null = null;
-
-    // Retry up to 3 times with 500ms delay (file may not be flushed immediately)
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        markdownContent = await readFile(doclingOutput, "utf-8");
-        actualOutputPath = doclingOutput;
-        break;
-      } catch {
-        // Try fallback filename
-        if (doclingOutput !== fallbackOutput) {
-          try {
-            markdownContent = await readFile(fallbackOutput, "utf-8");
-            actualOutputPath = fallbackOutput;
-            break;
-          } catch {
-            // both failed, retry after delay
-          }
-        }
-        if (attempt < 2) await new Promise(r => setTimeout(r, 500));
-      }
-    }
-
-    if (!markdownContent) {
-      // Docling might have succeeded but output is in a different location
-      throw new Error("Docling produced no readable markdown output");
-    }
-
-    // 8. Update document record
-    const textPreview = markdownContent.slice(0, 500);
-    await prisma.document.update({
-      where: { id: doc.id },
-      data: {
-        status: "completed",
-        markdownPath: actualOutputPath,
-        textPreview,
-      },
-    });
-
-    // 9. Create chunks
-    const chunks = splitIntoChunks(markdownContent, cfg.chunkSize, cfg.chunkOverlap);
-    for (let i = 0; i < chunks.length; i++) {
-      await prisma.documentChunk.create({
-        data: {
-          documentId: doc.id,
-          chunkIndex: i,
-          heading: chunks[i]!.heading ?? null,
-          text: chunks[i]!.text,
-          tokenEstimate: Math.ceil(chunks[i]!.text.length / 4),
-          metadata: JSON.stringify({
-            source: "docling",
-            charStart: chunks[i]!.charStart,
-            charEnd: chunks[i]!.charEnd,
-          }),
-        },
-      });
-    }
-
-    console.log(`[docling] ingested: ${fileName} → ${doc.id} (${chunks.length} chunks, ${sizeBytes}B)`);
-
-    // 10. Mark job completed
-    await prisma.documentIngestionJob.update({
-      where: { id: job.id },
-      data: { status: "completed", finishedAt: new Date() },
-    });
-
-    const updated = await prisma.document.findUnique({ where: { id: doc.id } });
-    return dbDocToOutput(updated!);
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[docling] ingestion failed for ${fileName}: ${errorMsg}`);
+    console.error(`[docling] processing failed for ${fileName}: ${errorMsg}`);
 
     await prisma.document.update({
-      where: { id: doc.id },
+      where: { id: docId },
       data: {
         status: "failed",
-        errorCode: "DOCLING_FAILED",
+        errorCode: "PROCESSING_FAILED",
         errorMessage: errorMsg.slice(0, 500),
       },
     });
 
     await prisma.documentIngestionJob.update({
-      where: { id: job.id },
+      where: { id: jobId },
       data: {
         status: "failed",
-        errorCode: "DOCLING_FAILED",
+        errorCode: "PROCESSING_FAILED",
         errorMessage: errorMsg.slice(0, 500),
         finishedAt: new Date(),
       },
     });
+  }
+}
 
-    throw err;
+// ── Direct text ingestion (TXT, MD, CSV) ───────────────────────────
+
+export async function processDirectText(
+  docId: string,
+  jobId: string,
+  fileName: string,
+  sizeBytes: number,
+  fileBuffer: Buffer,
+): Promise<void> {
+  const markdownContent = fileBuffer.toString("utf-8");
+  const cfg = config.document;
+
+  // Write markdown copy to processed dir
+  await mkdir(cfg.processedDir, { recursive: true });
+  const outputPath = `${cfg.processedDir}/${docId}.md`;
+  await writeFile(outputPath, markdownContent, "utf-8");
+
+  // Create chunks FIRST (before marking document completed)
+  const chunks = splitIntoChunks(markdownContent, cfg.chunkSize, cfg.chunkOverlap);
+  for (let i = 0; i < chunks.length; i++) {
+    await prisma.documentChunk.create({
+      data: {
+        documentId: docId,
+        chunkIndex: i,
+        heading: chunks[i]!.heading ?? null,
+        text: chunks[i]!.text,
+        tokenEstimate: Math.ceil(chunks[i]!.text.length / 4),
+        metadata: JSON.stringify({
+          source: "direct",
+          charStart: chunks[i]!.charStart,
+          charEnd: chunks[i]!.charEnd,
+        }),
+      },
+    });
+  }
+
+  // Update document (only after chunks succeed)
+  const textPreview = markdownContent.slice(0, 500);
+  await prisma.document.update({
+    where: { id: docId },
+    data: {
+      status: "completed",
+      markdownPath: outputPath,
+      textPreview,
+    },
+  });
+
+  // Mark job completed
+  await prisma.documentIngestionJob.update({
+    where: { id: jobId },
+    data: { status: "completed", finishedAt: new Date() },
+  });
+
+  console.log(`[docling] direct ingest completed: ${fileName} → ${docId} (${chunks.length} chunks, ${sizeBytes}B)`);
+}
+
+// ── Docling spawn (with hard timeout, process isolation) ───────────
+
+export function runDoclingWithSpawn(
+  docId: string,
+  jobId: string,
+  resolvedPath: string,
+  fileName: string,
+  extension: string,
+  sizeBytes: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cfg = config.document;
+    const doclingBin = cfg.doclingBin;
+    const timeoutMs = cfg.doclingTimeoutMs;
+    const killGraceMs = cfg.doclingKillGraceMs;
+    const maxOutputBytes = cfg.doclingMaxOutputBytes;
+
+    console.log(`[docling] spawning: ${doclingBin} "${resolvedPath}" --to md --output "${cfg.processedDir}" (timeout=${timeoutMs}ms)`);
+
+    let child: ChildProcess;
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    let killed = false;
+
+    const timeoutId = setTimeout(() => {
+      console.warn(`[docling] timeout after ${timeoutMs}ms, killing process tree for ${docId}`);
+      killed = true;
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGTERM"); } catch { /* already dead */ }
+      }
+      child.kill("SIGTERM");
+
+      // Grace period then SIGKILL
+      setTimeout(() => {
+        if (child.exitCode === null) {
+          console.warn(`[docling] SIGTERM grace expired, sending SIGKILL for ${docId}`);
+          if (child.pid) {
+            try { process.kill(-child.pid, "SIGKILL"); } catch { /* already dead */ }
+          }
+          child.kill("SIGKILL");
+        }
+      }, killGraceMs);
+    }, timeoutMs);
+
+    try {
+      child = spawn(doclingBin, [resolvedPath, "--to", "md", "--output", cfg.processedDir, "--no-ocr"], {
+        cwd: cfg.processedDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true, // create new process group for process.kill(-pid)
+      });
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      return reject(new Error(`Failed to spawn docling: ${(err as Error).message}`));
+    }
+
+    child.stdout?.on("data", (data: Buffer) => {
+      const chunk = data.toString();
+      if (stdoutBuf.length < maxOutputBytes) {
+        stdoutBuf += chunk;
+      }
+    });
+
+    child.stderr?.on("data", (data: Buffer) => {
+      const chunk = data.toString();
+      if (stderrBuf.length < maxOutputBytes) {
+        stderrBuf += chunk;
+      }
+    });
+
+    child.on("error", async (err: Error) => {
+      clearTimeout(timeoutId);
+      await failJob(docId, jobId, fileName, "DOCLING_SPAWN_ERROR", err.message);
+      reject(err);
+    });
+
+    child.on("close", async (code: number | null, signal: string | null) => {
+      clearTimeout(timeoutId);
+
+      if (killed) {
+        await failJob(docId, jobId, fileName, "DOCLING_TIMEOUT", `Docling killed after ${timeoutMs}ms timeout`);
+        return reject(new Error("Docling timed out"));
+      }
+
+      if (code !== 0) {
+        const errMsg = `Docling exit code ${code}${signal ? ` signal ${signal}` : ""}. stderr: ${stderrBuf.slice(0, 200)}`;
+        await failJob(docId, jobId, fileName, "DOCLING_FAILED", errMsg);
+        return reject(new Error(errMsg));
+      }
+
+      // Success — read output
+      try {
+        const baseName = fileName.includes(".") ? fileName.slice(0, fileName.lastIndexOf(".")) : fileName;
+        const outputName = `${baseName}.md`;
+        const doclingOutput = `${cfg.processedDir}/${outputName}`;
+        const fallbackOutput = `${cfg.processedDir}/${fileName}.md`;
+
+        let markdownContent: string | null = null;
+        let actualOutputPath: string | null = null;
+
+        // Retry up to 3 times with delay
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            markdownContent = await readFile(doclingOutput, "utf-8");
+            actualOutputPath = doclingOutput;
+            break;
+          } catch {
+            if (doclingOutput !== fallbackOutput) {
+              try {
+                markdownContent = await readFile(fallbackOutput, "utf-8");
+                actualOutputPath = fallbackOutput;
+                break;
+              } catch { /* continue */ }
+            }
+            if (attempt < 2) await new Promise(r => setTimeout(r, 500));
+          }
+        }
+
+        if (!markdownContent) {
+          await failJob(docId, jobId, fileName, "DOCLING_NO_OUTPUT", "Docling ran successfully but produced no readable markdown");
+          return reject(new Error("No markdown output"));
+        }
+
+        // Update document
+        const textPreview = markdownContent.slice(0, 500);
+        await prisma.document.update({
+          where: { id: docId },
+          data: { status: "completed", markdownPath: actualOutputPath, textPreview },
+        });
+
+        // Create chunks
+        const chunks = splitIntoChunks(markdownContent, cfg.chunkSize, cfg.chunkOverlap);
+        for (let i = 0; i < chunks.length; i++) {
+          await prisma.documentChunk.create({
+            data: {
+              documentId: docId,
+              chunkIndex: i,
+              heading: chunks[i]!.heading ?? null,
+              text: chunks[i]!.text,
+              tokenEstimate: Math.ceil(chunks[i]!.text.length / 4),
+              metadata: JSON.stringify({
+                source: "docling",
+                charStart: chunks[i]!.charStart,
+                charEnd: chunks[i]!.charEnd,
+              }),
+            },
+          });
+        }
+
+        await prisma.documentIngestionJob.update({
+          where: { id: jobId },
+          data: { status: "completed", finishedAt: new Date() },
+        });
+
+        console.log(`[docling] spawn completed: ${fileName} → ${docId} (${chunks.length} chunks, ${sizeBytes}B)`);
+        resolve();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await failJob(docId, jobId, fileName, "DOCLING_POSTPROCESS_FAILED", msg);
+        reject(err instanceof Error ? err : new Error(msg));
+      }
+    });
+  });
+}
+
+async function failJob(
+  docId: string,
+  jobId: string,
+  fileName: string,
+  errorCode: string,
+  errorMessage: string,
+): Promise<void> {
+  console.error(`[docling] job failed for ${fileName}: ${errorCode} — ${errorMessage}`);
+  try {
+    await prisma.document.update({
+      where: { id: docId },
+      data: {
+        status: "failed",
+        errorCode,
+        errorMessage: errorMessage.slice(0, 500),
+      },
+    });
+    await prisma.documentIngestionJob.update({
+      where: { id: jobId },
+      data: {
+        status: "failed",
+        errorCode,
+        errorMessage: errorMessage.slice(0, 500),
+        finishedAt: new Date(),
+      },
+    });
+  } catch (dbErr: unknown) {
+    console.error(`[docling] failed to update DB for ${docId}: ${(dbErr as Error).message}`);
   }
 }
 
@@ -432,7 +659,9 @@ function splitIntoChunks(text: string, chunkSize: number, overlap: number): Chun
       charEnd: pos + chunkText.length,
     });
 
-    pos = pos + chunkText.length - overlap;
+    const advance = chunkText.length - overlap;
+    if (advance <= 0) break; // Prevent infinite loop for small texts
+    pos = pos + advance;
     index++;
   }
 
@@ -506,7 +735,8 @@ export async function askDocument(
   // 4. Call Hermes CLI for answer
   try {
     const { exec } = await import("node:child_process");
-    const execAsync2 = promisify(exec);
+    const { promisify } = await import("node:util");
+    const execAsync = promisify(exec);
 
     const prompt = `Bạn là trợ lý đọc tài liệu. Chỉ trả lời dựa trên nội dung tài liệu bên dưới. Nếu tài liệu không có thông tin, nói "Tài liệu không đề cập đến thông tin này." Trả lời ngắn gọn, bằng tiếng Việt.
 
@@ -517,7 +747,7 @@ CÂU HỎI: ${question}`;
 
     const hermesBin = process.env.HERMES_CLI_PATH ?? "hermes";
     const hermesCmd = `${hermesBin} chat -q "${prompt.replace(/"/g, '\\"')}" -Q`;
-    const { stdout } = await execAsync2(hermesCmd, { timeout: 60_000, maxBuffer: 50 * 1024 });
+    const { stdout } = await execAsync(hermesCmd, { timeout: 60_000, maxBuffer: 50 * 1024 });
 
     const answer = stdout.trim() || "Không thể tạo câu trả lời.";
 

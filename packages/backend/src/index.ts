@@ -76,3 +76,13 @@ async function main() {
 }
 
 main();
+
+// ── Global unhandled error handlers ──────────────────────────────────
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[UNHANDLED_REJECTION]", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT_EXCEPTION]", err);
+  setTimeout(() => process.exit(1), 1000);
+});

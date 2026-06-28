@@ -6,17 +6,31 @@
 process.env.DOCUMENT_INGEST_ENABLED = "true";
 process.env.DOCUMENT_DOCLING_BIN = process.env.HOME + "/venvs/docling/bin/docling";
 
-import { ingestDocument, askDocument } from "../services/document-ingestion.service.js";
+import { ingestDocument, getDocument, askDocument } from "../services/document-ingestion.service.js";
 
 async function main() {
   const filePath = "/tmp/hermes-media/documents/test.md";
 
   console.log("[test] Ingesting:", filePath);
   try {
-    const doc = await ingestDocument(filePath, { source: "manual" });
-    console.log("[test] Ingested! id:", doc.id, "status:", doc.status, "preview:", doc.textPreview?.slice(0, 100));
+    const ingest = await ingestDocument(filePath, { source: "manual" });
+    console.log("[test] Ingested! documentId:", ingest.documentId, "jobId:", ingest.jobId, "status:", ingest.status);
 
-    await new Promise(r => setTimeout(r, 300));
+    // Wait for worker to process
+    console.log("[test] Waiting for worker...");
+    await new Promise(r => setTimeout(r, 3000));
+
+    const doc = await getDocument(ingest.documentId);
+    if (!doc) {
+      console.error("[test] Document not found after ingest");
+      return;
+    }
+    console.log("[test] Document status:", doc.status, "preview:", doc.textPreview?.slice(0, 100));
+
+    if (doc.status !== "completed") {
+      console.error("[test] Document not completed, status:", doc.status);
+      return;
+    }
 
     console.log("\n[test] Asking: Lịch học lúc mấy giờ?");
     const result = await askDocument(doc.id, "Lịch học lúc mấy giờ?");
