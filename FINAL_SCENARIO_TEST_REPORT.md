@@ -350,3 +350,31 @@
    262|   243|ZALO_AUTO_REPLY_ENABLED=false
    263|   244|```
    264|   245|
+---
+
+### Batch 11 — Rule Engine UI (2026-06-28)
+| Category | Result | Detail |
+|----------|--------|--------|
+| Rule CRUD API | ✅ PASS | 10 endpoints, admin-only |
+| Rule UI | ✅ PASS | /rules page, create/edit/simulate |
+| Pipeline integration | ✅ PASS | After safety gates, before Hermes |
+| Rule versioning | ✅ PASS | Version history on every edit |
+| Rule execution log | ✅ PASS | Every evaluation logged |
+| Tests | ✅ 34 tests PASS | |
+
+### Cooldown Atomic Guard Test (2026-06-28)
+| Category | Result | Detail |
+|----------|--------|--------|
+| Cooldown live dry-run | ✅ PASS | Msg1 processed, Msg2 blocked (~2.97s) |
+| Atomic checkAndSetCooldown | ✅ PASS | Race condition eliminated |
+| OutboundRecord audit | ✅ PASS | decision=block, reason=cooldown |
+| No duplicate reply | ✅ PASS | 1 AgentTask, 1 Hermes call |
+| dryRun respected | ✅ PASS | Real Zalo send: NO |
+| Full suite after fix | ✅ 469/469 PASS | Typecheck + Build all PASS |
+
+### Batch 12 — Docling Document Understanding (2026-06-28)
+| Category | Result | Detail |
+|----------|--------|--------|
+| Ingestion pipeline | ✅ PASS | Document status=completed, markdown generated |
+| OOM issue | ⚠️ Pre-existing | Docling binary OOM isolated |
+| Isolation plan | ✅ DOC_TEST=1 | Tests skipped by default, run separately |

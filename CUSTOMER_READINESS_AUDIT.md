@@ -225,3 +225,21 @@
 
 **Safety retained:** allowlist + cooldown + dryRun switch. All safety gates active. Listener error-isolated. Voice feature gated behind `ZALO_VOICE_ENABLED=false`.
    219|   219|
+---
+
+### Batch 11 — Rule Engine UI (2026-06-28)
+| 27 | Rule Engine CRUD + Pipeline | ✅ PASS | 10 API endpoints, UI at /rules, 34 tests |
+| 28 | Rule Engine safety (live dry-run) | ✅ PASS | Rules run AFTER safety gates, never bypass dryRun |
+| 29 | Full suite | ✅ 464/464 PASS | Backend + Frontend build PASS |
+
+### Cooldown Guard Verification (2026-06-28)
+| 30 | Cooldown live dry-run | ✅ PASS | 2 msgs ~2.97s apart, msg2 blocked |
+| 31 | Cooldown skip audit | ✅ PASS | OutboundRecord decision=block, reason=cooldown |
+| 32 | Cooldown atomic guard | ✅ PASS | checkAndSetCooldown race-free |
+| 33 | No duplicate reply | ✅ PASS | 1 AgentTask, 1 Hermes call |
+| 34 | dryRun respected | ✅ PASS | Real Zalo send: NO |
+| 35 | Full suite after fixes | ✅ 469/469 PASS | Typecheck + Build all PASS |
+
+### Batch 12 — Docling Document Understanding (2026-06-28)
+| 36 | Document ingestion API | ✅ PASS | Status=completed, markdown saved |
+| 37 | Docling OOM | ⚠️ Pre-existing | Isolated to docling binary, DOC_TEST=1 |

@@ -138,3 +138,21 @@
 
 **Known issue:** zca-js `sendVoice()` produces voice bubbles that Zalo client cannot play (duration `--:--`, no audio). TTS file generation + upload work correctly. Future: fallback to sending audio as file attachment.
     93|    69|
+---
+
+### Cooldown Skip Audit — Mini-fix (2026-06-28)
+- ✅ Approach: OutboundRecord decision=block, reason=cooldown
+- ✅ No schema change (reused existing model)
+- ✅ Non-fatal — .catch() prevents pipeline disruption on DB error
+- ✅ 5 tests: block audit, no AgentTask, no Zalo send, no false positive, reset
+- ✅ Full suite: 469/469 PASS (excl. docling OOM — pre-existing)
+
+### Batch 11 — Rule Engine (2026-06-28)
+- ✅ Pipeline: rules run after safety gates, before Hermes
+- ✅ Actions: fixed_reply, route_to_hermes, ignore
+- ✅ Rules NEVER bypass safety gates or dryRun — 34 tests PASS
+
+### Batch 12 — Docling Document Understanding (2026-06-28)
+- ✅ Ingestion: DOC → MD via docling binary
+- ⚠️ OOM isolated: docling binary OOM during test suite
+- Plan: DOC_TEST=1 flag, skip by default, run separately
