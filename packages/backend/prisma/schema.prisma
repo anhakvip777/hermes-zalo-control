@@ -438,6 +438,7 @@ model Document {
   id            String   @id @default(cuid())
   fileName      String
   originalPath  String
+  safePath      String   @default("")
   mimeType      String?
   extension     String
   sizeBytes     Int
