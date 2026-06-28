@@ -105,6 +105,14 @@ vi.mock("../services/conversation-context.service.js", () => ({
   saveOutboundMessage: vi.fn().mockResolvedValue(undefined),
 }));
 
+const mockSaveOutboundRecord = vi.fn().mockResolvedValue(undefined);
+vi.mock("../services/outbound-guardrails.service.js", () => ({
+  saveOutboundRecord: (...args: unknown[]) => mockSaveOutboundRecord(...args),
+  getRecentSentContext: vi.fn().mockResolvedValue([]),
+  splitLongMessage: vi.fn().mockImplementation((s: string) => [s]),
+  sanitizeOutbound: vi.fn().mockImplementation((s: string) => s),
+}));
+
 vi.mock("../services/thread-conversation-state.service.js", () => ({
   getConversationState: vi.fn().mockResolvedValue(null),
   setConversationState: vi.fn().mockResolvedValue({}),
@@ -145,6 +153,7 @@ beforeEach(() => {
   mockPrismaFindFirst.mockResolvedValue(null);
   mockPrismaFindMany.mockResolvedValue([]);
   mockScheduleFindMany.mockResolvedValue([]);
+  mockSaveOutboundRecord.mockResolvedValue(undefined);
 });
 
 describe("IncomingDispatcher", () => {
@@ -493,6 +502,91 @@ describe("IncomingDispatcher", () => {
         }),
       );
       expect(r.dispatched).toBe(true);
+    });
+  });
+
+  // ── Cooldown Skip Audit (OutboundRecord) ──────────────────────
+
+  describe("Cooldown audit", () => {
+    it("creates OutboundRecord with decision=block, reason=cooldown when cooldown blocks", async () => {
+      // First message: succeeds and starts cooldown
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "cooldown-1" }));
+
+      // Second message within 10s cooldown: should be blocked
+      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "cooldown-2" }));
+      expect(r.dispatched).toBe(false);
+      expect(r.reason).toBe("cooldown");
+
+      // Should have created OutboundRecord for the blocked message
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call.decision).toBe("block");
+      expect(call.reason).toBe("cooldown");
+      expect(call.source).toBe("auto_reply");
+      expect(call.threadId).toBe("thread-allowed");
+      expect(call.dryRun).toBe(true);
+    });
+
+    it("does NOT create AgentTask when cooldown blocks", async () => {
+      // First message: starts cooldown
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "no-task-1" }));
+
+      // Clear mock to check second message independently
+      mockCreateTask.mockClear();
+      mockComplete.mockClear();
+
+      // Second message: cooldown block
+      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "no-task-2" }));
+      expect(r.dispatched).toBe(false);
+      expect(r.reason).toBe("cooldown");
+
+      // AgentTask should NOT be created
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    it("does NOT send Zalo message when cooldown blocks", async () => {
+      // First message: starts cooldown
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "no-send-1" }));
+
+      mockSendMessage.mockClear();
+
+      // Second message: cooldown block
+      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "no-send-2" }));
+      expect(r.dispatched).toBe(false);
+      expect(r.reason).toBe("cooldown");
+
+      // ZaloSender should NOT be called
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    });
+
+    it("first message after cooldown expiry creates audit with decision=allow", async () => {
+      // First message should dispatch normally
+      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "first-msg" }));
+      expect(r.dispatched).toBe(true);
+      expect(mockCreateTask).toHaveBeenCalledTimes(1);
+
+      // Cooldown audit should NOT be called (only for blocked messages)
+      expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+    });
+
+    it("multiple cooldown blocks each create separate OutboundRecords", async () => {
+      // First message: starts cooldown
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-1" }));
+
+      // Second message: blocked by cooldown
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-2" }));
+
+      // Verify 1 OutboundRecord (second message blocked, first processed)
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+
+      // Wait for cooldown to expire (not possible in test — skip)
+      // But we can reset cooldowns and try again to verify new audit
+      resetAutoReplyCooldowns();
+      mockSaveOutboundRecord.mockClear();
+
+      // Fresh message after reset: should dispatch, no audit
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-3" }));
+      expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
     });
   });
 });

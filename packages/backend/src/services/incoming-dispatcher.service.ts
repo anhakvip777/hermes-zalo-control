@@ -22,6 +22,7 @@ import {
 import type { NormalizedMessage } from "./zalo-receive.js";
 import type { ConversationState } from "./thread-conversation-state.service.js";
 import { saveOutboundMessage } from "./conversation-context.service.js";
+import { saveOutboundRecord } from "./outbound-guardrails.service.js";
 
 // ── Cooldown: in-memory per-thread ──────────────────────────────────
 const lastReplyAt = new Map<string, number>();
@@ -612,6 +613,23 @@ export async function handleIncomingMessage(
 
   if (!safe.allowed) {
     console.log(`[dispatcher] skip: ${safe.reason} (thread=${msg.threadId})`);
+
+    // ── Cooldown audit: record block decision for visibility ──
+    if (safe.reason === "cooldown") {
+      saveOutboundRecord({
+        threadId: msg.threadId,
+        threadType: (msg.threadType as "user" | "group") || "user",
+        content: msg.content?.slice(0, 500) ?? "",
+        sentMessageId: "",
+        source: "auto_reply",
+        dryRun: getCurrentEffectiveDryRun(),
+        decision: "block",
+        reason: "cooldown",
+      }).catch(() => {
+        // Non-fatal — audit best-effort
+      });
+    }
+
     return { dispatched: false, reason: safe.reason };
   }
 
