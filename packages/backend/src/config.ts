@@ -139,6 +139,15 @@ export const config = {
     chunkOverlap: parseInt(process.env.DOCUMENT_CHUNK_OVERLAP ?? "150", 10),
   },
 
+  // Batch 14: Message batching/debounce
+  messageBatching: {
+    enabled: process.env.MESSAGE_BATCHING_ENABLED === "true",
+    windowMs: parseInt(process.env.MESSAGE_BATCHING_WINDOW_MS ?? "4000", 10),
+    maxMessages: parseInt(process.env.MESSAGE_BATCHING_MAX_MESSAGES ?? "5", 10),
+    maxChars: parseInt(process.env.MESSAGE_BATCHING_MAX_CHARS ?? "3000", 10),
+    threadTypes: (process.env.MESSAGE_BATCHING_THREAD_TYPES ?? "user").split(",").map(s => s.trim()),
+  },
+
   logLevel: process.env.LOG_LEVEL ?? "info",
 } as const;
 

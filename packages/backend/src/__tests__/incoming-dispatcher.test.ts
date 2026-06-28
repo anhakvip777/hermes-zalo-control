@@ -23,6 +23,9 @@ vi.mock("../config.js", () => ({
       minConfidence: 0.5,
     },
     zalo: { dryRun: false },
+    messageBatching: { enabled: false, windowMs: 4000, maxMessages: 5, maxChars: 3000, threadTypes: ["user"] },
+    document: { enabled: false, allowedBaseDir: "/tmp/test", processedDir: "/tmp/test/processed", maxSizeMB: 50, allowedExtensions: ["pdf", "txt"], doclingBin: "/bin/true", doclingTimeoutMs: 60000, doclingKillGraceMs: 5000, doclingMaxOutputBytes: 1048576, chunkSize: 1200, chunkOverlap: 150 },
+    vision: { enabled: false },
   },
 }));
 

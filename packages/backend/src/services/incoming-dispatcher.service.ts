@@ -603,6 +603,89 @@ async function hasScheduleEvidence(threadId: string): Promise<boolean> {
   }
 }
 
+// ── Batch Processing ────────────────────────────────────────────────
+
+/**
+ * Process a ready batch: claim it, build synthetic message from combined content,
+ * and run through the full pipeline (rules, reminders, Hermes).
+ */
+async function processBatchNow(
+  batchId: string,
+  threadId: string,
+  threadType: "user" | "group",
+): Promise<void> {
+  const { claimBatch, getBatch, completeBatch } = await import("./message-batch.service.js");
+
+  const claimed = await claimBatch(batchId);
+  if (!claimed) {
+    console.log(`[batch] batch ${batchId.slice(0, 8)} already claimed by another worker`);
+    return;
+  }
+
+  const batch = await getBatch(batchId);
+  if (!batch || !batch.combinedText) {
+    console.error(`[batch] batch ${batchId.slice(0, 8)} not found or has no combined text`);
+    return;
+  }
+
+  console.log(`[batch] processing batch ${batchId.slice(0, 8)}: ${batch.messageCount} msgs, ${batch.totalChars} chars, thread=${threadId}`);
+
+  // Build synthetic NormalizedMessage from combined batch text
+  const messageIds: string[] = JSON.parse(batch.messageIds);
+  const syntheticMsg: NormalizedMessage = {
+    zaloMessageId: messageIds[messageIds.length - 1] ?? null, // Use last message ID for reply threading
+    threadId,
+    threadType,
+    senderId: "",  // Will be resolved by dispatcher from last message
+    content: batch.combinedText,
+    messageType: "text",
+    rawMetadata: JSON.stringify({ source: "message_batch", batchId, messageIds }),
+    mentions: undefined,
+  };
+
+  // Update AgentTask metadata to include batch info
+  const batchMeta = {
+    source: "message_batch",
+    batchId,
+    messageCount: batch.messageCount,
+    messageIds,
+    combinedTextPreview: batch.combinedText.slice(0, 200),
+  };
+
+  try {
+    // Reset cooldown so the synthetic batch message isn't blocked
+    // (cooldown was set when the batch became ready)
+    lastReplyAt.delete(threadId);
+
+    // Run through the standard pipeline
+    const result = await handleIncomingMessage(syntheticMsg);
+
+    // Complete the batch
+    await completeBatch(batchId, {
+      dispatched: result.dispatched,
+      reason: result.reason,
+      messageCount: batch.messageCount,
+      totalChars: batch.totalChars,
+    });
+
+    console.log(
+      `[batch] batch ${batchId.slice(0, 8)} processed: ` +
+      `dispatched=${result.dispatched} reason=${result.reason ?? "none"}`,
+    );
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[batch] batch ${batchId.slice(0, 8)} processing error: ${errorMsg}`);
+
+    await completeBatch(batchId, {
+      dispatched: false,
+      reason: "batch_processing_error",
+      error: errorMsg.slice(0, 500),
+      messageCount: batch.messageCount,
+      totalChars: batch.totalChars,
+    });
+  }
+}
+
 // ── Dispatcher ──────────────────────────────────────────────────────
 
 export async function handleIncomingMessage(
@@ -664,6 +747,54 @@ export async function handleIncomingMessage(
     },
     messageId: msg.zaloMessageId ?? undefined,
   });
+
+  // ── Batch 14: Message Batching / Debounce ──────────────────
+  // If batching is enabled and this is a text DM, add to batch
+  // and return early. The batch worker will process later.
+  // Skip if this is a synthetic message from batch processing itself.
+  if (config.messageBatching.enabled && msg.messageType === "text" && !msg.rawMetadata?.includes("message_batch")) {
+    try {
+      const { addToBatch } = await import("./message-batch.service.js");
+      const batchResult = await addToBatch(msg);
+      if (batchResult) {
+        // Message was added to a batch — skip individual processing
+        await agentTaskService.markAgentTaskCompleted(task.id, {
+          skipped: true,
+          reason: "added_to_batch",
+          batchId: batchResult.batchId,
+          batchMessageCount: batchResult.messageCount,
+          batchIsNew: batchResult.isNew,
+          batchIsReady: batchResult.isReady,
+          dryRun: getCurrentEffectiveDryRun(),
+        });
+
+        // If batch became ready due to limits, set cooldown to prevent
+        // immediate next message from also being processed individually
+        if (batchResult.isReady) {
+          setCooldown(msg.threadId);
+        }
+
+        console.log(
+          `[dispatcher] message added to batch ${batchResult.batchId.slice(0, 8)} ` +
+          `(${batchResult.messageCount}/${config.messageBatching.maxMessages} msgs, ` +
+          `${batchResult.totalChars}/${config.messageBatching.maxChars} chars) ` +
+          `ready=${batchResult.isReady} thread=${msg.threadId}`,
+        );
+
+        // If batch is ready (limits hit), process immediately
+        if (batchResult.isReady) {
+          processBatchNow(batchResult.batchId, msg.threadId, msg.threadType).catch((err) => {
+            console.error(`[dispatcher] batch immediate processing error: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+
+        return { dispatched: false, reason: "batched" };
+      }
+    } catch (batchErr: unknown) {
+      // Batch error is non-fatal — fall through to normal pipeline
+      console.error(`[dispatcher] batch error, falling through to normal pipeline: ${batchErr instanceof Error ? batchErr.message : String(batchErr)}`);
+    }
+  }
 
   // ── Image Understanding Pipeline ─────────────────────────
   if (msg.messageType === "image" && msg.imageUrl) {

@@ -522,3 +522,29 @@ model SystemAlert {
   @@index([status])
   @@index([sentAt])
 }
+
+// =============================================================================
+// Message Batching — Batch 14: debounce messages into combined processing
+// =============================================================================
+
+model MessageBatch {
+  id            String    @id @default(cuid())
+  threadId      String
+  threadType    String    @default("user") // user | group
+  status        String    @default("collecting") // collecting | ready | processing | completed | cancelled
+  messageIds    String    // JSON array of zaloMessageId strings
+  messageCount  Int       @default(0)
+  combinedText  String?   // combined message text built from individual messages
+  totalChars    Int       @default(0)
+  batchIndex    Int       @default(0) // auto-increment per thread
+  dueAt         DateTime  // when this batch is due for processing
+  processedAt   DateTime?
+  agentTaskId   String?
+  result        String?   // JSON
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([threadId, status])
+  @@index([status, dueAt])
+  @@index([createdAt])
+}
