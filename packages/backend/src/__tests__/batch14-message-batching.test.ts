@@ -275,3 +275,75 @@ describe("Message Batching — Service", () => {
     expect(parsedResult.dispatched).toBe(true);
   });
 });
+
+// =============================================================================
+// Batch 14.1 — Reminder Parser with Batched Multi-line Content
+// =============================================================================
+
+import {
+  detectCreateReminderIntent,
+  parseReminderFromMessage,
+} from "../services/incoming-dispatcher.service.js";
+
+describe("Batch 14.1 — Reminder Parser (Multi-line Batch)", () => {
+  it("detectCreateReminderIntent: single-line 'nhắc mình đi lễ Phật lúc 19h'", () => {
+    const result = detectCreateReminderIntent("Nhắc mình đi lễ Phật lúc 19h");
+    expect(result).toBe(true);
+  });
+
+  it("detectCreateReminderIntent: multi-line normalized", () => {
+    const content = "Nhắc mình\nĐi Lễ Phật\nLúc 19h";
+    const result = detectCreateReminderIntent(content);
+    expect(result).toBe(true);
+  });
+
+  it("detectCreateReminderIntent: no target pronoun", () => {
+    const result = detectCreateReminderIntent("nhắc đi lễ Phật lúc 7h sáng");
+    expect(result).toBe(true);
+  });
+
+  it("parseReminderFromMessage: single-line extracts content + time", () => {
+    const parsed = parseReminderFromMessage("Nhắc mình đi lễ Phật lúc 19h");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.content.toLowerCase()).toBe("đi lễ phật");
+    expect(parsed!.scheduledAt.getHours()).toBe(19);
+  });
+
+  it("parseReminderFromMessage: multi-line normalized extracts content + time", () => {
+    const content = "Nhắc mình\nĐi Lễ Phật\nLúc 19h";
+    const parsed = parseReminderFromMessage(content);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.content.toLowerCase()).toBe("đi lễ phật");
+    expect(parsed!.scheduledAt.getHours()).toBe(19);
+  });
+
+  it("parseReminderFromMessage: no target, with period", () => {
+    const parsed = parseReminderFromMessage("nhắc đi chợ lúc 7h sáng");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.content.toLowerCase()).toBe("đi chợ");
+    expect(parsed!.scheduledAt.getHours()).toBe(7);
+    expect(parsed!.timeDescription).toContain("7:00");
+    expect(parsed!.timeDescription).toContain("sáng");
+  });
+
+  it("parseReminderFromMessage: 'Nhắc mình Đi Lễ Phật Lúc 19h' (batched+normalized)", () => {
+    const parsed = parseReminderFromMessage("Nhắc mình Đi Lễ Phật Lúc 19h");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.content).toBe("Đi Lễ Phật");
+    expect(parsed!.scheduledAt.getHours()).toBe(19);
+  });
+
+  // Regression: existing "X phút nữa" patterns still work
+  it("parseReminderFromMessage: existing 'X phút nữa' pattern still works", () => {
+    const parsed = parseReminderFromMessage("nhắc mình 30 phút nữa đi họp");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.content).toContain("đi họp");
+  });
+
+  // Guard still blocks unsupported claim without DB evidence
+  it("detectCreateReminderIntent: does NOT match query/read intents", () => {
+    expect(detectCreateReminderIntent("có lịch gì hôm nay")).toBe(false);
+    expect(detectCreateReminderIntent("xem lịch nhắc")).toBe(false);
+    expect(detectCreateReminderIntent("hello")).toBe(false);
+  });
+});

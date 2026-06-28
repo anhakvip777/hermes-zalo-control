@@ -113,7 +113,15 @@ function safetyCheck(msg: NormalizedMessage, selfUserId?: string | null): Safety
     return { allowed: false, reason: "non_text_message" };
   }
 
-  if (!checkAndSetCooldown(msg.threadId)) {
+  // ── Batch 14.1: If batching is enabled for this thread type, skip cooldown here.
+  // The batching interceptor (line ~754) manages cooldown: it sets cooldown when the
+  // batch becomes ready (limits hit), not on individual messages in a collecting batch.
+  // This prevents cooldown from blocking messages 2..N before they reach the batch.
+  const batchingActive = config.messageBatching.enabled &&
+    msg.messageType === "text" &&
+    config.messageBatching.threadTypes.includes(msg.threadType ?? "user");
+
+  if (!batchingActive && !checkAndSetCooldown(msg.threadId)) {
     return { allowed: false, reason: "cooldown" };
   }
 
@@ -228,13 +236,15 @@ function checkTextMention(content: string, selfUserId: string): boolean {
 // ── Create-reminder intent detection + parsing ──────────────────
 
 /** Detect if user wants to CREATE a reminder (not just query existing ones). */
-function detectCreateReminderIntent(content: string): boolean {
+export function detectCreateReminderIntent(content: string): boolean {
   const patterns = [
     /nhắc\s+(mình|tôi|tui|em|anh|chị)\s+\d+\s*(p|phút|giây|giờ|h|tiếng|ngày)\s*(nữa|later)/i,
     /\d+\s*(p|phút|giây|giờ|h|tiếng|ngày)\s*(nữa|later)\s+nhắc/i,
     /nhắc\s+(mình|tôi|tui|em|anh|chị)\s+lúc\s+\d+/i,
     /nhắc\s+(mình|tôi|tui)\s+về\s+\w/i,
     /(nhắn|nhắc|báo)\s+(mình|tôi|tui)\s+(sau|lúc|vào)/i,
+    // Batch 14.1: "nhắc [target] <content> lúc <time>" — multi-word content
+    /\bnhắc\s+(?:mình|tôi|tui|em|anh|chị)?\s*.+?\s+lúc\s+\d+/iu,
   ];
   return patterns.some((p) => p.test(content));
 }
@@ -245,13 +255,93 @@ interface ParsedReminder {
   timeDescription: string;
 }
 
+/**
+ * Batch 14.1: Parse "lúc <time>" patterns.
+ * Supports: "19h", "7h sáng", "19:00", "7h tối", "19h tối nay", etc.
+ */
+function parseLúcTime(
+  timeStr: string,
+  now: Date,
+): { scheduledAt: Date; timeDescription: string } | null {
+  const lower = timeStr.toLowerCase().trim();
+
+  // Extract hour + optional minute
+  const match = lower.match(/(\d{1,2})(?:h|:(\d{2}))?/);
+  if (!match) return null;
+
+  let hour = parseInt(match[1]!, 10);
+  const minute = match[2] ? parseInt(match[2], 10) : 0;
+
+  // Detect period: sáng, chiều, tối, trưa
+  const hasSang = /sáng/.test(lower);
+  const hasChieu = /chiều/.test(lower);
+  const hasToi = /tối/.test(lower);
+  const hasTrua = /trưa/.test(lower);
+
+  // Adjust hour for 12h notation
+  if (hasSang && hour <= 12) { /* keep as is */ }
+  else if (hasChieu && hour < 12) hour += 12;
+  else if (hasToi && hour < 12) hour += 12;
+  else if (hasTrua && hour < 12) hour += 12;
+  // Default: if hour <= 6, assume PM (e.g. "lúc 3h" → 15:00)
+  // Only auto-PM if no period specified and hour < 7
+  else if (!hasSang && !hasChieu && !hasToi && !hasTrua) {
+    // If hour is ambiguous (1-6), assume PM for Vietnamese casual speech
+    if (hour >= 1 && hour <= 6) hour += 12;
+  }
+
+  // Build Date
+  const scheduledAt = new Date(now);
+  scheduledAt.setHours(hour, minute, 0, 0);
+
+  const periodLabel = hasSang ? "sáng" : hasChieu ? "chiều" : hasToi ? "tối" : hasTrua ? "trưa" : "";
+  const timeDescription = `${hour}:${String(minute).padStart(2, "0")}${periodLabel ? " " + periodLabel : ""}`;
+
+  return { scheduledAt, timeDescription };
+}
+
 /** Parse reminder time and content from natural language. */
-function parseReminderFromMessage(content: string): ParsedReminder | null {
-  const lower = content.toLowerCase();
+export function parseReminderFromMessage(content: string): ParsedReminder | null {
   const now = new Date();
   let offsetMs = 0;
   let reminderContent = content;
   let timeDesc = "";
+
+  // ── Batch 14.1: Normalize multi-line input for pattern matching ──
+  // Combined batch text may have newlines (e.g. "Nhắc mình\nĐi Lễ Phật\nLúc 19h").
+  // Normalize to "Nhắc mình Đi Lễ Phật Lúc 19h" for pattern matching while
+  // keeping the original `content` for audit purposes.
+  const normalized = content.replace(/\r?\n+/g, " ").replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+
+  // ── Batch 14.1: "nhắc [target] <content> lúc <time>" ──
+  // Examples:
+  //   "Nhắc mình Đi Lễ Phật Lúc 19h" → content="Đi Lễ Phật", time="19h"
+  //   "nhắc đi lễ Phật lúc 19h"      → content="đi lễ Phật", time="19h"
+  const matchLúcContent = lower.match(
+    /\bnhắc\s+(?:mình|tôi|tui|em|anh|chị)?\s*(?<reminderContent>.+?)\s+lúc\s+(?<timeStr>\d{1,2}(?:h|:\d{2})?(?:\s*(?:sáng|chiều|tối|trưa|nay|mai))?)/iu,
+  );
+  if (matchLúcContent && matchLúcContent.groups) {
+    const rawContent = matchLúcContent.groups.reminderContent?.trim();
+    const rawTime = matchLúcContent.groups.timeStr?.trim();
+
+    if (rawContent && rawContent.length > 0 && rawTime && rawTime.length > 0) {
+      // Extract content from the ORIGINAL normalized string (preserves case)
+      // The regex matched on `lower` so we need to map indices back
+      const contentStart = matchLúcContent.index! + matchLúcContent[0].indexOf(rawContent);
+      const casePreservedContent = normalized.slice(
+        contentStart,
+        contentStart + rawContent.length,
+      );
+      const parsedTime = parseLúcTime(rawTime, now);
+      if (parsedTime) {
+        offsetMs = parsedTime.scheduledAt.getTime() - now.getTime();
+        if (offsetMs < 0) offsetMs += 24 * 3600_000; // next day if passed
+        reminderContent = casePreservedContent;
+        timeDesc = parsedTime.timeDescription;
+      }
+    }
+  }
 
   // Pattern: "Nhắc mình X phút/giây nữa ..."
   const matchNua = lower.match(/nhắc\s+\p{L}+\s+(\d+)\s*(p|phút|giây|giờ|h|tiếng|ngày)\s*(nữa|later)/iu);

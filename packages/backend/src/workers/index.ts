@@ -13,6 +13,7 @@ import { ZaloMessageSender } from "../services/zalo-message-sender.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
 import { prisma } from "../db.js";
+import { pollBatches } from "./message-batch-worker.js";
 
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 
@@ -127,11 +128,13 @@ async function main() {
 
   // Initial poll immediately
   await poll();
+  await pollBatches();
   await heartbeat();
 
   // Then poll on interval
   const pollInterval = setInterval(async () => {
     await poll();
+    await pollBatches();
     await heartbeat();
   }, POLL_INTERVAL_MS);
 
