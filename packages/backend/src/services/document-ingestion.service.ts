@@ -286,10 +286,14 @@ export async function ingestDocument(
       console.warn(`[docling] stderr: ${doclingStderr.slice(0, 200)}`);
     }
 
-    // Docling outputs as <input-basename>.md in the output directory
-    // Docling always appends .md; if input already has .md, output is <name>.md (not doubled)
-    const outputName = fileName.endsWith(".md") ? fileName : `${fileName}.md`;
+    // Docling outputs <basename>.md (replaces original extension with .md)
+    // For "test.txt" → "test.md", for "doc.md" → "doc.md", for "noext" → "noext.md"
+    const baseName = fileName.includes(".") ? fileName.slice(0, fileName.lastIndexOf(".")) : fileName;
+    const outputName = `${baseName}.md`;
     const doclingOutput = `${cfg.processedDir}/${outputName}`;
+
+    // Fallback: also try <original>.md in case docling appends
+    const fallbackOutput = `${cfg.processedDir}/${fileName}.md`;
 
     let markdownContent: string | null = null;
     let actualOutputPath: string | null = null;
@@ -301,6 +305,16 @@ export async function ingestDocument(
         actualOutputPath = doclingOutput;
         break;
       } catch {
+        // Try fallback filename
+        if (doclingOutput !== fallbackOutput) {
+          try {
+            markdownContent = await readFile(fallbackOutput, "utf-8");
+            actualOutputPath = fallbackOutput;
+            break;
+          } catch {
+            // both failed, retry after delay
+          }
+        }
         if (attempt < 2) await new Promise(r => setTimeout(r, 500));
       }
     }
