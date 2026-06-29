@@ -54,22 +54,6 @@ async function main() {
     }
   }
 
-  // ── Pre-warm Zalo session ────────────────────────────────────────
-  if (!getCurrentEffectiveDryRun()) {
-    try {
-      const { getZaloGateway } = await import("../services/zalo-gateway.service.js");
-      const gw = getZaloGateway();
-      if (!gw.isConnected()) {
-        const restored = await gw.restoreSession({ startListener: false });
-        console.log(`Zalo pre-warm: restore=${restored} connected=${gw.isConnected()}`);
-      } else {
-        console.log(`Zalo pre-warm: already connected`);
-      }
-    } catch (e: unknown) {
-      console.error(`Zalo pre-warm error: ${(e as Error).message}`);
-    }
-  }
-
   // ── Main polling loop ────────────────────────────────────────────
   console.log(`Polling DB every ${POLL_INTERVAL_MS / 1000}s for queued jobs...`);
 

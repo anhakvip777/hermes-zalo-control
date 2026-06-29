@@ -30,6 +30,7 @@ module.exports = {
         ERROR_ALERT_ENABLED: "false",
         ERROR_ALERT_DRY_RUN: "true",
         LOG_LEVEL: "info",
+        INTERNAL_API_TOKEN: process.env.INTERNAL_API_TOKEN || "CHANGE_ME_INTERNAL_TOKEN",
       },
       autorestart: true,
       max_restarts: 5,
@@ -48,7 +49,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         ZALO_AUTO_REPLY_DRY_RUN: "true",
-        ZALO_SESSION_DIR: "/home/anhakvip777/hermes-zalo-control/packages/backend/zalo-session",
+        INTERNAL_API_BASE_URL: "http://127.0.0.1:3002",
+        INTERNAL_API_TOKEN: process.env.INTERNAL_API_TOKEN || "CHANGE_ME_INTERNAL_TOKEN",
         LOG_LEVEL: "info",
       },
       autorestart: true,
