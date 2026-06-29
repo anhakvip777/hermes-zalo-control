@@ -279,3 +279,61 @@ describe("Execution tracking", () => {
     expect(success!.scheduleVersion).toBe(schedule.version);
   });
 });
+
+// ─── R2: Runtime-configured sender (no frozen startup sender) ─────────
+
+describe("R2 — Runtime dryRun per-job", () => {
+  beforeEach(async () => {
+    await cleanDatabase();
+    await settingsService.initializeDefaultSettings();
+  });
+
+  it("executeJob uses injected sender when provided (backward-compatible)", async () => {
+    const sender = new MockMessageSender();
+    const schedule = await scheduleService.createSchedule(baseInput);
+
+    await executeJob(
+      { scheduleId: schedule.id, scheduleVersion: schedule.version },
+      { sender },
+    );
+
+    expect(sender.getSentMessages().length).toBe(1);
+    expect(sender.getLastSentMessage()!.content).toBe(baseInput.messageContent);
+  });
+
+  it("executeRunNow uses injected sender when provided", async () => {
+    const sender = new MockMessageSender();
+    const schedule = await scheduleService.createSchedule(baseInput);
+
+    const result = await executeRunNow(schedule.id, { sender });
+
+    expect(result.success).toBe(true);
+    expect(sender.getSentMessages().length).toBe(1);
+  });
+
+  it("executeJob without deps calls getSender (runtime-evaluated, dry-run mode)", async () => {
+    // Runtime default dryRun=true → getSender returns MockMessageSender
+    // We call without deps → sender is created internally via getSender()
+    // MockMessageSender is used because dryRun=true
+    const schedule = await scheduleService.createSchedule(baseInput);
+
+    // This path should NOT throw — getSender() is called, MockMessageSender created
+    await executeJob({
+      scheduleId: schedule.id,
+      scheduleVersion: schedule.version,
+    });
+
+    // Verify execution was recorded (no crash)
+    const executions = await executionService.listExecutions({ scheduleId: schedule.id });
+    expect(executions.data.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("executeRunNow without deps calls getSender (no crash)", async () => {
+    const schedule = await scheduleService.createSchedule(baseInput);
+
+    const result = await executeRunNow(schedule.id);
+
+    expect(result.success).toBe(true);
+    expect(result.executionId).toBeTruthy();
+  });
+});

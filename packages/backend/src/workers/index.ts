@@ -8,8 +8,6 @@
 // =============================================================================
 
 import { executeJob } from "./scheduler.js";
-import { MockMessageSender } from "../services/message-sender.js";
-import { ZaloMessageSender } from "../services/zalo-message-sender.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
 import { prisma } from "../db.js";
@@ -18,8 +16,6 @@ import { pollBatches } from "./message-batch-worker.js";
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 
 async function main() {
-  const sender = getCurrentEffectiveDryRun() ? new MockMessageSender() : new ZaloMessageSender();
-
   console.log(`Worker started (dryRun: ${getCurrentEffectiveDryRun()}, redis: ${config.redis.url ? "connected" : "polling fallback"})`);
 
   // Atomic claim helper: set job status from 'queued' to 'active' in one update.
@@ -42,7 +38,6 @@ async function main() {
     try {
       await executeJob(
         { scheduleId: job.scheduleId, scheduleVersion: job.scheduleVersion },
-        { sender },
       );
       // Mark completed
       await prisma.scheduleJob.update({

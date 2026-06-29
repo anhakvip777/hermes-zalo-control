@@ -3,17 +3,24 @@
 // =============================================================================
 
 import type { QueueJobData } from "./queue.js";
-import type { MessageSender } from "../services/message-sender.js";
 import * as scheduleService from "../services/schedule.service.js";
 import * as executionService from "../services/execution.service.js";
 import * as jobService from "../services/job.service.js";
 import * as settingsService from "../services/settings.service.js";
 import { config } from "../config.js";
-import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
+import { getCurrentEffectiveDryRun, getEffectiveDryRunInfo } from "../services/runtime-config.service.js";
 import { prisma } from "../db.js";
 
-export interface WorkerDeps {
-  sender: MessageSender;
+// ── Sender factory (evaluated per send, NOT frozen at startup) ───────
+
+export async function getSender(): Promise<import("../services/message-sender.js").MessageSender> {
+  const { dryRun, source } = getEffectiveDryRunInfo();
+  if (dryRun) {
+    const { MockMessageSender } = await import("../services/message-sender.js");
+    return new MockMessageSender();
+  }
+  const { ZaloMessageSender } = await import("../services/zalo-message-sender.js");
+  return new ZaloMessageSender();
 }
 
 // ── Role normalization: "ai" and "assistant" both mean AI/bot actor ────
@@ -25,7 +32,13 @@ function isCreatedByAI(schedule: { createdBy: string }): boolean {
 // Main worker function — called for every queued job
 // =============================================================================
 
-export async function executeJob(job: QueueJobData, deps: WorkerDeps): Promise<void> {
+export async function executeJob(
+  job: QueueJobData,
+  deps?: { sender?: import("../services/message-sender.js").MessageSender },
+): Promise<void> {
+  // ── 0. Determine sender: optionally injected (tests), or runtime-evaluated ─
+  const sender =
+    deps?.sender ?? (await getSender());
   // ── 1. Reload latest schedule from DB ──────────────────────────────
   const schedule = await scheduleService.getScheduleById(job.scheduleId);
   if (!schedule) {
@@ -183,8 +196,11 @@ export async function executeJob(job: QueueJobData, deps: WorkerDeps): Promise<v
   }
 
   // ── 8. Send ────────────────────────────────────────────────────────
-
-  const result = await deps.sender.sendMessage(
+  const { dryRun: effectiveDryRun, source: dryRunSource } = getEffectiveDryRunInfo();
+  if (!deps?.sender) {
+    console.log(`[worker] runtime dryRun decision dryRun=${effectiveDryRun} source=${dryRunSource} jobType=schedule threadId=${schedule.targetId}`);
+  }
+  const result = await sender.sendMessage(
     schedule.messageContent,
     schedule.targetId,
     threadType,
@@ -219,7 +235,7 @@ export async function executeJob(job: QueueJobData, deps: WorkerDeps): Promise<v
 
 export async function executeDryRun(
   scheduleId: string,
-  deps: WorkerDeps,
+  deps?: { sender?: import("../services/message-sender.js").MessageSender },
 ): Promise<{ executionId: string; wouldSend: boolean; reason?: string }> {
   const schedule = await scheduleService.getScheduleById(scheduleId);
   if (!schedule) {
@@ -323,12 +339,15 @@ export async function executeDryRun(
 
 export async function executeRunNow(
   scheduleId: string,
-  deps: WorkerDeps,
+  deps?: { sender?: import("../services/message-sender.js").MessageSender },
 ): Promise<{ executionId: string; success: boolean; error?: string }> {
   const schedule = await scheduleService.getScheduleById(scheduleId);
   if (!schedule) {
     return { executionId: "", success: false, error: "Schedule not found" };
   }
+
+  // ── 0. Determine sender ──────────────────────────────────────────
+  const sender = deps?.sender ?? (await getSender());
 
   // Global guard still applies
   if (await settingsService.isEmergencyStop()) {
@@ -389,8 +408,12 @@ export async function executeRunNow(
     return { executionId: execution.id, success: false, error: "Cannot determine thread type" };
   }
 
-  // Send immediately
-  const result = await deps.sender.sendMessage(schedule.messageContent, schedule.targetId, threadType);
+  // Send immediately — evaluate runtime config at send time
+  const { dryRun: effectiveDryRun, source: dryRunSource } = getEffectiveDryRunInfo();
+  if (!deps?.sender) {
+    console.log(`[worker] runtime dryRun decision dryRun=${effectiveDryRun} source=${dryRunSource} jobType=runNow threadId=${schedule.targetId}`);
+  }
+  const result = await sender.sendMessage(schedule.messageContent, schedule.targetId, threadType);
 
   if (result.success) {
     await executionService.updateExecutionResult({

@@ -77,6 +77,20 @@ export function getCurrentEffectiveDryRun(): boolean {
   return _cachedDryRun ?? config.autoReply.dryRun;
 }
 
+/** DryRun decision with source tracking */
+export interface EffectiveDryRunInfo {
+  dryRun: boolean;
+  source: "runtime" | "env";
+}
+
+/** Get effective dryRun + source (sync — no DB call, uses hot cache). */
+export function getEffectiveDryRunInfo(): EffectiveDryRunInfo {
+  return {
+    dryRun: getCurrentEffectiveDryRun(),
+    source: _cachedDryRun !== null ? "runtime" : "env",
+  };
+}
+
 // ── Get effective config ─────────────────────────────────────────────
 
 /**
