@@ -1292,17 +1292,13 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           scheduleCreated: true,
         };
 
-        if (getCurrentEffectiveDryRun()) {
-          await agentTaskService.markAgentTaskCompleted(task.id, createResult);
-          console.log(`[dispatcher] schedule-created (dry-run): ${schedule.id} (thread=${msg.threadId})`);
-        } else {
-          const sender = new ZaloMessageSender();
-          const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-          createResult.sentMessageId = sendResult.messageId ?? null;
-          createResult.sendSuccess = sendResult.success;
-          await agentTaskService.markAgentTaskCompleted(task.id, createResult);
-          console.log(`[dispatcher] schedule-created + sent: ${schedule.id} msgId=${sendResult.messageId}`);
-        }
+        // Always use ZaloMessageSender — it handles dryRun/liveTest internally
+        const sender = new ZaloMessageSender();
+        const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
+        createResult.sentMessageId = sendResult.messageId ?? null;
+        createResult.sendSuccess = sendResult.success;
+        await agentTaskService.markAgentTaskCompleted(task.id, createResult);
+        console.log(`[dispatcher] schedule-created: ${schedule.id} msgId=${sendResult.messageId} (thread=${msg.threadId})`);
 
         setCooldown(msg.threadId);
         return { dispatched: true };
@@ -1317,15 +1313,12 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           error: errorMsg.slice(0, 200),
         };
 
-        if (getCurrentEffectiveDryRun()) {
-          await agentTaskService.markAgentTaskCompleted(task.id, failResult);
-        } else {
-          const sender = new ZaloMessageSender();
-          const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
-          failResult.sentMessageId = sendResult.messageId ?? null;
-          failResult.sendSuccess = sendResult.success;
-          await agentTaskService.markAgentTaskCompleted(task.id, failResult);
-        }
+        // Always use ZaloMessageSender — it handles dryRun/liveTest internally
+        const sender = new ZaloMessageSender();
+        const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
+        failResult.sentMessageId = sendResult.messageId ?? null;
+        failResult.sendSuccess = sendResult.success;
+        await agentTaskService.markAgentTaskCompleted(task.id, failResult);
 
         console.error(`[dispatcher] schedule-creation failed: ${errorMsg}`);
         setCooldown(msg.threadId);
@@ -1383,33 +1376,21 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             resolvedContent: resolvedContent.slice(0, 200),
           };
 
-          if (getCurrentEffectiveDryRun()) {
-            await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
-            console.log(`[dispatcher] context-reminder created (dry-run): ${schedule.id} content="${resolvedContent.slice(0, 40)}..." (thread=${msg.threadId})`);
-            // Save outbound reply to conversation history
-            saveOutboundMessage({
-              threadId: msg.threadId,
-              threadType: msg.threadType,
-              content: replyText,
-              relatedMessageId: msg.zaloMessageId ?? undefined,
-              metadata: { source: "auto_reply_context_reminder", dryRun: true, scheduleId: schedule.id, taskId: task.id },
-            }).catch(() => {});
-          } else {
-            const sender = new ZaloMessageSender();
-            const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-            ctxResult.sentMessageId = sendResult.messageId ?? null;
-            ctxResult.sendSuccess = sendResult.success;
-            await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
-            console.log(`[dispatcher] context-reminder created + sent: ${schedule.id} msgId=${sendResult.messageId}`);
-            // Save outbound reply to conversation history
-            saveOutboundMessage({
-              threadId: msg.threadId,
-              threadType: msg.threadType,
-              content: replyText,
-              relatedMessageId: msg.zaloMessageId ?? undefined,
-              metadata: { source: "auto_reply_context_reminder", sentMessageId: sendResult.messageId, scheduleId: schedule.id, taskId: task.id },
-            }).catch(() => {});
-          }
+          // Always use ZaloMessageSender — it handles dryRun/liveTest internally
+          const sender = new ZaloMessageSender();
+          const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
+          ctxResult.sentMessageId = sendResult.messageId ?? null;
+          ctxResult.sendSuccess = sendResult.success;
+          await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
+          console.log(`[dispatcher] context-reminder created: ${schedule.id} msgId=${sendResult.messageId} (thread=${msg.threadId})`);
+          // Save outbound reply to conversation history
+          saveOutboundMessage({
+            threadId: msg.threadId,
+            threadType: msg.threadType,
+            content: replyText,
+            relatedMessageId: msg.zaloMessageId ?? undefined,
+            metadata: { source: "auto_reply_context_reminder", sentMessageId: sendResult.messageId, scheduleId: schedule.id, taskId: task.id },
+          }).catch(() => {});
 
           setCooldown(msg.threadId);
           return { dispatched: true };
@@ -1425,17 +1406,12 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             error: errorMsg.slice(0, 200),
           };
 
-          if (getCurrentEffectiveDryRun()) {
-            await agentTaskService.markAgentTaskCompleted(task.id, failResult);
-          } else {
-            const sender = new ZaloMessageSender();
-            const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
-            failResult.sentMessageId = sendResult.messageId ?? null;
-            failResult.sendSuccess = sendResult.success;
-            await agentTaskService.markAgentTaskCompleted(task.id, failResult);
-          }
-
-          console.error(`[dispatcher] context-reminder failed: ${errorMsg}`);
+          // Always use ZaloMessageSender — it handles dryRun/liveTest internally
+          const sender = new ZaloMessageSender();
+          const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
+          failResult.sentMessageId = sendResult.messageId ?? null;
+          failResult.sendSuccess = sendResult.success;
+          await agentTaskService.markAgentTaskCompleted(task.id, failResult);
           setCooldown(msg.threadId);
           return { dispatched: true };
         }
