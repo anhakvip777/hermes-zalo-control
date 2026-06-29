@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { config } from "../config.js";
-import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
+import { getCurrentEffectiveDryRun, getEffectiveBatchingConfig, getEffectiveCooldownSeconds } from "./runtime-config.service.js";
 import { prisma } from "../db.js";
 import { ZaloMessageSender } from "./zalo-message-sender.js";
 import { getHermesChatAdapter } from "./hermes-chat-adapter.js";
@@ -34,18 +34,17 @@ export function resetAutoReplyCooldowns(): void {
 function isInCooldown(threadId: string): boolean {
   const last = lastReplyAt.get(threadId);
   if (!last) return false;
-  return Date.now() - last < config.autoReply.cooldownSeconds * 1000;
+  return Date.now() - last < getEffectiveCooldownSeconds() * 1000;
 }
 
 /**
  * Atomically check and set cooldown in a single operation.
  * Returns true if the thread was NOT in cooldown (cooldown acquired).
  * Returns false if already in cooldown (should skip).
- * This eliminates the race condition between check and set.
  */
 function checkAndSetCooldown(threadId: string): boolean {
   const now = Date.now();
-  const cooldownMs = config.autoReply.cooldownSeconds * 1000;
+  const cooldownMs = getEffectiveCooldownSeconds() * 1000;
   const last = lastReplyAt.get(threadId);
 
   if (last && now - last < cooldownMs) {
@@ -117,9 +116,9 @@ function safetyCheck(msg: NormalizedMessage, selfUserId?: string | null): Safety
   // The batching interceptor (line ~754) manages cooldown: it sets cooldown when the
   // batch becomes ready (limits hit), not on individual messages in a collecting batch.
   // This prevents cooldown from blocking messages 2..N before they reach the batch.
-  const batchingActive = config.messageBatching.enabled &&
-    msg.messageType === "text" &&
-    config.messageBatching.threadTypes.includes(msg.threadType ?? "user");
+  const batchingConfig = getEffectiveBatchingConfig();
+  const batchingActive = batchingConfig.enabled && msg.messageType === "text" &&
+    batchingConfig.threadTypes.includes(msg.threadType ?? "user");
 
   if (!batchingActive && !checkAndSetCooldown(msg.threadId)) {
     return { allowed: false, reason: "cooldown" };
@@ -842,7 +841,8 @@ export async function handleIncomingMessage(
   // If batching is enabled and this is a text DM, add to batch
   // and return early. The batch worker will process later.
   // Skip if this is a synthetic message from batch processing itself.
-  if (config.messageBatching.enabled && msg.messageType === "text" && !msg.rawMetadata?.includes("message_batch")) {
+  const batchingCfg = getEffectiveBatchingConfig();
+  if (batchingCfg.enabled && msg.messageType === "text" && !msg.rawMetadata?.includes("message_batch")) {
     try {
       const { addToBatch } = await import("./message-batch.service.js");
       const batchResult = await addToBatch(msg);
@@ -866,8 +866,8 @@ export async function handleIncomingMessage(
 
         console.log(
           `[dispatcher] message added to batch ${batchResult.batchId.slice(0, 8)} ` +
-          `(${batchResult.messageCount}/${config.messageBatching.maxMessages} msgs, ` +
-          `${batchResult.totalChars}/${config.messageBatching.maxChars} chars) ` +
+          `(${batchResult.messageCount}/${batchingCfg.maxMessages} msgs, ` +
+          `${batchResult.totalChars}/${batchingCfg.maxChars} chars) ` +
           `ready=${batchResult.isReady} thread=${msg.threadId}`,
         );
 

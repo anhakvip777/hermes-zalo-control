@@ -97,6 +97,86 @@ export async function systemRoutes(app: FastifyInstance) {
     },
   );
 
+  // ═══════════════════════════════════════════════════════════════════
+  // Batch 15 — Runtime Settings (general-purpose key-value)
+  // ═══════════════════════════════════════════════════════════════════
+
+  const {
+    getAllRuntimeSettings,
+    setRuntimeSetting,
+    getSettingMeta,
+  } = await import("../services/runtime-config.service.js");
+
+  // ── GET /api/system/runtime-settings — admin-only ────────────────
+  app.get(
+    "/system/runtime-settings",
+    { preHandler: [adminAuth] },
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      const [settings, meta] = await Promise.all([
+        getAllRuntimeSettings(),
+        Promise.resolve(getSettingMeta()),
+      ]);
+      return reply.send({ settings, meta });
+    },
+  );
+
+  // ── PATCH /api/system/runtime-settings — admin-only ──────────────
+  app.patch(
+    "/system/runtime-settings",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = req.body as Record<string, unknown>;
+      const key = body?.key as string | undefined;
+      const value = body?.value;
+      const reason = (body?.reason as string) ?? "";
+      const ipAddress = (req.headers["x-forwarded-for"] as string) ?? req.ip;
+      const userAgent = (req.headers["user-agent"] as string) ?? undefined;
+
+      if (!key || typeof key !== "string") {
+        return reply.status(400).send({ success: false, error: "key (string) is required", errorCode: "MISSING_KEY" });
+      }
+      if (value === undefined || value === null) {
+        return reply.status(400).send({ success: false, error: "value is required", errorCode: "MISSING_VALUE" });
+      }
+
+      // Block direct dryRun changes via this endpoint — must use Safety Mode
+      if (key === "autoReply.dryRun") {
+        return reply.status(403).send({
+          success: false,
+          error: "dryRun must be toggled via /api/system/runtime-config/auto-reply with confirmation text",
+          errorCode: "USE_SAFETY_MODE",
+        });
+      }
+
+      const result = await setRuntimeSetting({ key, value, reason, ipAddress, userAgent });
+
+      if (!result.success) {
+        const code = result.errorCode === "VALIDATION_ERROR" || result.errorCode === "INVALID_TYPE"
+          ? 400
+          : result.errorCode === "CONTEXT_VALIDATION_ERROR" || result.errorCode === "UNKNOWN_KEY"
+            ? 422
+            : 500;
+        return reply.status(code).send(result);
+      }
+
+      return reply.send(result);
+    },
+  );
+
+  // ── GET /api/system/runtime-settings/audit — admin-only ──────────
+  app.get(
+    "/system/runtime-settings/audit",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const query = req.query as Record<string, string>;
+      const limit = Math.min(parseInt(query.limit ?? "50", 10) || 50, 200);
+      const allAudit = await getRuntimeConfigAudit(limit);
+      // Filter out dryRun audits (those go through Safety Mode) & secrets
+      const filtered = allAudit.filter((a) => a.key !== "autoReply.dryRun");
+      return reply.send(filtered);
+    },
+  );
+
   // ── GET /api/system/heartbeats — admin-only ─────────────────────────
   app.get(
     "/system/heartbeats",

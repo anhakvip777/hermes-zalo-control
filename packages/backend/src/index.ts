@@ -3,7 +3,7 @@ import { config } from "./config.js";
 import { checkDbOnStartup } from "./db-guard-startup.js";
 import { acquireProcessLock, isLockOwner } from "./process-lock.js";
 import { checkConfigOnStartup } from "./config-consistency.js";
-import { initRuntimeConfig } from "./services/runtime-config.service.js";
+import { initRuntimeConfig, initHotCache } from "./services/runtime-config.service.js";
 import { heartbeatOk } from "./services/heartbeat.service.js";
 
 async function main() {
@@ -15,6 +15,7 @@ async function main() {
 
   // ── Init runtime config from DB ───────────────────────────────────
   await initRuntimeConfig();
+  await initHotCache();
 
   // ── Record backend heartbeat ──────────────────────────────────────
   const heartbeatInterval = setInterval(() => {
