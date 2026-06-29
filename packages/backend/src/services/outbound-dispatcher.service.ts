@@ -27,6 +27,7 @@ import { heartbeatOk } from "./heartbeat.service.js";
 import { getEffectiveCooldownSeconds } from "./runtime-config.service.js";
 import { getThreadSettings } from "./thread-settings.service.js";
 import { normalizeThreadId } from "./thread-id.js";
+import { acquireCooldown, setCooldown as csSetCooldown, clearAllCooldowns } from "./cooldown.service.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -92,22 +93,15 @@ export interface OutboundResult {
   errorCode?: string;
 }
 
-// ── In-memory cooldown (shared with existing dispatcher) ────────────
+// ── Cooldown (R5): unified DB-backed store ──────────────────────────
+// Replaced in-memory Map with ThreadCooldown table.
+// This is the SOLE cooldown authority — safetyCheck() no longer gates.
+// All cooldown decisions happen here via acquireCooldown().
 
-const lastReplyAt = new Map<string, number>();
-
-export function resetOutboundCooldowns(): void {
-  lastReplyAt.clear();
-}
-
-function isInCooldown(threadId: string): boolean {
-  const last = lastReplyAt.get(threadId);
-  if (!last) return false;
-  return Date.now() - last < getEffectiveCooldownSeconds() * 1000;
-}
-
-function setCooldown(threadId: string): void {
-  lastReplyAt.set(threadId, Date.now());
+// Deprecated — kept for backward compat with tests that reference it.
+// Tests should migrate to use clearAllCooldowns() from cooldown.service.ts.
+export async function resetOutboundCooldowns(): Promise<void> {
+  await clearAllCooldowns();
 }
 
 // ── Map source to OutboundRecord source ──────────────────────────────
@@ -171,8 +165,9 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     }
   } catch { /* non-fatal */ }
 
-  // 2. ── Cooldown check ────────────────────────────────────────────
-  if (isInCooldown(threadId)) {
+  // 2. ── Cooldown check (R5: sole authority, DB-backed) ──────────
+  const cooldownAcquired = await acquireCooldown(threadId);
+  if (!cooldownAcquired) {
     const recordContent = buildRecordContent(intent);
     saveOutboundRecord({
       threadId, threadType, content: recordContent,
@@ -248,7 +243,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
       updateMessageStatus(assistantMessageId, "dryRun", { sentMessageId: fakeMsgId });
     }
 
-    setCooldown(threadId);
+    csSetCooldown(threadId).catch(() => {});
     const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
     heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 
@@ -283,7 +278,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     });
   }
 
-  setCooldown(threadId);
+  csSetCooldown(threadId).catch(() => {});
   const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
   heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 

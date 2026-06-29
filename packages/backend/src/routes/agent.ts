@@ -244,7 +244,7 @@ export async function agentRoutes(app: FastifyInstance) {
   // ─── GET /api/agent/auto-reply/status ───────────────────────────
   app.get("/agent/auto-reply/status", async () => {
     const { getAutoReplyStatus } = await import("../services/incoming-dispatcher.service.js");
-    return getAutoReplyStatus();
+    return await getAutoReplyStatus();
   });
 
   // ─── General POST /api/agent/tasks ────────────────────────────

@@ -21,55 +21,17 @@ import {
 import type { NormalizedMessage } from "./zalo-receive.js";
 import type { ConversationState } from "./thread-conversation-state.service.js";
 import { saveOutboundRecord } from "./outbound-guardrails.service.js";
-import { sendOutbound, resetOutboundCooldowns } from "./outbound-dispatcher.service.js";
+import { sendOutbound } from "./outbound-dispatcher.service.js";
+import { clearAllCooldowns, getActiveCooldowns, clearCooldown } from "./cooldown.service.js";
 
-// ── Cooldown: in-memory per-thread ──────────────────────────────────
-const lastReplyAt = new Map<string, number>();
+// ── Cooldown (R5): unified DB-backed store ───────────────────────────
+// Replaced dual in-memory Maps with ThreadCooldown table.
+// safetyCheck() no longer gates on cooldown — cooldown is enforced
+// solely in sendOutbound() (dispatcher is single authority).
+// See cooldown.service.ts for acquireCooldown / setCooldown / clearAll.
 
-export function resetAutoReplyCooldowns(): void {
-  lastReplyAt.clear();
-  resetOutboundCooldowns();
-}
-
-function isInCooldown(threadId: string): boolean {
-  const last = lastReplyAt.get(threadId);
-  if (!last) return false;
-  return Date.now() - last < getEffectiveCooldownSeconds() * 1000;
-}
-
-/**
- * Atomically check and set cooldown in a single operation.
- * Returns true if the thread was NOT in cooldown (cooldown acquired).
- * Returns false if already in cooldown (should skip).
- */
-function checkAndSetCooldown(threadId: string): boolean {
-  const now = Date.now();
-  const cooldownMs = getEffectiveCooldownSeconds() * 1000;
-  const last = lastReplyAt.get(threadId);
-
-  if (last && now - last < cooldownMs) {
-    return false; // still in cooldown — reject
-  }
-
-  // Set cooldown BEFORE returning — atomic with check
-  lastReplyAt.set(threadId, now);
-
-  // Prune old entries (>1h)
-  const cutoff = now - 3600_000;
-  for (const [k, v] of lastReplyAt) {
-    if (v < cutoff) lastReplyAt.delete(k);
-  }
-
-  return true; // cooldown acquired
-}
-
-function setCooldown(threadId: string): void {
-  lastReplyAt.set(threadId, Date.now());
-  // Prune old entries (>1h)
-  const cutoff = Date.now() - 3600_000;
-  for (const [k, v] of lastReplyAt) {
-    if (v < cutoff) lastReplyAt.delete(k);
-  }
+export async function resetAutoReplyCooldowns(): Promise<void> {
+  await clearAllCooldowns();
 }
 
 // ── Safety checks ───────────────────────────────────────────────────
@@ -112,17 +74,10 @@ function safetyCheck(msg: NormalizedMessage, selfUserId?: string | null): Safety
     return { allowed: false, reason: "non_text_message" };
   }
 
-  // ── Batch 14.1: If batching is enabled for this thread type, skip cooldown here.
-  // The batching interceptor (line ~754) manages cooldown: it sets cooldown when the
-  // batch becomes ready (limits hit), not on individual messages in a collecting batch.
-  // This prevents cooldown from blocking messages 2..N before they reach the batch.
-  const batchingConfig = getEffectiveBatchingConfig();
-  const batchingActive = batchingConfig.enabled && msg.messageType === "text" &&
-    batchingConfig.threadTypes.includes(msg.threadType ?? "user");
-
-  if (!batchingActive && !checkAndSetCooldown(msg.threadId)) {
-    return { allowed: false, reason: "cooldown" };
-  }
+  // ── Cooldown (R5): moved to sendOutbound() — dispatcher is sole authority.
+  // safetyCheck() no longer gates on cooldown. This means cooldown-blocked
+  // messages still reach Hermes for processing, but the outbound is blocked
+  // at send time. The 10s cooldown window makes the compute waste acceptable.
 
   return { allowed: true };
 }
@@ -744,7 +699,7 @@ async function processBatchNow(
   try {
     // Reset cooldown so the synthetic batch message isn't blocked
     // (cooldown was set when the batch became ready)
-    lastReplyAt.delete(threadId);
+    clearCooldown(threadId).catch(() => {});
 
     // Run through the standard pipeline
     const result = await handleIncomingMessage(syntheticMsg);
@@ -861,7 +816,7 @@ export async function handleIncomingMessage(
         // If batch became ready due to limits, set cooldown to prevent
         // immediate next message from also being processed individually
         if (batchResult.isReady) {
-          setCooldown(msg.threadId);
+            // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         }
 
         console.log(
@@ -938,7 +893,7 @@ export async function handleIncomingMessage(
           metadata: { downloadError: downloadResult.error },
         }).catch(() => {});
 
-        setCooldown(msg.threadId);
+          // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         return { dispatched: false, reason: "image_download_failed" };
       }
 
@@ -1031,7 +986,7 @@ export async function handleIncomingMessage(
         `(thread=${msg.threadId})`,
       );
 
-      setCooldown(msg.threadId);
+        // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
       return { dispatched: true };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1042,7 +997,7 @@ export async function handleIncomingMessage(
         error: errorMsg.slice(0, 500),
         dryRun: getCurrentEffectiveDryRun(),
       });
-      setCooldown(msg.threadId);
+        // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
       return { dispatched: false, reason: "image_pipeline_error" };
     }
   }
@@ -1090,7 +1045,7 @@ export async function handleIncomingMessage(
         taskId: task.id,
         metadata: { unsupportedExtension: ext ?? "unknown" },
       }).catch(() => {});
-      setCooldown(msg.threadId);
+        // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
       return { dispatched: false, reason: "unsupported_extension" };
     }
 
@@ -1173,7 +1128,7 @@ export async function handleIncomingMessage(
       fileResult.replyPreview = replyText.slice(0, 200);
       await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
 
-      setCooldown(msg.threadId);
+        // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
       return { dispatched: true };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1198,7 +1153,7 @@ export async function handleIncomingMessage(
         metadata: { error: errorMsg.slice(0, 200) },
       }).catch(() => {});
 
-      setCooldown(msg.threadId);
+        // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
       return { dispatched: false, reason: "file_ingestion_error" };
     }
   }
@@ -1283,7 +1238,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
         await agentTaskService.markAgentTaskCompleted(task.id, createResult);
         console.log(`[dispatcher] schedule-created: ${schedule.id} msgId=${obResult.sentMessageId} (thread=${msg.threadId})`);
 
-        setCooldown(msg.threadId);
+          // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         return { dispatched: true };
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1312,7 +1267,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
         await agentTaskService.markAgentTaskCompleted(task.id, failResult);
 
         console.error(`[dispatcher] schedule-creation failed: ${errorMsg}`);
-        setCooldown(msg.threadId);
+          // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         return { dispatched: true };
       }
     }
@@ -1383,7 +1338,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
           console.log(`[dispatcher] context-reminder created: ${schedule.id} msgId=${obResult.sentMessageId} (thread=${msg.threadId})`);
 
-          setCooldown(msg.threadId);
+            // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
           return { dispatched: true };
         } catch (err: unknown) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1410,7 +1365,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           failResult.sentMessageId = obFailResult.sentMessageId;
           failResult.sendSuccess = obFailResult.success;
           await agentTaskService.markAgentTaskCompleted(task.id, failResult);
-          setCooldown(msg.threadId);
+            // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
           return { dispatched: true };
         }
       } else {
@@ -1433,7 +1388,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           taskId: task.id,
           metadata: { reason: "no_context_for_pronoun" },
         }).catch(() => {});
-        setCooldown(msg.threadId);
+          // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         return { dispatched: true };
       }
     }
@@ -1524,7 +1479,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           data: { matchCount: { increment: 1 }, lastMatchedAt: new Date() },
         }).catch(() => {});
 
-        setCooldown(msg.threadId);
+          // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
         return { dispatched: true };
       }
 
@@ -1671,7 +1626,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     // ── Detect if this reply is a question (potential multi-turn) ──
     detectAndSetConversationState(msg.threadId, finalReply, msg.content).catch(() => {});
 
-    setCooldown(msg.threadId);
+    // Cooldown (R5): handled by sendOutbound() — removed intermediate setCooldown
     return { dispatched: true };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1742,17 +1697,19 @@ async function detectAndSetConversationState(
 
 // ── Status getter for admin endpoint ────────────────────────────────
 
-export function getAutoReplyStatus() {
+export async function getAutoReplyStatus() {
   const cfg = config.autoReply;
+  const activeCooldownRows = await getActiveCooldowns();
   return {
     enabled: cfg.enabled,
     dryRun: cfg.dryRun,
     allowedThreads: cfg.allowedThreads,
     cooldownSeconds: cfg.cooldownSeconds,
     groupReplyWindowSeconds: cfg.groupReplyWindowSeconds,
-    activeCooldowns: Array.from(lastReplyAt.entries()).map(([threadId, ts]) => ({
-      threadId,
-      since: new Date(ts).toISOString(),
+    activeCooldowns: activeCooldownRows.map((r) => ({
+      threadId: r.threadId,
+      since: r.lastReplyAt.toISOString(),
+      expiresAt: r.expiresAt.toISOString(),
     })),
     activeReplyWindows: getActiveReplyWindows(),
   };

@@ -33,17 +33,28 @@ vi.mock("../config.js", () => ({
 const mockPrismaFindFirst = vi.fn().mockResolvedValue(null);
 const mockPrismaFindMany = vi.fn().mockResolvedValue([]);
 const mockScheduleFindMany = vi.fn().mockResolvedValue([]);
-vi.mock("../db.js", () => ({
-  prisma: {
-    scheduleExecution: {
-      findFirst: (...args: unknown[]) => mockPrismaFindFirst(...args),
-      findMany: (...args: unknown[]) => mockPrismaFindMany(...args),
+vi.mock("../db.js", () => {
+  // Inline to avoid hoisting issues with vitest
+  const tcd = {
+    findUnique: vi.fn().mockResolvedValue(null),
+    upsert: vi.fn().mockResolvedValue({}),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    findMany: vi.fn().mockResolvedValue([]),
+  };
+  return {
+    prisma: {
+      scheduleExecution: {
+        findFirst: (...args: unknown[]) => mockPrismaFindFirst(...args),
+        findMany: (...args: unknown[]) => mockPrismaFindMany(...args),
+      },
+      schedule: {
+        findMany: (...args: unknown[]) => mockScheduleFindMany(...args),
+      },
+      threadCooldown: tcd,
+      $transaction: (fn: any) => fn({ threadCooldown: tcd }),
     },
-    schedule: {
-      findMany: (...args: unknown[]) => mockScheduleFindMany(...args),
-    },
-  },
-}));
+  };
+});
 
 const mockSendMessage = vi.fn();
 vi.mock("../services/zalo-message-sender.js", () => ({
@@ -146,9 +157,9 @@ const baseMsg = (overrides: Partial<NormalizedMessage> = {}): NormalizedMessage 
   ...overrides,
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
-  resetAutoReplyCooldowns();
+  await resetAutoReplyCooldowns();
   mockCreateTask.mockResolvedValue({ id: "task-1" });
   mockComplete.mockResolvedValue(undefined);
   mockFail.mockResolvedValue(undefined);
@@ -222,8 +233,8 @@ describe("IncomingDispatcher", () => {
     expect(mockFail).toHaveBeenCalledTimes(1);
   });
 
-  it("getAutoReplyStatus returns config", () => {
-    const s = getAutoReplyStatus();
+  it("getAutoReplyStatus returns config", async () => {
+    const s = await getAutoReplyStatus();
     expect(s.enabled).toBe(true);
     expect(s.dryRun).toBe(true);
     expect(s.allowedThreads).toEqual(["thread-allowed", "group-allowed"]);
@@ -508,104 +519,70 @@ describe("IncomingDispatcher", () => {
     });
   });
 
-  // ── Cooldown Skip Audit (OutboundRecord) ──────────────────────
+  // ── Cooldown (R5): moved to sendOutbound() ─────────────────────
+  // safetyCheck no longer blocks on cooldown. Cooldown enforcement
+  // now lives in the unified outbound dispatcher via acquireCooldown().
+  // These tests verify that safetyCheck passes both messages through
+  // (AgentTask IS created), and cooldown audit is handled by the
+  // outbound dispatcher — tested in batch-r5-cooldown.test.ts.
 
-  describe("Cooldown audit", () => {
-    it("creates OutboundRecord with decision=block, reason=cooldown when cooldown blocks", async () => {
-      // First message: succeeds and starts cooldown
-      // (R1.1: Unified dispatcher creates OutboundRecord for every outbound — 1 for first msg)
-      await handleIncomingMessage(baseMsg({ zaloMessageId: "cooldown-1" }));
-
-      // Second message within 10s cooldown: should be blocked
-      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "cooldown-2" }));
-      expect(r.dispatched).toBe(false);
-      expect(r.reason).toBe("cooldown");
-
-      // Should have created 2 OutboundRecords:
-      // 1 from first message (allowed via unified dispatcher)
-      // 1 from second message (blocked by cooldown)
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(2);
+  describe("Cooldown behavior (R5 — dispatcher sole authority)", () => {
+    it("safetyCheck does NOT block on cooldown — both messages dispatched", async () => {
+      // First message: dispatched normally
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-cool-1" }));
       
-      // Second call should be the cooldown block
-      const blockCall = mockSaveOutboundRecord.mock.calls[1]?.[0] as Record<string, unknown>;
-      expect(blockCall.decision).toBe("block");
-      expect(blockCall.reason).toBe("cooldown");
-      expect(blockCall.source).toBe("auto_reply");
-      expect(blockCall.threadId).toBe("thread-allowed");
-      expect(blockCall.dryRun).toBe(true);
-    });
-
-    it("does NOT create AgentTask when cooldown blocks", async () => {
-      // First message: starts cooldown
-      await handleIncomingMessage(baseMsg({ zaloMessageId: "no-task-1" }));
-
-      // Clear mock to check second message independently
-      mockCreateTask.mockClear();
-      mockComplete.mockClear();
-
-      // Second message: cooldown block
-      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "no-task-2" }));
-      expect(r.dispatched).toBe(false);
-      expect(r.reason).toBe("cooldown");
-
-      // AgentTask should NOT be created
-      expect(mockCreateTask).not.toHaveBeenCalled();
-    });
-
-    it("does NOT send Zalo message when cooldown blocks", async () => {
-      // First message: starts cooldown
-      await handleIncomingMessage(baseMsg({ zaloMessageId: "no-send-1" }));
-
-      mockSendMessage.mockClear();
-
-      // Second message: cooldown block
-      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "no-send-2" }));
-      expect(r.dispatched).toBe(false);
-      expect(r.reason).toBe("cooldown");
-
-      // ZaloSender should NOT be called
-      expect(mockSendMessage).not.toHaveBeenCalled();
-    });
-
-    it("first message after cooldown expiry creates audit with decision=allow", async () => {
-      // First message should dispatch normally
-      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "first-msg" }));
+      // Second message within cooldown window: STILL dispatched
+      // (cooldown enforcement moved to sendOutbound)
+      const r = await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-cool-2" }));
       expect(r.dispatched).toBe(true);
-      expect(mockCreateTask).toHaveBeenCalledTimes(1);
-
-      // R1.1: Unified dispatcher creates OutboundRecord for every outbound (including allowed)
-      // This is the expected behavior — audit trail for all outbound attempts
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(call.decision).toBe("allow");
-      expect(call.dryRun).toBe(true);
     });
 
-    it("multiple cooldown blocks each create separate OutboundRecords", async () => {
-      // First message: starts cooldown
-      // (R1.1: Creates OutboundRecord via unified dispatcher)
-      await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-1" }));
+    it("AgentTask IS created for cooldown-window messages (R5)", async () => {
+      // First message
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-task-1" }));
+      
+      mockCreateTask.mockClear();
+      
+      // Second message within cooldown window: still creates AgentTask
+      // (Hermes processes it, but sendOutbound will block the response)
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-task-2" }));
+      expect(mockCreateTask).toHaveBeenCalledTimes(1);
+    });
 
-      // Second message: blocked by cooldown
+    it("no cooldown OutboundRecord from safetyCheck (dispatcher handles it)", async () => {
+      mockSaveOutboundRecord.mockClear();
+      
+      // First message
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-rec-1" }));
+      
+      // Second message within cooldown window
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "r5-rec-2" }));
+      
+      // OutboundRecords are created by sendOutbound (via dispatcher),
+      // NOT by safetyCheck cooldown gate. The count depends on the
+      // mocked dispatcher path. Verify no "block/cooldown" records
+      // from safetyCheck.
+      const blockCalls = mockSaveOutboundRecord.mock.calls.filter(
+        (call: any) => call[0]?.reason === "cooldown" && call[0]?.decision === "block"
+      );
+      expect(blockCalls).toHaveLength(0);
+    });
+  });
+
+  it("resets cooldown and allows fresh message", async () => {
+      await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-1" }));
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-2" }));
 
-      // R1.1: 2 OutboundRecords — 1 from first (allowed via dispatcher), 1 from second (blocked)
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(2);
-
-      // Wait for cooldown to expire (not possible in test — skip)
-      // But we can reset cooldowns and try again to verify new audit
-      resetAutoReplyCooldowns();
+      await resetAutoReplyCooldowns();
       mockSaveOutboundRecord.mockClear();
 
-      // Fresh message after reset: should dispatch, creates OutboundRecord
+      // Fresh message after reset: should dispatch
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-3" }));
-      // R1.1: Unified dispatcher creates OutboundRecord for allowed messages too
       expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
       const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(call.decision).toBe("allow");
     });
   });
-});
 
 // ── R1.2 Smoke: Image/File paths via unified dispatcher ───────────
 

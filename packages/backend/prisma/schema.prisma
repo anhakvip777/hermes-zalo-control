@@ -571,3 +571,19 @@ model LiveTestSession {
   @@index([status])
   @@index([expiresAt])
 }
+
+// =============================================================================
+// ThreadCooldown — unified per-thread cooldown store (R5)
+// Replaces dual in-memory Maps from incoming-dispatcher + outbound-dispatcher.
+// =============================================================================
+
+model ThreadCooldown {
+  id          String   @id @default(cuid())
+  threadId    String   @unique
+  lastReplyAt DateTime
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([expiresAt])
+}
