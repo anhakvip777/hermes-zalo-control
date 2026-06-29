@@ -8,6 +8,7 @@ import { listThreads, listMessages } from "../services/zalo-receive.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
 import { sendOutbound } from "../services/outbound-dispatcher.service.js";
+import { normalizeThreadId } from "../services/thread-id.js";
 import { prisma } from "../db.js";
 
 /**
@@ -105,9 +106,10 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   app.post("/zalo/send-test", async (request) => {
     const input = SendMessageSchema.parse(request.body);
+    const tid = normalizeThreadId(input.threadId);
 
     const result = await sendOutbound({
-      threadId: input.threadId,
+      threadId: tid,
       threadType: input.threadType as "user" | "group",
       source: "manual_test",
       content: input.content,

@@ -6,6 +6,7 @@ import { prisma } from "../db.js";
 import { getProductionReadiness } from "./production-readiness.service.js";
 import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 import { config } from "../config.js";
+import { normalizeThreadId } from "./thread-id.js";
 import type { LiveTestSession } from "@prisma/client";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -60,7 +61,8 @@ const MAX_TTL_SECONDS = 300;
 // ── Start live test ───────────────────────────────────────────────────
 
 export async function startLiveTest(input: StartLiveTestInput): Promise<StartLiveTestResult> {
-  const { threadId, maxMessages, ttlSeconds, confirmText, reason, createdBy } = input;
+  const threadId = normalizeThreadId(input.threadId);
+  const { maxMessages, ttlSeconds, confirmText, reason, createdBy } = input;
 
   // Guard: confirm text
   if (confirmText !== CONFIRM_TEXT) {
@@ -268,6 +270,7 @@ export async function shouldSendLiveForThread(threadId: string): Promise<{
   sessionId?: string;
   reason?: string;
 }> {
+  const tid = normalizeThreadId(threadId);
   const globalDryRun = getCurrentEffectiveDryRun();
 
   // Safety Mode: global live
@@ -277,7 +280,7 @@ export async function shouldSendLiveForThread(threadId: string): Promise<{
 
   // Check for active live test session
   const session = await prisma.liveTestSession.findFirst({
-    where: { threadId, status: "active" },
+    where: { threadId: tid, status: "active" },
   });
 
   if (!session) {

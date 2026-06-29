@@ -4,6 +4,7 @@
 // Batch 13: Added file/document message type detection for Zalo attachments.
 
 import { prisma } from "../db.js";
+import { normalizeThreadId } from "./thread-id.js";
 
 export interface NormalizedMessage {
   zaloMessageId: string | null;
@@ -45,7 +46,7 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
   if (!raw || typeof raw !== "object") return null;
 
   const data = (raw.data ?? raw) as Record<string, unknown>;
-  const threadId = String(raw.threadId ?? data.threadId ?? "");
+  const threadId = normalizeThreadId(raw.threadId ?? data.threadId);
   const rawContent = data.content ?? data.msg ?? "";
   const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
 

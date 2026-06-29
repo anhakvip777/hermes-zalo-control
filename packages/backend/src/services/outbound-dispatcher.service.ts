@@ -25,6 +25,7 @@ import { saveOutboundRecord } from "./outbound-guardrails.service.js";
 import { heartbeatOk } from "./heartbeat.service.js";
 import { getEffectiveCooldownSeconds } from "./runtime-config.service.js";
 import { getThreadSettings } from "./thread-settings.service.js";
+import { normalizeThreadId } from "./thread-id.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -104,7 +105,8 @@ function mapSource(source: OutboundSource): "auto_reply" | "schedule" | "media" 
 // ── Main dispatcher ──────────────────────────────────────────────────
 
 export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResult> {
-  const { threadId, threadType, source, content, relatedMessageId, taskId, metadata } = intent;
+  const threadId = normalizeThreadId(intent.threadId);
+  const { threadType, source, content, relatedMessageId, taskId, metadata } = intent;
 
   // 1. ── Safety: thread allowed? ───────────────────────────────────
   try {
