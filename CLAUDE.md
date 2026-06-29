@@ -99,6 +99,86 @@ POST /api/documents/ingest → 202 (queued) → Document Worker (separate proces
 3. **No parallel PDFs**: Worker processes 5 jobs max per poll cycle
 4. **Safe dir only**: Files must be under `DOCUMENT_ALLOWED_BASE_DIR`
 
+## Message Batching / Debounce (Batch 14 + 14.1)
+
+**Status**: ✅ PASS (live-tested 2026-06-28)
+
+### Overview
+
+When enabled, consecutive text DMs within a configurable window are combined into a single MessageBatch and processed once — reducing duplicate Hermes calls and enabling multi-line reminder parsing.
+
+### Config
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `MESSAGE_BATCHING_ENABLED` | `false` | Safe default — disabled |
+| `MESSAGE_BATCHING_WINDOW_MS` | `4000` | Debounce window (tested at 6000ms) |
+| `MESSAGE_BATCHING_MAX_MESSAGES` | `5` | Max messages per batch |
+| `MESSAGE_BATCHING_MAX_CHARS` | `3000` | Max chars per batch |
+| `MESSAGE_BATCHING_THREAD_TYPES` | `user` | DM only (no groups) |
+
+### Architecture
+
+```
+Zalo inbound → safety gates → Batching Interceptor
+  → addToBatch() → collecting / ready (limits hit)
+  → AgentTask skipped (reason: added_to_batch)
+  → Batch Worker (10s poll) → processBatchNow()
+  → Rules → Create-Reminder Parser → Hermes fallback
+```
+
+### Key Behaviors
+
+- **Cooldown skipped during collecting**: `safetyCheck()` bypasses cooldown for text DMs when batching is active — messages 2..N are NOT blocked
+- **Cooldown applied after batch**: Set when batch becomes `ready` (limits hit) or after processing
+- **Combined text stored as-is**: `combinedText` preserves original `\n` separators for audit
+- **Normalized for parsing**: `parseReminderFromMessage` normalizes `\n` → ` ` internally for pattern matching
+- **Non-text passthrough**: Images/files always go through individually, not batched
+- **Groups excluded**: Only DM text is batched; group messages follow normal pipeline
+
+### Reminder Parser (Batch 14.1)
+
+Added pattern: `nhắc [target]? <content> lúc <time>`
+
+| Example | Content | Time |
+|---------|---------|------|
+| `Nhắc mình đi lễ Phật lúc 19h` | `đi lễ Phật` | `19h` |
+| `Nhắc mình\nĐi Lễ Phật\nLúc 19h` | `Đi Lễ Phật` | `19h` (batched) |
+| `nhắc đi chợ lúc 7h sáng` | `đi chợ` | `7h sáng` |
+
+`parseLúcTime()` helper: 12h/24h notation, period detection (sáng/chiều/tối/trưa), auto-PM for hours 1-6.
+
+### Safety
+
+- Disabled by default (`MESSAGE_BATCHING_ENABLED=false`)
+- DM only — groups still use normal pipeline
+- All safety gates run BEFORE batching (allowlist, self-guard)
+- Unsupported System Claim Guard still blocks Hermes fake "đã đặt lịch" claims
+- Dry-run always respected
+
+### DB Schema
+
+`MessageBatch` model with lifecycle: `collecting` → `ready` → `processing` → `completed`/`cancelled`
+
+### Tests
+
+- `batch14-message-batching.test.ts`: 19 tests (10 service + 9 parser)
+- Full suite: 30 files, 504/504 PASS
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `packages/backend/src/services/message-batch.service.ts` | Batch CRUD: create, append, claim, complete |
+| `packages/backend/src/workers/message-batch-worker.ts` | Polling worker for overdue batches |
+| `packages/backend/src/services/incoming-dispatcher.service.ts` | Batching interceptor + `processBatchNow` + reminder parser |
+
+### Known Limitations
+
+1. **Group not supported**: Batching only for DM (`user` thread type)
+2. **In-memory cooldown**: `lastReplyAt` Map resets on restart (cooldown window may reopen)
+3. **No batch UI yet**: Batch status visible via DB only; no Admin Center card
+
 ## Key Files
 
 | File                                        | Purpose                                      |
