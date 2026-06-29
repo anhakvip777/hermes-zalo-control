@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { config } from "../config.js";
+import { heartbeatOk } from "./heartbeat.service.js";
 
 // Resolve zca-js from the project root node_modules.
 // We resolve from process.cwd() which is always the project root when running via npm/tsx.
@@ -410,9 +411,7 @@ export class ZaloGatewayService extends EventEmitter {
     console.log("[listener] zca-js listener started successfully");
     this.listenerActive = true;
     // ── Heartbeat: listener active ───────────────────────────────
-    import("./heartbeat.service.js").then(({ heartbeatOk }) =>
-      heartbeatOk("zaloListener", { listenerStarted: true, selfUserId: this.status.selfUserId }),
-    ).catch(() => {});
+        heartbeatOk("zaloListener", { listenerStarted: true, selfUserId: this.status.selfUserId }).catch(() => {});
   }
 
   private async stopListener(): Promise<void> {
@@ -508,9 +507,7 @@ export class ZaloGatewayService extends EventEmitter {
     });
     this.reconnectAttempt = 0;
     // ── Heartbeat: Zalo connected ────────────────────────────────
-    import("./heartbeat.service.js").then(({ heartbeatOk }) =>
-      heartbeatOk("zaloConnection", { connected: true, selfUserId: this.status.selfUserId }),
-    ).catch(() => {});
+    heartbeatOk("zaloConnection", { connected: true, selfUserId: this.status.selfUserId }).catch(() => {});
   }
 
   private setStatus(partial: Partial<ZaloGatewayStatus>): void {

@@ -3,7 +3,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve, normalize, relative, sep } from "node:path";
 import { SendMessageSchema } from "@hermes/shared";
 import { getZaloGateway } from "../services/zalo-gateway.service.js";
-import { ZaloMessageSender } from "../services/zalo-message-sender.js";
 import { listThreads, listMessages } from "../services/zalo-receive.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
@@ -170,11 +169,6 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // POST /api/zalo/send-media
   // ═════════════════════════════════════════════════════════════════
-  //
-  // R4B pending: media outbound (image/file) is intentionally not routed through
-  // Unified Outbound Dispatcher yet because OutboundIntent currently supports
-  // text content only. Do not add new direct text send paths here.
-  //
   app.post("/zalo/send-media", async (request, reply) => {
     const body = request.body as {
       type: "image" | "file";
@@ -196,18 +190,35 @@ export async function zaloRoutes(app: FastifyInstance) {
       return { success: false, error: (pathCheck as { allowed: false; error: string }).error, errorCode: "MEDIA_PATH_BLOCKED" };
     }
 
-    const sender = new ZaloMessageSender();
     const threadType = body.threadType || "user";
+    const safeFilename = body.path.split("/").pop() || body.path;
 
-    if (body.type === "image") {
-      return sender.sendImage(pathCheck.resolvedPath, body.threadId, threadType, body.caption);
-    }
-    if (body.type === "file") {
-      return sender.sendFile(pathCheck.resolvedPath, body.threadId, threadType, body.caption);
-    }
+    const result = await sendOutbound({
+      kind: "media",
+      threadId: normalizeThreadId(body.threadId),
+      threadType: threadType as "user" | "group",
+      source: "manual_media",
+      mediaType: body.type,
+      filePath: pathCheck.resolvedPath,
+      filename: safeFilename,
+      caption: body.caption,
+      metadata: {
+        route: "zalo/send-media",
+        mediaType: body.type,
+        basename: safeFilename,
+      },
+    });
 
-    reply.status(400);
-    return { success: false, error: `Invalid type: ${body.type}. Use "image" or "file".` };
+    return {
+      success: result.success || result.dryRun,
+      messageId: result.sentMessageId ?? null,
+      sentMessageId: result.sentMessageId ?? null,
+      decision: result.decision === "allow" ? (result.dryRun ? "dry_run" : "sent") : result.decision,
+      dryRun: result.dryRun,
+      outboundRecordId: result.outboundRecordId ?? null,
+      error: result.error ?? null,
+      errorCode: result.errorCode ?? null,
+    };
   });
 
   // POST /api/zalo/create-poll
@@ -285,11 +296,6 @@ export async function zaloRoutes(app: FastifyInstance) {
   // POST /api/zalo/send-voice
   // Generate TTS audio + send as voice message via Zalo.
   // ═══════════════════════════════════════════════════════════
-  //
-  // R4B pending: voice outbound (TTS audio) is intentionally not routed through
-  // Unified Outbound Dispatcher yet because OutboundIntent currently supports
-  // text content only. Do not add new direct text send paths here.
-  //
   app.post("/zalo/send-voice", async (request, reply) => {
     const body = request.body as {
       threadId: string;
@@ -380,43 +386,50 @@ export async function zaloRoutes(app: FastifyInstance) {
       errorCode: null,
     }).catch(() => {});
 
-    // ── Send voice via ZaloMessageSender ───────────────────────
+    // ── Send voice via Unified Outbound Dispatcher ────────────
     if (!audioPath) {
       return { success: false, error: "No audio path", errorCode: "TTS_NO_AUDIO_PATH" };
     }
 
-    // Note: dryRun behavior is now controlled by getCurrentEffectiveDryRun()
-    // The body.dryRun parameter is for audit recording only
-    try {
-      const sender = new ZaloMessageSender();
-      const result = await sender.sendVoice(audioPath, body.threadId, threadType);
+    const voiceResult = await sendOutbound({
+      kind: "voice",
+      threadId: normalizeThreadId(body.threadId),
+      threadType: threadType as "user" | "group",
+      source: "manual_voice",
+      audioPath,
+      metadata: {
+        route: "zalo/send-voice",
+        mediaType: "voice",
+        basename: audioPath.split("/").pop() || audioPath,
+        textLength: body.text?.length,
+      },
+    });
 
-      saveVoiceAudit({
-        threadId: body.threadId,
-        threadType,
-        text: body.text,
-        textHash: ttsResult.textHash ?? null,
-        audioPath: audioPath,
-        duration: ttsResult.duration ?? null,
-        dryRun: dryRun ?? getCurrentEffectiveDryRun(),
-        decision: result.success ? "allow" : "block",
-        reason: result.success ? "voice_sent" : (result.error ?? "voice_send_failed"),
-        sentMessageId: result.messageId ?? null,
-        errorCode: result.errorCode ?? null,
-      }).catch(() => {});
+    saveVoiceAudit({
+      threadId: body.threadId,
+      threadType,
+      text: body.text,
+      textHash: ttsResult.textHash ?? null,
+      audioPath: audioPath,
+      duration: ttsResult.duration ?? null,
+      dryRun: voiceResult.dryRun,
+      decision: voiceResult.success ? "allow" : "block",
+      reason: voiceResult.success ? "voice_sent" : (voiceResult.error ?? "voice_send_failed"),
+      sentMessageId: voiceResult.sentMessageId ?? null,
+      errorCode: voiceResult.errorCode ?? null,
+    }).catch(() => {});
 
-      return {
-        success: result.success,
-        audioPath: audioPath,
-        duration: ttsResult.duration,
-        sentMessageId: result.messageId ?? null,
-        error: result.error,
-        errorCode: result.errorCode,
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, error: msg, errorCode: "VOICE_SEND_FAILED" };
-    }
+    return {
+      success: voiceResult.success || voiceResult.dryRun,
+      audioPath: audioPath,
+      duration: ttsResult.duration,
+      sentMessageId: voiceResult.sentMessageId ?? null,
+      decision: voiceResult.decision === "allow" ? (voiceResult.dryRun ? "dry_run" : "sent") : voiceResult.decision,
+      dryRun: voiceResult.dryRun,
+      outboundRecordId: voiceResult.outboundRecordId ?? null,
+      error: voiceResult.error,
+      errorCode: voiceResult.errorCode,
+    };
   });
 
   // ═════════════════════════════════════════════════════════════

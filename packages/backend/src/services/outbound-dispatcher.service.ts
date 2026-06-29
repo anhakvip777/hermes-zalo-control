@@ -10,14 +10,15 @@
 //     → cooldown check
 //     → dryRun decision (getCurrentEffectiveDryRun)
 //     → liveTest override (shouldSendLiveForThread)
-//     → create Assistant Message (status: draft)
+//     → create Assistant Message (status: draft) [text only]
 //     → create OutboundRecord
-//     → if !dryRun → ZaloMessageSender.send()
+//     → if !dryRun → ZaloMessageSender.send*()
 //     → update OutboundRecord (sentMessageId / error)
-//     → update Message status
+//     → update Message status [text only]
 //     → heartbeat (messagePipeline)
 // =============================================================================
 
+import { basename } from "node:path";
 import { prisma } from "../db.js";
 import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 import { ZaloMessageSender } from "./zalo-message-sender.js";
@@ -36,6 +37,8 @@ export type OutboundSource =
   | "batch"
   | "schedule"
   | "manual_test"
+  | "manual_media"
+  | "manual_voice"
   | "document"
   | "ocr"
   | "image"
@@ -43,15 +46,39 @@ export type OutboundSource =
   | "error_fallback"
   | "catch_all";
 
-export interface OutboundIntent {
+// ── Discriminated union for OutboundIntent ───────────────────────────
+
+type BaseOutboundIntent = {
   threadId: string;
   threadType: "user" | "group";
   source: OutboundSource;
-  content: string;
   relatedMessageId?: string;
   taskId?: string;
   metadata?: Record<string, unknown>;
-}
+};
+
+export type TextOutboundIntent = BaseOutboundIntent & {
+  kind?: "text"; // default when omitted
+  content: string;
+};
+
+export type MediaOutboundIntent = BaseOutboundIntent & {
+  kind: "media";
+  mediaType: "image" | "file";
+  filePath: string;
+  filename?: string;
+  caption?: string;
+};
+
+export type VoiceOutboundIntent = BaseOutboundIntent & {
+  kind: "voice";
+  audioPath: string;
+};
+
+export type OutboundIntent =
+  | TextOutboundIntent
+  | MediaOutboundIntent
+  | VoiceOutboundIntent;
 
 export interface OutboundResult {
   success: boolean;
@@ -93,6 +120,8 @@ function mapSource(source: OutboundSource): "auto_reply" | "schedule" | "media" 
     case "batch": return "auto_reply";
     case "schedule": return "schedule";
     case "manual_test": return "manual";
+    case "manual_media": return "manual";
+    case "manual_voice": return "manual";
     case "document": return "media";
     case "ocr": return "media";
     case "image": return "auto_reply";
@@ -102,37 +131,55 @@ function mapSource(source: OutboundSource): "auto_reply" | "schedule" | "media" 
   }
 }
 
+// ── Runtime guard: validate intent fields ────────────────────────────
+
+function validateIntent(intent: OutboundIntent): string | null {
+  const kind = (intent as any).kind || "text";
+  if (kind === "media") {
+    const m = intent as MediaOutboundIntent;
+    if (!m.mediaType || !m.filePath) return "media intent requires mediaType and filePath";
+  }
+  if (kind === "voice") {
+    const v = intent as VoiceOutboundIntent;
+    if (!v.audioPath) return "voice intent requires audioPath";
+  }
+  if (kind === "text" || !kind) {
+    const t = intent as TextOutboundIntent;
+    if (!t.content) return "text intent requires content";
+  }
+  return null;
+}
+
 // ── Main dispatcher ──────────────────────────────────────────────────
 
 export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResult> {
   const threadId = normalizeThreadId(intent.threadId);
-  const { threadType, source, content, relatedMessageId, taskId, metadata } = intent;
+  const { threadType, source, relatedMessageId, taskId, metadata } = intent;
+  const kind = (intent as any).kind || "text";
+
+  // Runtime guard
+  const validationErr = validateIntent(intent);
+  if (validationErr) {
+    return { success: false, dryRun: true, decision: "skip", reason: validationErr };
+  }
 
   // 1. ── Safety: thread allowed? ───────────────────────────────────
   try {
     const setting = await getThreadSettings(threadId, threadType);
     if (setting && setting.autoReplyEnabled === false) {
-      return {
-        success: false, dryRun: true, decision: "block",
-        reason: "thread_auto_reply_disabled",
-      };
+      return { success: false, dryRun: true, decision: "block", reason: "thread_auto_reply_disabled" };
     }
-  } catch {
-    // Non-fatal — proceed if thread setting check fails
-  }
+  } catch { /* non-fatal */ }
 
   // 2. ── Cooldown check ────────────────────────────────────────────
   if (isInCooldown(threadId)) {
-    // Record the skip for audit
+    const recordContent = buildRecordContent(intent);
     saveOutboundRecord({
-      threadId, threadType, content,
+      threadId, threadType, content: recordContent,
       sentMessageId: "", source: mapSource(source), dryRun: true,
       decision: "skip", reason: "cooldown",
     }).catch(() => {});
-    return {
-      success: false, dryRun: true, decision: "skip",
-      reason: "cooldown",
-    };
+    return { success: false, dryRun: true, decision: "skip", reason: "cooldown" };
   }
 
   // 3. ── DryRun decision ───────────────────────────────────────────
@@ -148,74 +195,88 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
         effectiveDryRun = false;
         liveTestSessionId = liveCheck.sessionId;
       }
-    } catch {
-      // Non-fatal — proceed with current dryRun
-    }
+    } catch { /* non-fatal */ }
   }
 
-  // 5. ── Create Assistant Message ──────────────────────────────────
+  // 5. ── Create Assistant Message (text only) ───────────────────────
   let assistantMessageId: string | undefined;
-  try {
-    const msg = await prisma.message.create({
-      data: {
-        threadId,
-        threadType,
-        content: content.slice(0, 4000),
-        role: "assistant",
-        isFromBot: true,
-        messageType: "text",
-        relatedMessageId: relatedMessageId ?? null,
-        metadata: JSON.stringify({
-          source: `outbound_${source}`,
-          dryRun: effectiveDryRun,
-          taskId: taskId ?? null,
-          status: effectiveDryRun ? "dryRun" : "sending",
-          liveTestSessionId: liveTestSessionId ?? null,
-          ...metadata,
-        }),
-      },
-    });
-    assistantMessageId = msg.id;
-  } catch (err: unknown) {
-    console.error(`[outbound-dispatcher] Failed to save assistant message: ${(err as Error).message}`);
+  if (kind === "text") {
+    const t = intent as TextOutboundIntent;
+    try {
+      const msg = await prisma.message.create({
+        data: {
+          threadId, threadType,
+          content: t.content.slice(0, 4000),
+          role: "assistant", isFromBot: true, messageType: "text",
+          relatedMessageId: relatedMessageId ?? null,
+          metadata: JSON.stringify({
+            source: `outbound_${source}`,
+            dryRun: effectiveDryRun,
+            taskId: taskId ?? null,
+            status: effectiveDryRun ? "dryRun" : "sending",
+            liveTestSessionId: liveTestSessionId ?? null,
+            ...metadata,
+          }),
+        },
+      });
+      assistantMessageId = msg.id;
+    } catch (err: unknown) {
+      console.error(`[outbound-dispatcher] Failed to save assistant message: ${(err as Error).message}`);
+    }
   }
 
   // 6. ── Dry-run path ──────────────────────────────────────────────
   if (effectiveDryRun) {
-    const fakeMsgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    // Save OutboundRecord with dryRun=true
+    let fakeMsgId: string;
+    if (kind === "media") {
+      const m = intent as MediaOutboundIntent;
+      fakeMsgId = `dry-run-${m.mediaType}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    } else if (kind === "voice") {
+      fakeMsgId = `dry-run-voice-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    } else {
+      fakeMsgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    }
+
+    const recordContent = buildRecordContent(intent);
     saveOutboundRecord({
-      threadId, threadType, content,
+      threadId, threadType, content: recordContent,
       sentMessageId: fakeMsgId, source: mapSource(source), dryRun: true,
-      decision: "allow", reason: liveTestSessionId ? "dry_run" : "dry_run",
+      decision: "allow", reason: "dry_run",
     }).catch(() => {});
 
-    // Update message status
     if (assistantMessageId) {
       updateMessageStatus(assistantMessageId, "dryRun", { sentMessageId: fakeMsgId });
     }
 
     setCooldown(threadId);
-    heartbeatOk("messagePipeline", { threadId, threadType, messageType: "text", contentLength: content.length })
-      .catch(() => {});
+    const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
+    heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 
-    return {
-      success: true, dryRun: true, decision: "allow",
-      reason: "dry_run",
-      sentMessageId: fakeMsgId,
-      outboundRecordId: undefined,
-      assistantMessageId,
-    };
+    return { success: true, dryRun: true, decision: "allow", reason: "dry_run", sentMessageId: fakeMsgId, assistantMessageId };
   }
 
   // 7. ── Live send path ────────────────────────────────────────────
   const sender = new ZaloMessageSender();
-  const sendResult = await sender.sendMessage(content, threadId, threadType, mapSource(source));
+  let sendResult: { success: boolean; messageId?: string; error?: string; errorCode?: string };
 
-  // 8. ── Update Message status ─────────────────────────────────────
+  if (kind === "media") {
+    const m = intent as MediaOutboundIntent;
+    if (m.mediaType === "image") {
+      sendResult = await sender.sendImage(m.filePath, threadId, threadType, m.caption);
+    } else {
+      sendResult = await sender.sendFile(m.filePath, threadId, threadType, m.caption);
+    }
+  } else if (kind === "voice") {
+    const v = intent as VoiceOutboundIntent;
+    sendResult = await sender.sendVoice(v.audioPath, threadId, threadType);
+  } else {
+    const t = intent as TextOutboundIntent;
+    sendResult = await sender.sendMessage(t.content, threadId, threadType, mapSource(source));
+  }
+
+  // 8. ── Update Message status (text only) ─────────────────────────
   if (assistantMessageId) {
-    const status = sendResult.success ? "sent" : "failed";
-    updateMessageStatus(assistantMessageId, status, {
+    updateMessageStatus(assistantMessageId, sendResult.success ? "sent" : "failed", {
       sentMessageId: sendResult.messageId,
       errorCode: sendResult.errorCode,
       error: sendResult.error,
@@ -223,8 +284,8 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
   }
 
   setCooldown(threadId);
-  heartbeatOk("messagePipeline", { threadId, threadType, messageType: "text", contentLength: content.length })
-    .catch(() => {});
+  const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
+  heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 
   return {
     success: sendResult.success,
@@ -232,11 +293,27 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     decision: "allow",
     reason: liveTestSessionId ? "live_test" : "single_send",
     sentMessageId: sendResult.messageId ?? undefined,
-    outboundRecordId: undefined,
     assistantMessageId,
     error: sendResult.error,
     errorCode: sendResult.errorCode,
   };
+}
+
+// ── Helper: build safe content string for OutboundRecord ─────────────
+
+function buildRecordContent(intent: OutboundIntent): string {
+  const kind = (intent as any).kind || "text";
+  if (kind === "media") {
+    const m = intent as MediaOutboundIntent;
+    const safePath = basename(m.filePath);
+    return `[${m.mediaType}: ${safePath}]${m.caption ? ` (${m.caption})` : ""}`;
+  }
+  if (kind === "voice") {
+    const v = intent as VoiceOutboundIntent;
+    const safePath = basename(v.audioPath);
+    return `[voice: ${safePath}]`;
+  }
+  return (intent as TextOutboundIntent).content;
 }
 
 // ── Helper: update message metadata status ──────────────────────────
@@ -249,19 +326,11 @@ async function updateMessageStatus(
   try {
     const existing = await prisma.message.findUnique({ where: { id: messageId }, select: { metadata: true } });
     if (!existing) return;
-
     let meta: Record<string, unknown> = {};
-    try {
-      meta = existing.metadata ? JSON.parse(existing.metadata) : {};
-    } catch { /* keep empty */ }
-
+    try { meta = existing.metadata ? JSON.parse(existing.metadata) : {}; } catch { /* keep empty */ }
     meta.status = status;
     if (extra) Object.assign(meta, extra);
-
-    await prisma.message.update({
-      where: { id: messageId },
-      data: { metadata: JSON.stringify(meta) },
-    });
+    await prisma.message.update({ where: { id: messageId }, data: { metadata: JSON.stringify(meta) } });
   } catch (err: unknown) {
     console.error(`[outbound-dispatcher] Failed to update message status: ${(err as Error).message}`);
   }
