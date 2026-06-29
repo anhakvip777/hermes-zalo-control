@@ -7,6 +7,7 @@ import { ZaloMessageSender } from "../services/zalo-message-sender.js";
 import { listThreads, listMessages } from "../services/zalo-receive.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
+import { sendOutbound } from "../services/outbound-dispatcher.service.js";
 import { prisma } from "../db.js";
 
 /**
@@ -102,17 +103,33 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // POST /api/zalo/send-test
   // ═════════════════════════════════════════════════════════════════
-  app.post("/zalo/send-test", async (request, reply) => {
+  app.post("/zalo/send-test", async (request) => {
     const input = SendMessageSchema.parse(request.body);
-    const sender = new ZaloMessageSender();
 
-    const result = await sender.sendMessage(
-      input.content,
-      input.threadId,
-      input.threadType,
-    );
+    const result = await sendOutbound({
+      threadId: input.threadId,
+      threadType: input.threadType as "user" | "group",
+      source: "manual_test",
+      content: input.content,
+      metadata: {
+        route: "zalo/send-test",
+        initiatedBy: "admin",
+      },
+    });
 
-    return { data: result };
+    return {
+      data: {
+        success: result.success || result.dryRun,
+        decision: result.decision === "allow"
+          ? (result.dryRun ? "dry_run" : "sent")
+          : result.decision,
+        dryRun: result.dryRun,
+        sentMessageId: result.sentMessageId ?? null,
+        outboundRecordId: result.outboundRecordId ?? null,
+        reason: result.reason,
+        error: result.error ?? null,
+      },
+    };
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -151,6 +168,11 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // POST /api/zalo/send-media
   // ═════════════════════════════════════════════════════════════════
+  //
+  // R4B pending: media outbound (image/file) is intentionally not routed through
+  // Unified Outbound Dispatcher yet because OutboundIntent currently supports
+  // text content only. Do not add new direct text send paths here.
+  //
   app.post("/zalo/send-media", async (request, reply) => {
     const body = request.body as {
       type: "image" | "file";
@@ -261,6 +283,11 @@ export async function zaloRoutes(app: FastifyInstance) {
   // POST /api/zalo/send-voice
   // Generate TTS audio + send as voice message via Zalo.
   // ═══════════════════════════════════════════════════════════
+  //
+  // R4B pending: voice outbound (TTS audio) is intentionally not routed through
+  // Unified Outbound Dispatcher yet because OutboundIntent currently supports
+  // text content only. Do not add new direct text send paths here.
+  //
   app.post("/zalo/send-voice", async (request, reply) => {
     const body = request.body as {
       threadId: string;
