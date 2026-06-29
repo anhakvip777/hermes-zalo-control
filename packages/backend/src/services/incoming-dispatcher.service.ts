@@ -5,7 +5,6 @@
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun, getEffectiveBatchingConfig, getEffectiveCooldownSeconds } from "./runtime-config.service.js";
 import { prisma } from "../db.js";
-import { ZaloMessageSender } from "./zalo-message-sender.js";
 import { getHermesChatAdapter } from "./hermes-chat-adapter.js";
 import * as agentTaskService from "./agent-task.service.js";
 import * as scheduleService from "./schedule.service.js";
@@ -21,14 +20,15 @@ import {
 } from "./group-safety.service.js";
 import type { NormalizedMessage } from "./zalo-receive.js";
 import type { ConversationState } from "./thread-conversation-state.service.js";
-import { saveOutboundMessage } from "./conversation-context.service.js";
 import { saveOutboundRecord } from "./outbound-guardrails.service.js";
+import { sendOutbound, resetOutboundCooldowns } from "./outbound-dispatcher.service.js";
 
 // ── Cooldown: in-memory per-thread ──────────────────────────────────
 const lastReplyAt = new Map<string, number>();
 
 export function resetAutoReplyCooldowns(): void {
   lastReplyAt.clear();
+  resetOutboundCooldowns();
 }
 
 function isInCooldown(threadId: string): boolean {
@@ -927,15 +927,16 @@ export async function handleIncomingMessage(
           dryRun: getCurrentEffectiveDryRun(),
         });
 
-        // Send fallback reply if not dry-run
-        if (!getCurrentEffectiveDryRun()) {
-          const sender = new ZaloMessageSender();
-          await sender.sendMessage(
-            "Mình không tải được ảnh bạn gửi. Bạn thử gửi lại nhé.",
-            msg.threadId,
-            msg.threadType,
-          );
-        }
+        // Send fallback reply via unified dispatcher
+        sendOutbound({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          source: "image",
+          content: "Mình không tải được ảnh bạn gửi. Bạn thử gửi lại nhé.",
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          taskId: task.id,
+          metadata: { downloadError: downloadResult.error },
+        }).catch(() => {});
 
         setCooldown(msg.threadId);
         return { dispatched: false, reason: "image_download_failed" };
@@ -1009,30 +1010,19 @@ export async function handleIncomingMessage(
         imageMimeType: downloadResult.mimeType,
       };
 
-      if (!getCurrentEffectiveDryRun()) {
-        const sender = new ZaloMessageSender();
-        const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-        imageResult.sentMessageId = sendResult.messageId ?? null;
-        imageResult.sendSuccess = sendResult.success;
-
-        // ── Gap 2: Save outbound image reply to conversation history ──
-        saveOutboundMessage({
-          threadId: msg.threadId,
-          threadType: msg.threadType,
-          content: replyText,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
-          metadata: { source: "auto_reply_image", sentMessageId: sendResult.messageId, taskId: task.id },
-        }).catch(() => {});
-      } else {
-        // ── Gap 2 (dry-run): Save outbound image reply to conversation history ──
-        saveOutboundMessage({
-          threadId: msg.threadId,
-          threadType: msg.threadType,
-          content: replyText,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
-          metadata: { source: "auto_reply_image", dryRun: true, taskId: task.id },
-        }).catch(() => {});
-      }
+      // Unified outbound via dispatcher for image analysis reply (R1.2)
+      const obResult = await sendOutbound({
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        source: "image",
+        content: replyText,
+        relatedMessageId: msg.zaloMessageId ?? undefined,
+        taskId: task.id,
+        metadata: { imageDescription: visionResult.description, provider: visionResult.provider },
+      });
+      imageResult.sentMessageId = obResult.sentMessageId;
+      imageResult.sendSuccess = obResult.success;
+      imageResult.dryRun = obResult.dryRun;
 
       await agentTaskService.markAgentTaskCompleted(task.id, imageResult);
       console.log(
@@ -1090,15 +1080,16 @@ export async function handleIncomingMessage(
         fileExtension: ext ?? "unknown",
         dryRun: getCurrentEffectiveDryRun(),
       });
-      // Notify user about unsupported file
-      if (!getCurrentEffectiveDryRun()) {
-        const sender = new ZaloMessageSender();
-        await sender.sendMessage(
-          `Mình chưa hỗ trợ đọc file .${ext ?? "này"}. Các định dạng hỗ trợ: PDF, DOCX, TXT, MD, CSV, PPTX, XLSX.`,
-          msg.threadId,
-          msg.threadType,
-        );
-      }
+      // Notify user about unsupported file via unified dispatcher
+      sendOutbound({
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        source: "file",
+        content: `Mình chưa hỗ trợ đọc file .${ext ?? "này"}. Các định dạng hỗ trợ: PDF, DOCX, TXT, MD, CSV, PPTX, XLSX.`,
+        relatedMessageId: msg.zaloMessageId ?? undefined,
+        taskId: task.id,
+        metadata: { unsupportedExtension: ext ?? "unknown" },
+      }).catch(() => {});
       setCooldown(msg.threadId);
       return { dispatched: false, reason: "unsupported_extension" };
     }
@@ -1165,40 +1156,22 @@ export async function handleIncomingMessage(
         zaloMessageId: msg.zaloMessageId,
       };
 
-      if (getCurrentEffectiveDryRun()) {
-        await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
-        console.log(
-          `[dispatcher] document queued (dry-run): ${ingestResult.documentId} ` +
-          `file=${ingestResult.fileName} method=${ingestResult.method} (thread=${msg.threadId})`,
-        );
-      } else {
-        // Send confirmation to user
-        const sender = new ZaloMessageSender();
-        const replyText = `✅ Đã nhận tài liệu "${ingestResult.fileName}" và đang xử lý.\nSau khi xong bạn có thể hỏi mình về nội dung.`;
-        const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-        fileResult.sentMessageId = sendResult.messageId ?? null;
-        fileResult.sendSuccess = sendResult.success;
-        fileResult.replyPreview = replyText.slice(0, 200);
-        await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
-        console.log(
-          `[dispatcher] document queued + sent: ${ingestResult.documentId} ` +
-          `file=${ingestResult.fileName} msgId=${sendResult.messageId}`,
-        );
-
-        // Save outbound to conversation history
-        saveOutboundMessage({
-          threadId: msg.threadId,
-          threadType: msg.threadType,
-          content: replyText,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
-          metadata: {
-            source: "auto_reply_file",
-            sentMessageId: sendResult.messageId,
-            documentId: ingestResult.documentId,
-            taskId: task.id,
-          },
-        }).catch(() => {});
-      }
+      // Unified outbound via dispatcher for file confirmation (R1.2)
+      const replyText = `✅ Đã nhận tài liệu "${ingestResult.fileName}" và đang xử lý.\nSau khi xong bạn có thể hỏi mình về nội dung.`;
+      const obResult = await sendOutbound({
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        source: "file",
+        content: replyText,
+        relatedMessageId: msg.zaloMessageId ?? undefined,
+        taskId: task.id,
+        metadata: { documentId: ingestResult.documentId, fileName: ingestResult.fileName },
+      });
+      fileResult.sentMessageId = obResult.sentMessageId;
+      fileResult.sendSuccess = obResult.success;
+      fileResult.dryRun = obResult.dryRun;
+      fileResult.replyPreview = replyText.slice(0, 200);
+      await agentTaskService.markAgentTaskCompleted(task.id, fileResult);
 
       setCooldown(msg.threadId);
       return { dispatched: true };
@@ -1214,14 +1187,16 @@ export async function handleIncomingMessage(
         dryRun: getCurrentEffectiveDryRun(),
       });
 
-      if (!getCurrentEffectiveDryRun()) {
-        const sender = new ZaloMessageSender();
-        await sender.sendMessage(
-          "Mình nhận được file nhưng chưa xử lý được. Bạn thử lại sau nhé.",
-          msg.threadId,
-          msg.threadType,
-        );
-      }
+      // Send error notification via unified dispatcher
+      sendOutbound({
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        source: "file",
+        content: "Mình nhận được file nhưng chưa xử lý được. Bạn thử lại sau nhé.",
+        relatedMessageId: msg.zaloMessageId ?? undefined,
+        taskId: task.id,
+        metadata: { error: errorMsg.slice(0, 200) },
+      }).catch(() => {});
 
       setCooldown(msg.threadId);
       return { dispatched: false, reason: "file_ingestion_error" };
@@ -1292,13 +1267,21 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           scheduleCreated: true,
         };
 
-        // Always use ZaloMessageSender — it handles dryRun/liveTest internally
-        const sender = new ZaloMessageSender();
-        const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-        createResult.sentMessageId = sendResult.messageId ?? null;
-        createResult.sendSuccess = sendResult.success;
+        // Unified outbound via dispatcher for reminder confirmation (R1.2)
+        const obResult = await sendOutbound({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          source: "reminder",
+          content: replyText,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          taskId: task.id,
+          metadata: { scheduleId: schedule.id, jobId: job.id },
+        });
+        createResult.sentMessageId = obResult.sentMessageId;
+        createResult.sendSuccess = obResult.success;
+        createResult.dryRun = obResult.dryRun;
         await agentTaskService.markAgentTaskCompleted(task.id, createResult);
-        console.log(`[dispatcher] schedule-created: ${schedule.id} msgId=${sendResult.messageId} (thread=${msg.threadId})`);
+        console.log(`[dispatcher] schedule-created: ${schedule.id} msgId=${obResult.sentMessageId} (thread=${msg.threadId})`);
 
         setCooldown(msg.threadId);
         return { dispatched: true };
@@ -1313,11 +1296,19 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           error: errorMsg.slice(0, 200),
         };
 
-        // Always use ZaloMessageSender — it handles dryRun/liveTest internally
-        const sender = new ZaloMessageSender();
-        const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
-        failResult.sentMessageId = sendResult.messageId ?? null;
-        failResult.sendSuccess = sendResult.success;
+        // Unified outbound via dispatcher for failure reply (R1.2)
+        const obFailResult = await sendOutbound({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          source: "reminder",
+          content: failReply,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          taskId: task.id,
+          metadata: { scheduleCreationFailed: true, error: errorMsg.slice(0, 200) },
+        });
+        failResult.sentMessageId = obFailResult.sentMessageId;
+        failResult.sendSuccess = obFailResult.success;
+        failResult.dryRun = obFailResult.dryRun;
         await agentTaskService.markAgentTaskCompleted(task.id, failResult);
 
         console.error(`[dispatcher] schedule-creation failed: ${errorMsg}`);
@@ -1376,21 +1367,21 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             resolvedContent: resolvedContent.slice(0, 200),
           };
 
-          // Always use ZaloMessageSender — it handles dryRun/liveTest internally
-          const sender = new ZaloMessageSender();
-          const sendResult = await sender.sendMessage(replyText, msg.threadId, msg.threadType);
-          ctxResult.sentMessageId = sendResult.messageId ?? null;
-          ctxResult.sendSuccess = sendResult.success;
-          await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
-          console.log(`[dispatcher] context-reminder created: ${schedule.id} msgId=${sendResult.messageId} (thread=${msg.threadId})`);
-          // Save outbound reply to conversation history
-          saveOutboundMessage({
+          // Unified outbound via dispatcher (R1.1)
+          const obResult = await sendOutbound({
             threadId: msg.threadId,
             threadType: msg.threadType,
+            source: "reminder",
             content: replyText,
             relatedMessageId: msg.zaloMessageId ?? undefined,
-            metadata: { source: "auto_reply_context_reminder", sentMessageId: sendResult.messageId, scheduleId: schedule.id, taskId: task.id },
-          }).catch(() => {});
+            taskId: task.id,
+            metadata: { scheduleId: schedule.id, jobId: job.id, resolvedFromContext: true },
+          });
+          ctxResult.sentMessageId = obResult.sentMessageId;
+          ctxResult.sendSuccess = obResult.success;
+          ctxResult.dryRun = obResult.dryRun;
+          await agentTaskService.markAgentTaskCompleted(task.id, ctxResult);
+          console.log(`[dispatcher] context-reminder created: ${schedule.id} msgId=${obResult.sentMessageId} (thread=${msg.threadId})`);
 
           setCooldown(msg.threadId);
           return { dispatched: true };
@@ -1406,11 +1397,18 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             error: errorMsg.slice(0, 200),
           };
 
-          // Always use ZaloMessageSender — it handles dryRun/liveTest internally
-          const sender = new ZaloMessageSender();
-          const sendResult = await sender.sendMessage(failReply, msg.threadId, msg.threadType);
-          failResult.sentMessageId = sendResult.messageId ?? null;
-          failResult.sendSuccess = sendResult.success;
+          // Unified outbound via dispatcher for error message (R1.1)
+          const obFailResult = await sendOutbound({
+            threadId: msg.threadId,
+            threadType: msg.threadType,
+            source: "reminder",
+            content: failReply,
+            relatedMessageId: msg.zaloMessageId ?? undefined,
+            taskId: task.id,
+            metadata: { scheduleCreationFailed: true, error: errorMsg.slice(0, 200) },
+          });
+          failResult.sentMessageId = obFailResult.sentMessageId;
+          failResult.sendSuccess = obFailResult.success;
           await agentTaskService.markAgentTaskCompleted(task.id, failResult);
           setCooldown(msg.threadId);
           return { dispatched: true };
@@ -1425,10 +1423,16 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           contextResolved: false,
           reason: "no_context_for_pronoun",
         });
-        if (!getCurrentEffectiveDryRun()) {
-          const sender = new ZaloMessageSender();
-          await sender.sendMessage(clarifyReply, msg.threadId, msg.threadType);
-        }
+        // Unified outbound via dispatcher for clarification (R1.2)
+        sendOutbound({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          source: "reminder",
+          content: clarifyReply,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          taskId: task.id,
+          metadata: { reason: "no_context_for_pronoun" },
+        }).catch(() => {});
         setCooldown(msg.threadId);
         return { dispatched: true };
       }
@@ -1477,62 +1481,42 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       // ── Rule action: fixed_reply ─────────────────────────────
       if (winning.actionType === "fixed_reply") {
         const reply = (winning.actionConfig.reply as string) ?? "Xin chào!";
+
+        // Unified outbound via dispatcher (R1.1)
+        const obResult = await sendOutbound({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          source: "rule",
+          content: reply,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          taskId: task.id,
+          metadata: { ruleId: winning.id, ruleName: winning.name },
+        });
+
         const ruleResultPayload: Record<string, unknown> = {
           replyPreview: reply.slice(0, 200),
           confidence: 1.0,
-          dryRun: getCurrentEffectiveDryRun(),
+          dryRun: obResult.dryRun,
           ruleId: winning.id,
           ruleName: winning.name,
           actionType: "fixed_reply",
           source: "rule_engine",
+          sentMessageId: obResult.sentMessageId,
+          sendSuccess: obResult.success,
         };
 
-        if (getCurrentEffectiveDryRun()) {
-          await agentTaskService.markAgentTaskCompleted(task.id, ruleResultPayload);
-          await saveRuleExec({
-            ruleId: winning.id,
-            messageId: msg.zaloMessageId ?? undefined,
-            threadId: msg.threadId,
-            matched: true,
-            actionTaken: "fixed_reply",
-            result: "dry_run",
-            metadata: { ruleName: winning.name, replyPreview: reply.slice(0, 200), dryRun: true },
-          });
-          // Save to conversation history
-          saveOutboundMessage({
-            threadId: msg.threadId,
-            threadType: msg.threadType,
-            content: reply,
-            relatedMessageId: msg.zaloMessageId ?? undefined,
-            metadata: { source: "rule_engine_fixed_reply", dryRun: true, ruleId: winning.id, taskId: task.id },
-          }).catch(() => {});
-          console.log(`[dispatcher] rule fixed_reply (dry-run): ${winning.name} → "${reply.slice(0, 60)}..."`);
-        } else {
-          const sender = new ZaloMessageSender();
-          const sendResult = await sender.sendMessage(reply, msg.threadId, msg.threadType);
-          ruleResultPayload.sentMessageId = sendResult.messageId ?? null;
-          ruleResultPayload.sendSuccess = sendResult.success;
-          await agentTaskService.markAgentTaskCompleted(task.id, ruleResultPayload);
-          await saveRuleExec({
-            ruleId: winning.id,
-            messageId: msg.zaloMessageId ?? undefined,
-            threadId: msg.threadId,
-            matched: true,
-            actionTaken: "fixed_reply",
-            result: sendResult.success ? "sent" : "send_failed",
-            errorCode: sendResult.success ? undefined : "SEND_FAILED",
-            errorMessage: sendResult.error ?? undefined,
-            metadata: { ruleName: winning.name, sentMessageId: sendResult.messageId, dryRun: false },
-          });
-          saveOutboundMessage({
-            threadId: msg.threadId,
-            threadType: msg.threadType,
-            content: reply,
-            relatedMessageId: msg.zaloMessageId ?? undefined,
-            metadata: { source: "rule_engine_fixed_reply", sentMessageId: sendResult.messageId, ruleId: winning.id, taskId: task.id },
-          }).catch(() => {});
-          console.log(`[dispatcher] rule fixed_reply (live): ${winning.name} msgId=${sendResult.messageId}`);
-        }
+        await agentTaskService.markAgentTaskCompleted(task.id, ruleResultPayload);
+        await saveRuleExec({
+          ruleId: winning.id,
+          messageId: msg.zaloMessageId ?? undefined,
+          threadId: msg.threadId,
+          matched: true,
+          actionTaken: "fixed_reply",
+          result: obResult.dryRun ? "dry_run" : (obResult.success ? "sent" : "send_failed"),
+          errorCode: obResult.errorCode,
+          errorMessage: obResult.error,
+          metadata: { ruleName: winning.name, sentMessageId: obResult.sentMessageId, dryRun: obResult.dryRun },
+        });
 
         // Update rule match count
         prisma.rule.update({
@@ -1658,96 +1642,30 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       return { dispatched: false, reason: "confidence_too_low" };
     }
 
-    if (getCurrentEffectiveDryRun()) {
-      // ── Live test override: check if this thread has an active live test session ──
-      let liveTestActive = false;
-      let liveTestReason = "";
-      try {
-        const { shouldSendLiveForThread } = await import("./live-test.service.js");
-        const ltCheck = await shouldSendLiveForThread(msg.threadId);
-        liveTestActive = ltCheck.live;
-        liveTestReason = ltCheck.reason ?? "";
-        console.log(`[dispatcher] live-test check: thread=${msg.threadId} live=${liveTestActive} reason=${liveTestReason} sessionId=${ltCheck.sessionId ?? "none"}`);
-      } catch (err) {
-        console.error(`[dispatcher] live-test check error: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    // ── Unified outbound via dispatcher (R1.1) ──────────────────
+    const obResult = await sendOutbound({
+      threadId: msg.threadId,
+      threadType: msg.threadType,
+      source: "hermes",
+      content: finalReply,
+      relatedMessageId: msg.zaloMessageId ?? undefined,
+      taskId: task.id,
+      metadata: { confidence, truncated: truncated || undefined },
+    });
+    
+    result.sentMessageId = obResult.sentMessageId;
+    result.sendSuccess = obResult.success;
+    result.dryRun = obResult.dryRun;
 
-      if (liveTestActive) {
-        // Real send via live test
-        const sender = new ZaloMessageSender();
-        const sendResult = await sender.sendMessage(
-          finalReply,
-          msg.threadId,
-          msg.threadType,
-        );
-
-        result.sentMessageId = sendResult.messageId ?? null;
-        result.sendSuccess = sendResult.success;
-        result.liveTest = true;
-
-        if (sendResult.success) {
-          await agentTaskService.markAgentTaskCompleted(task.id, result);
-          console.log(`[dispatcher] live-test sent reply to ${msg.threadId}: msgId=${sendResult.messageId}`);
-
-          saveOutboundMessage({
-            threadId: msg.threadId,
-            threadType: msg.threadType,
-            content: finalReply,
-            relatedMessageId: msg.zaloMessageId ?? undefined,
-            metadata: { source: "auto_reply", sentMessageId: sendResult.messageId, taskId: task.id, liveTest: true },
-          }).catch(() => {});
-        } else {
-          await agentTaskService.markAgentTaskFailed(
-            task.id,
-            sendResult.error ?? "SEND_FAILED",
-          );
-          console.error(`[dispatcher] live-test send failed: ${sendResult.error}`);
-        }
-      } else {
-        // Dry-run: process but don't send
-        await agentTaskService.markAgentTaskCompleted(task.id, result);
-        console.log(`[dispatcher] dry-run reply: "${finalReply.slice(0, 60)}..." (thread=${msg.threadId})`);
-
-        // Still save to conversation history (for context, even in dry-run)
-        saveOutboundMessage({
-          threadId: msg.threadId,
-          threadType: msg.threadType,
-          content: finalReply,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
-          metadata: { source: "auto_reply", dryRun: true, taskId: task.id },
-        }).catch(() => {});
-      }
+    if (obResult.success || obResult.dryRun) {
+      await agentTaskService.markAgentTaskCompleted(task.id, result);
+      console.log(`[dispatcher] ${obResult.dryRun ? "dry-run" : "sent"} reply: "${finalReply.slice(0, 60)}..." (thread=${msg.threadId})`);
     } else {
-      // Real send
-      const sender = new ZaloMessageSender();
-      const sendResult = await sender.sendMessage(
-        finalReply,
-        msg.threadId,
-        msg.threadType,
+      await agentTaskService.markAgentTaskFailed(
+        task.id,
+        obResult.error ?? "SEND_FAILED",
       );
-
-      result.sentMessageId = sendResult.messageId ?? null;
-      result.sendSuccess = sendResult.success;
-
-      if (sendResult.success) {
-        await agentTaskService.markAgentTaskCompleted(task.id, result);
-        console.log(`[dispatcher] sent reply to ${msg.threadId}: msgId=${sendResult.messageId}`);
-
-        // Save outbound to conversation history
-        saveOutboundMessage({
-          threadId: msg.threadId,
-          threadType: msg.threadType,
-          content: finalReply,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
-          metadata: { source: "auto_reply", sentMessageId: sendResult.messageId, taskId: task.id },
-        }).catch(() => {});
-      } else {
-        await agentTaskService.markAgentTaskFailed(
-          task.id,
-          sendResult.error ?? "SEND_FAILED",
-        );
-        console.error(`[dispatcher] send failed: ${sendResult.error}`);
-      }
+      console.error(`[dispatcher] send failed: ${obResult.error} (thread=${msg.threadId})`);
     }
 
     // ── Detect if this reply is a question (potential multi-turn) ──

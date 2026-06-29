@@ -513,6 +513,7 @@ describe("IncomingDispatcher", () => {
   describe("Cooldown audit", () => {
     it("creates OutboundRecord with decision=block, reason=cooldown when cooldown blocks", async () => {
       // First message: succeeds and starts cooldown
+      // (R1.1: Unified dispatcher creates OutboundRecord for every outbound — 1 for first msg)
       await handleIncomingMessage(baseMsg({ zaloMessageId: "cooldown-1" }));
 
       // Second message within 10s cooldown: should be blocked
@@ -520,14 +521,18 @@ describe("IncomingDispatcher", () => {
       expect(r.dispatched).toBe(false);
       expect(r.reason).toBe("cooldown");
 
-      // Should have created OutboundRecord for the blocked message
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(call.decision).toBe("block");
-      expect(call.reason).toBe("cooldown");
-      expect(call.source).toBe("auto_reply");
-      expect(call.threadId).toBe("thread-allowed");
-      expect(call.dryRun).toBe(true);
+      // Should have created 2 OutboundRecords:
+      // 1 from first message (allowed via unified dispatcher)
+      // 1 from second message (blocked by cooldown)
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(2);
+      
+      // Second call should be the cooldown block
+      const blockCall = mockSaveOutboundRecord.mock.calls[1]?.[0] as Record<string, unknown>;
+      expect(blockCall.decision).toBe("block");
+      expect(blockCall.reason).toBe("cooldown");
+      expect(blockCall.source).toBe("auto_reply");
+      expect(blockCall.threadId).toBe("thread-allowed");
+      expect(blockCall.dryRun).toBe(true);
     });
 
     it("does NOT create AgentTask when cooldown blocks", async () => {
@@ -568,28 +573,122 @@ describe("IncomingDispatcher", () => {
       expect(r.dispatched).toBe(true);
       expect(mockCreateTask).toHaveBeenCalledTimes(1);
 
-      // Cooldown audit should NOT be called (only for blocked messages)
-      expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+      // R1.1: Unified dispatcher creates OutboundRecord for every outbound (including allowed)
+      // This is the expected behavior — audit trail for all outbound attempts
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call.decision).toBe("allow");
+      expect(call.dryRun).toBe(true);
     });
 
     it("multiple cooldown blocks each create separate OutboundRecords", async () => {
       // First message: starts cooldown
+      // (R1.1: Creates OutboundRecord via unified dispatcher)
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-1" }));
 
       // Second message: blocked by cooldown
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-2" }));
 
-      // Verify 1 OutboundRecord (second message blocked, first processed)
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+      // R1.1: 2 OutboundRecords — 1 from first (allowed via dispatcher), 1 from second (blocked)
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(2);
 
       // Wait for cooldown to expire (not possible in test — skip)
       // But we can reset cooldowns and try again to verify new audit
       resetAutoReplyCooldowns();
       mockSaveOutboundRecord.mockClear();
 
-      // Fresh message after reset: should dispatch, no audit
+      // Fresh message after reset: should dispatch, creates OutboundRecord
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-3" }));
-      expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+      // R1.1: Unified dispatcher creates OutboundRecord for allowed messages too
+      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call.decision).toBe("allow");
     });
+  });
+});
+
+// ── R1.2 Smoke: Image/File paths via unified dispatcher ───────────
+
+describe("R1.2 — Image/File outbound source types", () => {
+  // Import sendOutbound for direct testing
+  let sendOutboundFn: typeof import("../services/outbound-dispatcher.service.js").sendOutbound;
+
+  beforeAll(async () => {
+    const mod = await import("../services/outbound-dispatcher.service.js");
+    sendOutboundFn = mod.sendOutbound;
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetAutoReplyCooldowns();
+    mockSaveOutboundRecord.mockResolvedValue(undefined);
+  });
+
+  it("sendOutbound with source=image creates OutboundRecord with source=auto_reply", async () => {
+    await sendOutboundFn({
+      threadId: "thread-allowed",
+      threadType: "user",
+      source: "image",
+      content: "Image analysis reply",
+      relatedMessageId: "msg-img-1",
+      taskId: "task-img-1",
+    });
+
+    // Dispatcher creates OutboundRecord for every outbound
+    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(record.source).toBe("auto_reply"); // mapSource("image") → "auto_reply"
+    expect(record.decision).toBe("allow");
+    expect(record.dryRun).toBe(true);
+  });
+
+  it("sendOutbound with source=file creates OutboundRecord with source=auto_reply", async () => {
+    await sendOutboundFn({
+      threadId: "thread-allowed",
+      threadType: "user",
+      source: "file",
+      content: "File confirmation reply",
+      relatedMessageId: "msg-file-1",
+      taskId: "task-file-1",
+    });
+
+    // Dispatcher creates OutboundRecord for every outbound
+    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(record.source).toBe("auto_reply"); // mapSource("file") → "auto_reply"
+    expect(record.decision).toBe("allow");
+    expect(record.dryRun).toBe(true);
+  });
+
+  it("sendOutbound with source=error_fallback creates OutboundRecord", async () => {
+    await sendOutboundFn({
+      threadId: "thread-allowed",
+      threadType: "user",
+      source: "error_fallback",
+      content: "Error fallback message",
+      relatedMessageId: "msg-err-1",
+      taskId: "task-err-1",
+    });
+
+    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(record.source).toBe("auto_reply");
+    expect(record.decision).toBe("allow");
+  });
+
+  it("sendOutbound with source=catch_all creates OutboundRecord", async () => {
+    await sendOutboundFn({
+      threadId: "thread-allowed",
+      threadType: "user",
+      source: "catch_all",
+      content: "Catch-all default reply",
+      relatedMessageId: "msg-catch-1",
+      taskId: "task-catch-1",
+    });
+
+    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
+    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(record.source).toBe("auto_reply");
+    expect(record.decision).toBe("allow");
   });
 });
