@@ -21,13 +21,29 @@ export class ZaloMessageSender implements MessageSender {
     threadType: "user" | "group",
     source: "auto_reply" | "schedule" | "media" | "manual" | "create_reminder" = "auto_reply",
   ): Promise<SendResult> {
-    // Dry-run — don't actually send
-    if (getCurrentEffectiveDryRun()) {
+    // ── Dry-run check with live test override ────────────────
+    const liveTestCheck = await (async () => {
+      try {
+        const { shouldSendLiveForThread } = await import("./live-test.service.js");
+        return await shouldSendLiveForThread(threadId);
+      } catch {
+        return { live: false, reason: "dry_run" };
+      }
+    })();
+
+    let effectiveDryRun = getCurrentEffectiveDryRun();
+
+    // Live test overrides dry-run for target thread
+    if (effectiveDryRun && liveTestCheck.live) {
+      effectiveDryRun = false;
+    }
+
+    if (effectiveDryRun) {
       const msgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       saveOutboundRecord({
         threadId, threadType, content,
         sentMessageId: msgId, source, dryRun: true,
-        decision: "allow", reason: "dry_run",
+        decision: "allow", reason: liveTestCheck.reason ?? "dry_run",
       }).catch(() => {});
       return { success: true, messageId: msgId };
     }
@@ -117,6 +133,12 @@ export class ZaloMessageSender implements MessageSender {
         sentMessageId: finalMsgId, source, dryRun: false,
         decision: "allow", reason: parts.length > 1 ? "split_send" : "single_send",
       }).catch(() => {});
+
+      // Record live test send if applicable
+      if (liveTestCheck.live && liveTestCheck.sessionId) {
+        const { recordLiveTestSent } = await import("./live-test.service.js");
+        recordLiveTestSent(liveTestCheck.sessionId, threadId, finalMsgId).catch(() => {});
+      }
 
       return { success: true, messageId: finalMsgId };
     } catch (err: unknown) {

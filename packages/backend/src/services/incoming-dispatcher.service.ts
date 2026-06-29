@@ -1683,18 +1683,64 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     }
 
     if (getCurrentEffectiveDryRun()) {
-      // Dry-run: process but don't send
-      await agentTaskService.markAgentTaskCompleted(task.id, result);
-      console.log(`[dispatcher] dry-run reply: "${finalReply.slice(0, 60)}..." (thread=${msg.threadId})`);
+      // ── Live test override: check if this thread has an active live test session ──
+      let liveTestActive = false;
+      let liveTestReason = "";
+      try {
+        const { shouldSendLiveForThread } = await import("./live-test.service.js");
+        const ltCheck = await shouldSendLiveForThread(msg.threadId);
+        liveTestActive = ltCheck.live;
+        liveTestReason = ltCheck.reason ?? "";
+        console.log(`[dispatcher] live-test check: thread=${msg.threadId} live=${liveTestActive} reason=${liveTestReason} sessionId=${ltCheck.sessionId ?? "none"}`);
+      } catch (err) {
+        console.error(`[dispatcher] live-test check error: ${err instanceof Error ? err.message : String(err)}`);
+      }
 
-      // Still save to conversation history (for context, even in dry-run)
-      saveOutboundMessage({
-        threadId: msg.threadId,
-        threadType: msg.threadType,
-        content: finalReply,
-        relatedMessageId: msg.zaloMessageId ?? undefined,
-        metadata: { source: "auto_reply", dryRun: true, taskId: task.id },
-      }).catch(() => {});
+      if (liveTestActive) {
+        // Real send via live test
+        const sender = new ZaloMessageSender();
+        const sendResult = await sender.sendMessage(
+          finalReply,
+          msg.threadId,
+          msg.threadType,
+        );
+
+        result.sentMessageId = sendResult.messageId ?? null;
+        result.sendSuccess = sendResult.success;
+        result.liveTest = true;
+
+        if (sendResult.success) {
+          await agentTaskService.markAgentTaskCompleted(task.id, result);
+          console.log(`[dispatcher] live-test sent reply to ${msg.threadId}: msgId=${sendResult.messageId}`);
+
+          saveOutboundMessage({
+            threadId: msg.threadId,
+            threadType: msg.threadType,
+            content: finalReply,
+            relatedMessageId: msg.zaloMessageId ?? undefined,
+            metadata: { source: "auto_reply", sentMessageId: sendResult.messageId, taskId: task.id, liveTest: true },
+          }).catch(() => {});
+        } else {
+          await agentTaskService.markAgentTaskFailed(
+            task.id,
+            sendResult.error ?? "SEND_FAILED",
+          );
+          console.error(`[dispatcher] live-test send failed: ${sendResult.error}`);
+        }
+      } else {
+        // Dry-run: process but don't send
+        await agentTaskService.markAgentTaskCompleted(task.id, result);
+        console.log(`[dispatcher] dry-run reply: "${finalReply.slice(0, 60)}..." (thread=${msg.threadId})`);
+
+        // Still save to conversation history (for context, even in dry-run)
+        saveOutboundMessage({
+          threadId: msg.threadId,
+          threadType: msg.threadType,
+          content: finalReply,
+          relatedMessageId: msg.zaloMessageId ?? undefined,
+          metadata: { source: "auto_reply", dryRun: true, taskId: task.id },
+        }).catch(() => {});
+      }
     } else {
       // Real send
       const sender = new ZaloMessageSender();

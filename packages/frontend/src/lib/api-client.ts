@@ -637,3 +637,202 @@ export function deleteDocument(id: string) {
     { method: "DELETE" },
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Batch 16 — Zalo Live-Safe Operations Dashboard API
+// ═══════════════════════════════════════════════════════════════════
+
+export interface ZaloOpsStatus {
+  connected: boolean;
+  connectionStatus: string;
+  selfUserId: string | null;
+  selfDisplayName: string | null;
+  lastConnectedAt: string | null;
+  lastError: string | null;
+  lastMessageAt: string | null;
+  listenerActive: boolean;
+  dryRun: boolean;
+  dryRunSource: "env" | "runtime";
+  allowedThreads: string[];
+  cooldownSeconds: number;
+  session: {
+    exists: boolean;
+    age: string | null;
+    ageSeconds: number | null;
+    path: string | null;
+    qrAvailable: boolean;
+    qrUpdatedAt: string | null;
+  };
+  heartbeats: {
+    zaloConnection: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
+    zaloListener: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
+    messagePipeline: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
+  };
+  inbound24h: number;
+  outbound24h: number;
+  failedTasks24h: number;
+}
+
+export interface ReconnectResult {
+  success: boolean;
+  status: string;
+  message: string;
+  auditId?: string;
+}
+
+export interface DisconnectResult {
+  success: boolean;
+  status: string;
+  auditId?: string;
+}
+
+export interface QRStatusOutput {
+  qrAvailable: boolean;
+  qrUpdatedAt: string | null;
+  status: string;
+  message: string;
+}
+
+export interface TestDMResult {
+  allowed: boolean;
+  reason?: string;
+  auditId?: string;
+  agentTaskId?: string;
+}
+
+export interface RecentEvent {
+  type: "inbound" | "outbound" | "reaction" | "document" | "error";
+  timestamp: string;
+  threadId?: string;
+  senderId?: string;
+  senderName?: string;
+  content?: string;
+  detail?: string;
+  errorCode?: string;
+}
+
+export interface RecentEventsResponse {
+  inbound: RecentEvent[];
+  outbound: RecentEvent[];
+  errors: RecentEvent[];
+}
+
+export function getZaloOpsStatus() {
+  return apiFetch<ZaloOpsStatus>("/api/zalo/ops/status");
+}
+
+export function reconnectZalo(userId?: string) {
+  return apiFetch<ReconnectResult>("/api/zalo/ops/reconnect", {
+    method: "POST",
+    body: JSON.stringify({ userId }),
+  });
+}
+
+export function disconnectZalo(userId?: string) {
+  return apiFetch<DisconnectResult>("/api/zalo/ops/disconnect", {
+    method: "POST",
+    body: JSON.stringify({ userId }),
+  });
+}
+
+export function getZaloQRStatus() {
+  return apiFetch<QRStatusOutput>("/api/zalo/ops/qr");
+}
+
+export function testDM(threadId: string, content?: string, userId?: string) {
+  return apiFetch<TestDMResult>("/api/zalo/ops/test-dm", {
+    method: "POST",
+    body: JSON.stringify({ threadId, content, userId }),
+  });
+}
+
+export function getRecentEvents() {
+  return apiFetch<RecentEventsResponse>("/api/zalo/ops/recent-events");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Batch 17 — Production Readiness Gate
+// ═══════════════════════════════════════════════════════════════════
+
+export interface ReadinessCheck {
+  id: string;
+  label: string;
+  category: string;
+  status: "pass" | "warn" | "fail";
+  severity: "critical" | "high" | "medium" | "low";
+  message: string;
+  action?: string;
+}
+
+export interface ReadinessResult {
+  verdict: "READY_FOR_LIVE" | "WARNING_ONLY" | "NOT_READY";
+  score: number;
+  timestamp: string;
+  checks: ReadinessCheck[];
+  summary: {
+    pass: number;
+    warn: number;
+    fail: number;
+    criticalFail: number;
+    highFail: number;
+  };
+}
+
+export function getProductionReadiness() {
+  return apiFetch<ReadinessResult>("/api/system/production-readiness");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Batch 18 — Controlled Live Test Mode
+// ═══════════════════════════════════════════════════════════════════
+
+export interface LiveTestStatusResult {
+  active: boolean;
+  session: {
+    id: string;
+    threadId: string;
+    maxMessages: number;
+    sentCount: number;
+    ttlSeconds: number;
+    expiresAt: string;
+    status: string;
+    reason: string | null;
+    createdBy: string | null;
+    createdAt: string;
+    remainingMs: number;
+  } | null;
+  dryRun: boolean;
+}
+
+export interface StartLiveTestResult {
+  success: boolean;
+  sessionId?: string;
+  error?: string;
+  errorCode?: string;
+  expiresAt?: string;
+}
+
+export function getLiveTestStatus() {
+  return apiFetch<LiveTestStatusResult>("/api/system/live-test/status");
+}
+
+export function startLiveTest(input: {
+  threadId: string;
+  maxMessages: number;
+  ttlSeconds: number;
+  confirmText: string;
+  reason: string;
+  createdBy?: string;
+}) {
+  return apiFetch<StartLiveTestResult>("/api/system/live-test/start", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function stopLiveTest() {
+  return apiFetch<{ success: boolean }>("/api/system/live-test/stop", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}

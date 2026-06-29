@@ -460,6 +460,46 @@ export async function zaloRoutes(app: FastifyInstance) {
       return { success: false, error: msg.slice(0, 500) };
     }
   });
+
+  // ═════════════════════════════════════════════════════════════════
+  // Batch 16 — Zalo Live-Safe Operations Dashboard endpoints
+  // ═════════════════════════════════════════════════════════════════
+
+  app.get("/zalo/ops/status", async () => {
+    const { getZaloOpsStatus } = await import("../services/zalo-ops.service.js");
+    return getZaloOpsStatus();
+  });
+
+  app.post("/zalo/ops/reconnect", async (request) => {
+    const body = request.body as { userId?: string } | undefined;
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    return reconnectZalo(body?.userId);
+  });
+
+  app.post("/zalo/ops/disconnect", async (request) => {
+    const body = request.body as { userId?: string } | undefined;
+    const { disconnectZalo } = await import("../services/zalo-ops.service.js");
+    return disconnectZalo(body?.userId);
+  });
+
+  app.get("/zalo/ops/qr", async () => {
+    const { getQRStatus } = await import("../services/zalo-ops.service.js");
+    return getQRStatus();
+  });
+
+  app.post("/zalo/ops/test-dm", async (request) => {
+    const body = request.body as { threadId: string; content?: string; userId?: string };
+    if (!body.threadId) {
+      return { allowed: false, reason: "MISSING_THREAD_ID" };
+    }
+    const { testDM } = await import("../services/zalo-ops.service.js");
+    return testDM({ threadId: body.threadId, content: body.content }, body.userId);
+  });
+
+  app.get("/zalo/ops/recent-events", async () => {
+    const { getRecentEvents } = await import("../services/zalo-ops.service.js");
+    return getRecentEvents();
+  });
 }
 
 // ═══════════════════════════════════════════════════════════

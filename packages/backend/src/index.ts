@@ -49,7 +49,9 @@ async function main() {
   const app = await buildApp();
 
   // ── Auto-restore Zalo session on startup ──────────────────────────
-  if (!config.zalo.dryRun) {
+  // Always attempt Zalo auto-restore — listener needs to receive messages
+  // even when auto-reply is in dry-run mode. Only skip when explicitly disabled.
+  if (config.autoReply.enabled) {
     try {
       // Only start Zalo listener if we hold the process lock
       if (!isLockOwner()) {

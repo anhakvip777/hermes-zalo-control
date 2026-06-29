@@ -548,3 +548,26 @@ model MessageBatch {
   @@index([status, dueAt])
   @@index([createdAt])
 }
+
+// =============================================================================
+// Live Test Session — Batch 18: controlled live test with quota + TTL
+// =============================================================================
+
+model LiveTestSession {
+  id            String    @id @default(cuid())
+  threadId      String
+  maxMessages   Int       @default(1)
+  sentCount     Int       @default(0)
+  ttlSeconds    Int       @default(120)
+  expiresAt     DateTime
+  status        String    @default("active") // active | completed | expired | cancelled
+  createdBy     String?
+  reason        String?
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([threadId, status])
+  @@index([status])
+  @@index([expiresAt])
+}

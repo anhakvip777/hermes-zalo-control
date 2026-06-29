@@ -249,4 +249,92 @@ export async function systemRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Batch 17 — Production Readiness Gate
+  // ═══════════════════════════════════════════════════════════════════
+
+  app.get(
+    "/system/production-readiness",
+    { preHandler: [adminAuth] },
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { getProductionReadiness } = await import(
+          "../services/production-readiness.service.js"
+        );
+        const result = await getProductionReadiness();
+        return reply.send(result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.status(500).send({ error: "ReadinessCheckFailed", message: msg });
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Batch 18 — Controlled Live Test Mode
+  // ═══════════════════════════════════════════════════════════════════
+
+  app.post(
+    "/system/live-test/start",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const body = req.body as Record<string, unknown>;
+        const { startLiveTest } = await import("../services/live-test.service.js");
+        const result = await startLiveTest({
+          threadId: body?.threadId as string ?? "",
+          maxMessages: typeof body?.maxMessages === "number" ? body.maxMessages : 1,
+          ttlSeconds: typeof body?.ttlSeconds === "number" ? body.ttlSeconds : 120,
+          confirmText: (body?.confirmText as string) ?? "",
+          reason: (body?.reason as string) ?? "",
+          createdBy: (body?.createdBy as string) ?? "admin",
+        });
+        if (!result.success) {
+          const code = result.errorCode === "BAD_CONFIRM" || result.errorCode === "REASON_TOO_SHORT" || result.errorCode === "INVALID_MAX_MESSAGES" || result.errorCode === "INVALID_TTL"
+            ? 400 : result.errorCode === "NOT_READY" || result.errorCode === "THREAD_NOT_ALLOWED" || result.errorCode === "GROUP_NOT_ALLOWED" || result.errorCode === "SESSION_EXISTS" || result.errorCode === "ALREADY_LIVE"
+            ? 409 : 500;
+          return reply.status(code).send(result);
+        }
+        return reply.send(result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.status(500).send({ error: "LiveTestStartFailed", message: msg });
+      }
+    },
+  );
+
+  app.post(
+    "/system/live-test/stop",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const body = req.body as Record<string, unknown> | undefined;
+        const { stopLiveTest } = await import("../services/live-test.service.js");
+        const result = await stopLiveTest((body?.createdBy as string) ?? "admin");
+        if (!result.success) {
+          return reply.status(404).send(result);
+        }
+        return reply.send(result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.status(500).send({ error: "LiveTestStopFailed", message: msg });
+      }
+    },
+  );
+
+  app.get(
+    "/system/live-test/status",
+    { preHandler: [adminAuth] },
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const { getLiveTestStatus } = await import("../services/live-test.service.js");
+        const result = await getLiveTestStatus();
+        return reply.send(result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.status(500).send({ error: "LiveTestStatusFailed", message: msg });
+      }
+    },
+  );
 }
