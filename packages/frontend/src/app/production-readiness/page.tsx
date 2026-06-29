@@ -235,6 +235,26 @@ export default function ProductionReadinessPage() {
         ))}
       </div>
 
+      {/* Production Pilot Runbook */}
+      <div className="rounded-lg border border-blue-800 bg-blue-900/20 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-white">📖 Production Pilot Runbook</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Pre-live checklist, monitoring plan, rollback procedures, and PASS/FAIL criteria for safe production pilot.
+            </p>
+          </div>
+          <a
+            href="/api/runbook"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+          >
+            📄 View Runbook →
+          </a>
+        </div>
+      </div>
+
       {/* Controlled Live Test Card */}
       <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
         <h3 className="mb-3 text-lg font-semibold text-white">🧪 Controlled Live Test</h3>

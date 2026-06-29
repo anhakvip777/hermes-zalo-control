@@ -230,6 +230,38 @@ POST /api/system/live-test/stop → force-complete session
 | `packages/backend/src/routes/system.ts` | `/api/system/live-test/*` endpoints |
 | `packages/backend/src/__tests__/batch18-live-test.test.ts` | 18 tests for live test flow |
 
+## Production Pilot Runbook (Batch 19)
+
+**Status**: ✅ READY (2026-06-29)
+
+### Overview
+
+Comprehensive runbook for safe production pilot deployment. Includes pre-live checklist, monitoring plan, rollback procedures, and PASS/FAIL criteria.
+
+### Pilot Phases
+
+| Phase | Scope | Method | Gate |
+|-------|-------|--------|------|
+| 1 | 1 DM test thread, 1-3 replies, 5min TTL | Controlled Live Test API | Batch 18 ✅ |
+| 2 | 1 trusted DM, 30-60min | LiveTestSession or thread-level dryRun=false | Phase 1 must PASS |
+| 3 | 1 small group, @mention only, 1-2hr | groupMentionRequired=true | Phase 2 must PASS |
+
+### Key Document
+
+`docs/PRODUCTION_PILOT_RUNBOOK.md` — full runbook with:
+- Pre-live checklist (22 items)
+- Monitoring checklist (dashboards + API + DB)
+- Rollback plan (6 steps, <30s to execute)
+- PASS/FAIL criteria
+- Pilot log template
+
+### Related UI
+
+- `/production-readiness` — runbook link in Production Pilot section
+- `/zalo-ops` — live test controls
+- `/safety-mode` — dryRun toggle, cooldown, batching
+
+
 ## Key Files
 
 | File                                        | Purpose                                      |
