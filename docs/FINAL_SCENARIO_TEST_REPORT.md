@@ -1,8 +1,8 @@
 # FINAL SCENARIO TEST REPORT — Hermes Zalo Control Center
 
-**Date**: 2026-06-28
-**Test Scope**: Batch 12 + 12.1 + Old Jobs Cleanup
-**Environment**: Dev (ZALO_DRY_RUN=true, no live messages)
+**Date**: 2026-06-29
+**Test Scope**: Batch 12 + 12.1 + Old Jobs Cleanup + Batch 18 Live Test
+**Environment**: Dev (ZALO_AUTO_REPLY_DRY_RUN=true, live test bypass used for 1 real DM)
 
 ---
 
@@ -98,13 +98,47 @@
 
 ---
 
+## Scenario 8: Batch 18 — Controlled Live Test (Real DM Send)
+
+| Step | Action | Expected | Result |
+|------|--------|----------|--------|
+| Create live session | POST /api/system/live-test/start | LiveTestSession active, maxMessages=1, TTL=300s | ✅ PASS |
+| Send first DM | User sends "live test hello" to allowed thread | inbound saved, dispatcher detects live session | ✅ PASS |
+| Real Zalo send | Dispatcher bypasses dryRun for live session | dryRun=0 outbound, actual Zalo DM sent | ✅ PASS |
+| Quota reached | sentCount=1 → maxMessages=1 | Session auto-completed | ✅ PASS |
+| Post-quota DM | User sends "live test second" | No active session → falls back to dryRun=true | ✅ PASS |
+| No real send | Post-quota message processed | dryRun=true, AgentTask with dryRun:true, no dryRun=0 outbound | ✅ PASS |
+| Assistant saved | Hermes generates reply | Reply saved to DB with dryRun tag, not sent to Zalo | ✅ PASS |
+| No duplicate | Check DB | Only 1 "live test second" message, 1 reply | ✅ PASS |
+| Total real sends | Check OutboundRecord | Exactly 1 real send from entire Batch 18 | ✅ PASS |
+
+---
+
+## Scenario 9: Zalo Process Conflict Cleanup
+
+| Step | Action | Expected | Result |
+|------|--------|----------|--------|
+| Detect conflict | Check backend processes | 3 concurrent backends found (PM2 hermes-api + old tsx watch + new npx tsx) | ✅ Found |
+| Zalo error | Check logs | "Another connection is opened, closing this one" | ✅ Confirmed |
+| Message missed | User sends DM during conflict | Message NOT received (listener dropped) | ✅ Confirmed |
+| Kill old processes | kill -9 old PIDs + pm2 stop | Old processes terminated | ✅ PASS |
+| Fix code | Change index.ts gate from config.zalo.dryRun to config.autoReply.enabled | Listener starts regardless of dryRun | ✅ PASS |
+| Symlink DB | ln -s packages/backend/prisma prisma | Production build finds DB | ✅ PASS |
+| Restart single | pm2 start ecosystem.config.cjs --only hermes-backend | 1 backend instance, Zalo reconnects, listener active | ✅ PASS |
+| Verify | API heartbeats, listener status, port check | 1 instance on port 3002, Zalo connected, PM2 managed | ✅ PASS |
+
+---
+
 ## Regression Checks
 
 | Suite | Tests | Result |
 |-------|-------|--------|
 | document-ingestion.test.ts | 19/19 | ✅ PASS |
 | document-ingestion-12.1.test.ts | 4/4 | ✅ PASS |
-| Full test suite | 496/498 | ✅ PASS (2 pre-existing failures) |
+| batch18-live-test.test.ts | 18/18 | ✅ PASS |
+| batch16-zalo-ops.test.ts | included | ✅ PASS |
+| batch17-production-readiness.test.ts | included | ✅ PASS |
+| Full test suite | 586/586 | ✅ PASS |
 | TypeScript | shared + backend + frontend | ✅ PASS |
 | Backend build | tsc | ✅ PASS |
 | Frontend build | next build | ✅ PASS |
@@ -121,5 +155,6 @@
 | **Batch 12** — Docling Document Understanding | ✅ PASS | Full e2e: ingest → docling → chunks → ask |
 | **Batch 12.1** — Docling Process Isolation | ✅ PASS | Worker separate, timeout, kill grace |
 | **Old Jobs Cleanup** — Error Classification | ✅ PASS | Specific codes, dashboard labels |
+| **Batch 18** — Controlled Live Test | ✅ PASS | 1 real DM, post-quota dryRun, Zalo conflict fixed |
 
-**System is production-ready for text-based document ingestion.**
+**System is production-ready for controlled live deployment.**

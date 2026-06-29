@@ -179,6 +179,57 @@ Added pattern: `nhắc [target]? <content> lúc <time>`
 2. **In-memory cooldown**: `lastReplyAt` Map resets on restart (cooldown window may reopen)
 3. **No batch UI yet**: Batch status visible via DB only; no Admin Center card
 
+## Controlled Live Test (Batch 18)
+
+**Status**: ✅ PASS (live-tested 2026-06-29)
+
+### Overview
+
+Live test mode allows ONE real Zalo DM send with automatic quota (maxMessages) + TTL. After quota, all subsequent DMs fall back to dry-run.
+
+### Config
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| LiveTestSession | API | One-shot, maxMessages=1, TTL 300s |
+| `ZALO_AUTO_REPLY_DRY_RUN` | `true` | Always true except during live test bypass |
+| `ZALO_DRY_RUN` | `true` | PM2 ecosystem env (does NOT block listener) |
+
+### Architecture
+
+```
+POST /api/system/live-test/start → LiveTestSession (active, maxMessages, TTL)
+  → Incoming DM → dispatcher detects active session
+  → If sentCount < maxMessages: dryRun bypass → REAL send → sentCount++
+  → If sentCount >= maxMessages: session auto-completed → fallback to dryRun
+POST /api/system/live-test/stop → force-complete session
+```
+
+### Key Behaviors
+
+- **Listener always starts**: `config.autoReply.enabled` gates Zalo listener (was `config.zalo.dryRun` which blocked it in PM2)
+- **Post-quota safety**: After live test completes, all messages revert to `dryRun=true`
+- **No duplicate sends**: Each live test session tracks `sentCount` vs `maxMessages`
+- **Session auto-completes**: When sentCount reaches maxMessages, session status → `completed`
+
+### Zalo Process Conflict Fix
+
+- **Root cause**: Old PM2 `hermes-api` (npm run dev:backend) + manual `npx tsx` → 3 concurrent backends → Zalo "Another connection" error → listener dropped
+- **Fix**: Single PM2 `hermes-backend` via `ecosystem.config.cjs` + symlink `prisma → packages/backend/prisma` for dist build
+- **Code fix**: `src/index.ts` — Zalo auto-restore now gated on `config.autoReply.enabled` (not `config.zalo.dryRun`)
+
+### Known Backlog
+
+1. **messagePipeline heartbeat stale** after message received — heartbeat emission path needs audit (cosmetic)
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `packages/backend/src/services/live-test.service.ts` | Live test session CRUD + quota tracking |
+| `packages/backend/src/routes/system.ts` | `/api/system/live-test/*` endpoints |
+| `packages/backend/src/__tests__/batch18-live-test.test.ts` | 18 tests for live test flow |
+
 ## Key Files
 
 | File                                        | Purpose                                      |

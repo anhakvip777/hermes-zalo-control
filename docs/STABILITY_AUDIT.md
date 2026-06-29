@@ -1,7 +1,7 @@
 # STABILITY AUDIT — Hermes Zalo Control Center
 
-**Date**: 2026-06-28
-**Scope**: Batch 12 + 12.1 + Old Jobs Cleanup
+**Date**: 2026-06-29
+**Scope**: Batch 12 + 12.1 + Old Jobs Cleanup + Batch 18 Live Test
 
 ---
 
@@ -9,6 +9,8 @@
 
 | Date | Event | Resolution |
 |------|-------|------------|
+| 2026-06-29 | Batch 18: Controlled live test mode | PASS |
+| 2026-06-29 | Zalo process conflict (3 backends) | Cleaned → 1 PM2 instance |
 | 2026-06-28 | PDF live test: Docling process isolation | PASS |
 | 2026-06-28 | Worker OOM simulation | Backend survived ✅ |
 | 2026-06-28 | Docling timeout test | Kill + cleanup works ✅ |
@@ -19,26 +21,27 @@
 ## Current System State
 
 ### Backend
-- **Status**: ✅ Healthy (1300+ seconds uptime)
-- **Memory**: Stable
+- **Status**: ✅ Healthy (PM2 managed, PID 2928242)
+- **Memory**: Stable (~92MB)
 - **API**: All endpoints responding
+- **Zalo**: Connected, listener active
 
-### Document Worker
-- **Status**: ✅ Running (separate process, PID tracked)
-- **Memory limit**: 2048MB (NODE_OPTIONS)
-- **Poll interval**: 5 seconds
-- **Docling timeout**: 60 seconds + 5 second kill grace
+### PM2 Worker
+- **Status**: ✅ Running (PID 2928373)
+- **Poll interval**: 10 seconds
+- **Dry-run**: true (safe default)
 
 ### Database
 - **Size**: Normal
 - **Migration**: Clean
-- **Failed jobs**: 0 active (2 old classified)
-- **Document count**: 0 (clean after tests)
+- **LiveTestSessions**: 1 completed (Batch 18)
+- **Total real sends**: 138 (1 from live test)
 
 ### Frontend
-- **Status**: ✅ Building and serving
+- **Status**: ✅ Building and serving (Next.js, port 3001)
 - **All pages**: Functional
-- **Documents page**: Error classification active
+- **Production readiness page**: Active
+- **Zalo ops page**: Active
 
 ---
 
@@ -66,16 +69,23 @@
 - **Recovery**: Auto-killed. Worker continues polling.
 
 ### 4. Worker Process Crash
-- **Detection**: Process manager (external)
+- **Detection**: PM2 auto-restart
 - **DB state**: Any in-progress job marked failed
 - **Backend**: Unaffected ✅ (separate process)
-- **Recovery**: Restart worker process
+- **Recovery**: PM2 restarts worker automatically
 
 ### 5. Backend Crash
 - **Detection**: Health check
 - **Worker**: Unaffected (separate process, keeps polling)
 - **DB state**: Intact
-- **Recovery**: Restart backend via process manager
+- **Recovery**: PM2 restarts backend automatically
+
+### 6. Zalo Process Conflict (Multiple Backends)
+- **Detection**: Zalo "Another connection is opened" error in logs
+- **Cause**: Multiple backend processes (PM2 + manual) all login to same Zalo account
+- **Impact**: Listener dropped, incoming messages missed
+- **Fix**: Single PM2 `hermes-backend` via `ecosystem.config.cjs`; symlink `prisma → packages/backend/prisma`; code gate on `config.autoReply.enabled`
+- **Recovery**: Kill old processes, restart single backend via PM2
 
 ---
 
@@ -83,13 +93,15 @@
 
 | Resource | Limit | Enforced By |
 |----------|-------|-------------|
-| Worker heap | 2048 MB | NODE_OPTIONS | 
+| Worker heap | 2048 MB | NODE_OPTIONS |
 | Docling runtime | 60 seconds | setTimeout + process.kill |
 | Docling kill grace | 5 seconds | setTimeout after SIGTERM |
 | Docling output | 1 MB | Buffer cap |
 | File size | 50 MB | Config validation |
 | Jobs per poll | 5 | Worker query limit |
 | DB connections | Prisma default | Connection pool |
+| PM2 max restarts | 5 | ecosystem.config.cjs |
+| Live test quota | 1 message | LiveTestSession.maxMessages |
 
 ---
 
@@ -97,16 +109,18 @@
 
 1. **RapidOCR model missing**: Scanned PDFs fail with DOCLING_FAILED (not a crash)
 2. **system-health.test.ts**: 2 pre-existing test failures (backup check, DB snapshot) — unrelated to documents
-3. **No process manager**: Worker must be manually restarted if it crashes (pm2/supervisord not configured)
+3. **messagePipeline heartbeat stale**: After message received, heartbeat may not refresh until next dispatch (cosmetic)
 
 ---
 
 ## Verdict
 
-### ✅ STABLE — No regressions, no crashes, no data loss
+### ✅ STABLE — Batch 18 Live Test PASS, Zalo conflict cleaned, no regressions
 
-Batch 12 + 12.1 has been live-tested and verified. The system handles failures gracefully:
+Batch 12 + 12.1 + Batch 18 have been live-tested and verified. The system handles failures gracefully:
 - Document conversion failures → MEDIUM errors, not crashes
 - Process crashes → Backend survives
 - Timeouts → Auto-kill + cleanup
 - Old failed jobs → Properly classified, no retry loops
+- **Controlled live test (Batch 18)**: One real DM send with quota + TTL verified; post-quota dry-run fallback confirmed
+- **Zalo process conflict**: Root cause (3 backends) found and fixed; single PM2 backend enforced
