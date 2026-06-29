@@ -38,6 +38,8 @@
     "backup:verify": "npm run backup:verify -w packages/backend",
     "backup:restore": "npm run backup:restore -w packages/backend",
     "restart:safe": "npm run restart:safe -w packages/backend",
+    "secret:audit": "npm run secret:audit -w packages/backend",
+    "secret:audit:strict": "npm run secret:audit:strict -w packages/backend",
     "clean": "rimraf packages/*/dist packages/*/.next packages/*/node_modules node_modules",
     "smoke": "echo '=== Health ===' && curl -s http://localhost:3000/api/health && echo '' && echo '=== Admin ===' && curl -s -u admin:dev-admin-password http://localhost:3000/api/admin/status && echo '' && echo '=== Zalo ===' && curl -s http://localhost:3000/api/zalo/status && echo '' && echo '=== Worker ===' && curl -s http://localhost:3000/api/worker/status && echo '' && echo '=== Parse ===' && curl -s -u admin:dev-admin-password -X POST http://localhost:3000/api/agent/parse-command -H 'Content-Type: application/json' --data-binary '{\"command\":\"22h nhac Le Phat vao group Lop Tu Hoc\"}' && echo ''"
   },
