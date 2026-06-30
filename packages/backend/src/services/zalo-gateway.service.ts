@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { config } from "../config.js";
@@ -27,6 +27,44 @@ export interface ZaloGatewayStatus {
 
 const SESSION_FILE = "zalo-session.json";
 const LOGIN_TIMEOUT_MS = 120_000; // 2 minutes for QR scan
+
+// ── Session quarantine (S1.1 — non-destructive error handling) ────────
+
+/**
+ * Rename a session file to a quarantined copy instead of deleting it.
+ *
+ * Reasons are sanitized to a short safe token:
+ *   "expired" | "invalid" | "session-error" | "unknown"
+ *
+ * Example: zalo-session.json → zalo-session.json.expired-20260629-165300
+ *
+ * Returns the quarantine path on success, null if the source file doesn't exist.
+ * Errors during rename are logged but never thrown — the caller continues gracefully.
+ */
+export function quarantineSessionFile(sessionPath: string, reason: string): string | null {
+  try {
+    if (!existsSync(sessionPath)) return null;
+
+    // Sanitize reason to a safe filename token
+    const safeReason = /^(expired|invalid|session|SESSION|login)/i.test(reason)
+      ? reason.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 20) || "session-error"
+      : "unknown";
+
+    // Timestamp: YYYYMMDD-HHMMSS
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const quarantinePath = `${sessionPath}.${safeReason}-${ts}`;
+    renameSync(sessionPath, quarantinePath);
+
+    console.log(`[zalo-gateway] Session quarantined: ${sessionPath} → ${quarantinePath} (reason: ${safeReason})`);
+    return quarantinePath;
+  } catch (err: unknown) {
+    console.error(`[zalo-gateway] Session quarantine failed: ${(err as Error).message}`);
+    return null;
+  }
+}
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -316,8 +354,8 @@ export class ZaloGatewayService extends EventEmitter {
 
       // Classify error
       if (msg.includes("expired") || msg.includes("invalid") || msg.includes("SESSION")) {
-        this.setStatus({ connectionStatus: "error", lastError: "CREDENTIALS_EXPIRED" });
-        try { unlinkSync(sessionPath); } catch { /* ignore */ }
+        this.setStatus({ connectionStatus: "error", lastError: "SESSION_QUARANTINED" });
+        quarantineSessionFile(sessionPath, msg);
       } else if (msg.includes("login") || msg.includes("Login")) {
         this.setStatus({ connectionStatus: "error", lastError: "ZALO_LOGIN_FAILED" });
       } else {

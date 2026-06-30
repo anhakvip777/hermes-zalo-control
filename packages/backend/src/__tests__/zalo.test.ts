@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MockMessageSender } from "../services/message-sender.js";
 import { ZaloMessageSender, rateLimiter } from "../services/zalo-message-sender.js";
-import { ZaloGatewayService } from "../services/zalo-gateway.service.js";
+import { ZaloGatewayService, quarantineSessionFile } from "../services/zalo-gateway.service.js";
 import { normalizeMessage, dedupKey, saveIncomingMessage, listMessages, listThreads } from "../services/zalo-receive.js";
 import { cleanDatabase } from "./shared-setup.js";
 import * as settingsService from "../services/settings.service.js";
@@ -220,6 +223,66 @@ describe("ZaloGateway — session path safety", () => {
     expect(json).not.toContain("cookie");
     expect(json).not.toContain("token");
     expect(json).not.toContain("imei");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// S1.1 — Session quarantine (non-destructive error handling)
+// ═══════════════════════════════════════════════════════════════════
+describe("ZaloGateway — session quarantine (S1.1)", () => {
+  const testDir = join(tmpdir(), "zalo-quarantine-test-" + Date.now());
+  const sessionPath = join(testDir, "zalo-session.json");
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(sessionPath, JSON.stringify({ credentials: { cookie: "test" }, selfUserId: "123" }));
+  });
+
+  afterAll(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("quarantineSessionFile: renames file with .expired-timestamp suffix", () => {
+    const result = quarantineSessionFile(sessionPath, "expired");
+    expect(result).not.toBeNull();
+    expect(result).toContain(sessionPath + ".");
+    expect(result).toMatch(/\.expired-\d{8}-\d{6}$/);
+    expect(existsSync(sessionPath)).toBe(false);       // original gone
+    expect(existsSync(result!)).toBe(true);             // quarantined exists
+  });
+
+  it("quarantineSessionFile: preserves session content in quarantined file", () => {
+    const expected = readFileSync(sessionPath, "utf-8");
+    const result = quarantineSessionFile(sessionPath, "invalid");
+    expect(result).not.toBeNull();
+    const actual = readFileSync(result!, "utf-8");
+    expect(JSON.parse(actual)).toEqual(JSON.parse(expected));
+  });
+
+  it("quarantineSessionFile: missing file returns null, no throw", () => {
+    const missingPath = join(testDir, "does-not-exist.json");
+    expect(() => quarantineSessionFile(missingPath, "expired")).not.toThrow();
+    expect(quarantineSessionFile(missingPath, "expired")).toBeNull();
+  });
+
+  it("quarantineSessionFile: sanitizes 'invalid' reason correctly", () => {
+    const result = quarantineSessionFile(sessionPath, "invalid");
+    expect(result).toMatch(/\.invalid-\d{8}-\d{6}$/);
+  });
+
+  it("quarantineSessionFile: maps 'SESSION expired' to session-error suffix", () => {
+    writeFileSync(sessionPath, "{}"); // recreate after previous test deleted it
+    const result = quarantineSessionFile(sessionPath, "SESSION expired");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/\.session-expired-\d{8}-\d{6}$/);
+  });
+
+  it("quarantineSessionFile: unmapped reason uses 'unknown' suffix", () => {
+    writeFileSync(sessionPath, "{}");
+    const result = quarantineSessionFile(sessionPath, "some random error");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/\.unknown-\d{8}-\d{6}$/);
   });
 });
 
