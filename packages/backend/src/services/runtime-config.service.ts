@@ -354,8 +354,8 @@ async function createAutoBackup(): Promise<string | null> {
     const destPath = resolve(backupDir, backupName);
     copyFileSync(dbPath, destPath);
 
-    // Also copy session if exists
-    const sessionSrc = resolve(cwd, "zalo-session", "zalo-session.json");
+    // H1: Backup session from canonical path — not relative cwd/zalo-session
+    const sessionSrc = resolve(config.zalo.sessionDir, "zalo-session.json");
     if (existsSync(sessionSrc)) {
       const sessionDest = resolve(backupDir, `${backupName}.session.json`);
       copyFileSync(sessionSrc, sessionDest);

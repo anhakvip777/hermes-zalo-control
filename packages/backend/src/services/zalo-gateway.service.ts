@@ -46,7 +46,7 @@ export function quarantineSessionFile(sessionPath: string, reason: string): stri
     if (!existsSync(sessionPath)) return null;
 
     // Sanitize reason to a safe filename token
-    const safeReason = /^(expired|invalid|session|SESSION|login)/i.test(reason)
+    const safeReason = /^(expired|invalid|session|SESSION|login|logout)/i.test(reason)
       ? reason.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 20) || "session-error"
       : "unknown";
 
@@ -309,7 +309,12 @@ export class ZaloGatewayService extends EventEmitter {
     const sessionPath = resolve(this.sessionDir, SESSION_FILE);
     if (!existsSync(sessionPath)) {
       this.setStatus({ connectionStatus: "error", lastError: "NO_SESSION_FILE" });
+      // H1: Health degraded — session missing but dir exists (pre-created at startup)
+      // Guidance: restore from backup (backups/db/zalo-session-*/) or login via QR
       console.log("Zalo auto-restore: NO_SESSION_FILE");
+      console.log("  → To restore: copy a session backup to " + sessionPath);
+      console.log("  → Or login fresh: POST /api/zalo/login (QR code)");
+      heartbeatOk("zaloSession", { file: "missing", path: sessionPath }).catch(() => {});
       return false;
     }
 
@@ -386,8 +391,10 @@ export class ZaloGatewayService extends EventEmitter {
         }),
         "utf-8",
       );
-    } catch {
-      // Non-fatal: session save failure
+      console.log(`[zalo-gateway] Session saved: ${sessionPath} (selfUserId=${this.status.selfUserId})`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[zalo-gateway] Session save FAILED: ${msg}`);
     }
   }
 
@@ -506,10 +513,15 @@ export class ZaloGatewayService extends EventEmitter {
     // Stop listener before nulling api (M9)
     await this.stopListener();
 
+    // H1: Quarantine session on explicit logout instead of deleting.
+    // Preserves session file for forensic/debug — S1.1 principle extended to logout.
     try {
       const sessionPath = resolve(this.sessionDir, SESSION_FILE);
       if (existsSync(sessionPath)) {
-        unlinkSync(sessionPath);
+        const quarantined = quarantineSessionFile(sessionPath, "logout");
+        if (quarantined) {
+          console.log(`[zalo-gateway] Session quarantined by explicit logout: ${quarantined}`);
+        }
       }
     } catch {
       // ignore

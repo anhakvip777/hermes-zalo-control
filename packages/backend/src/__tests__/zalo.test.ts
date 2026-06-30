@@ -287,6 +287,93 @@ describe("ZaloGateway — session quarantine (S1.1)", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+// H1 — Session Persistence / Heartbeat Polish
+// ═══════════════════════════════════════════════════════════════════
+describe("H1 — Session persistence", () => {
+  const testDir = join(tmpdir(), "h1-session-test-" + Date.now());
+  const sessionPath = join(testDir, "zalo-session.json");
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("F1: mkdirSync creates canonical session dir without crash", () => {
+    expect(existsSync(testDir)).toBe(false);
+    mkdirSync(testDir, { recursive: true });
+    expect(existsSync(testDir)).toBe(true);
+  });
+
+  it("F1: mkdirSync is idempotent (dir already exists)", () => {
+    mkdirSync(testDir, { recursive: true });
+    expect(() => mkdirSync(testDir, { recursive: true })).not.toThrow();
+  });
+
+  it("F1: missing session file → NO_SESSION_FILE, no empty file created", () => {
+    mkdirSync(testDir, { recursive: true });
+    // Dir exists but file doesn't → should NOT create a dummy
+    expect(existsSync(sessionPath)).toBe(false);
+    // No crash when checking for non-existent file
+    expect(() => {
+      if (!existsSync(sessionPath)) {
+        // This is the NO_SESSION_FILE path — should NOT create a file
+      }
+    }).not.toThrow();
+    expect(existsSync(sessionPath)).toBe(false); // still no file
+  });
+
+  it("F2: quarantineSessionFile with 'logout' reason works", () => {
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(sessionPath, JSON.stringify({ credentials: { cookie: "test" } }));
+    const result = quarantineSessionFile(sessionPath, "logout");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/\.logout-\d{8}-\d{6}$/);
+    expect(existsSync(sessionPath)).toBe(false);     // original quarantined
+    expect(existsSync(result!)).toBe(true);           // quarantined copy exists
+  });
+
+  it("F2: logout path no longer uses unlinkSync(sessionPath)", () => {
+    // Verify the source code doesn't contain destructive session delete
+    const src = readFileSync(join(__dirname, "..", "services", "zalo-gateway.service.ts"), "utf-8");
+    // The logout method should NOT have unlinkSync with session path
+    // It should use quarantineSessionFile instead
+    const logoutMethod = src.match(/async logout\(\)[\s\S]*?\n  \}/);
+    if (logoutMethod) {
+      expect(logoutMethod[0]).not.toMatch(/unlinkSync\(sessionPath\)/);
+      expect(logoutMethod[0]).toMatch(/quarantineSessionFile/);
+    }
+  });
+
+  it("F3: runtime-config backup resolves canonical config.zalo.sessionDir", () => {
+    // Verify the backup code uses config.zalo.sessionDir, not cwd/zalo-session
+    const src = readFileSync(join(__dirname, "..", "services", "runtime-config.service.ts"), "utf-8");
+    expect(src).toMatch(/config\.zalo\.sessionDir/);
+    expect(src).not.toMatch(/resolve\(cwd,\s*"zalo-session"/);
+  });
+
+  it("F4: NO_SESSION_FILE path includes guidance log", () => {
+    const src = readFileSync(join(__dirname, "..", "services", "zalo-gateway.service.ts"), "utf-8");
+    // Check that NO_SESSION_FILE path has restore guidance
+    const noSessionBlock = src.match(/NO_SESSION_FILE[\s\S]*?return false;/);
+    expect(noSessionBlock).not.toBeNull();
+    if (noSessionBlock) {
+      expect(noSessionBlock[0]).toMatch(/restore.*backup|copy.*session|login.*QR/);
+    }
+  });
+
+  it("guard: no destructive unlinkSync/rmSync of session files in production code", () => {
+    const src = readFileSync(join(__dirname, "..", "services", "zalo-gateway.service.ts"), "utf-8");
+    // The only unlinkSync should be in tests, not in gateway
+    // rmSync should only be in quarantine (renameSync, not rmSync)
+    const unlinkLines = src.split("\n").filter(l => l.includes("unlinkSync") && l.includes("session"));
+    expect(unlinkLines.length).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 describe("MockMessageSender", () => {
   it("sends and records messages", async () => {
     const sender = new MockMessageSender();

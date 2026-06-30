@@ -57,6 +57,14 @@ async function main() {
       if (!isLockOwner()) {
         console.warn("[process-lock] Lock not held — skipping Zalo listener start");
       } else {
+        // H1: Pre-create canonical session directory on startup
+        // Ensures dir exists even on fresh deploy — no manual mkdir needed.
+        // Does NOT create a dummy session file — missing file → health degraded.
+        const { mkdirSync } = await import("node:fs");
+        const canonicalDir = config.zalo.sessionDir;
+        mkdirSync(canonicalDir, { recursive: true });
+        console.log(`[startup] Session dir ensured: ${canonicalDir}`);
+
         const { getZaloGateway } = await import("./services/zalo-gateway.service.js");
         const gw = getZaloGateway();
         console.log("Zalo auto-restore attempted");
