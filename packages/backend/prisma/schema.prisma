@@ -607,3 +607,27 @@ model ThreadProfile {
   @@index([displayName])
   @@index([threadType])
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// P1 — Zalo User Permission / RBAC
+// ═══════════════════════════════════════════════════════════════════
+
+model ZaloPrincipal {
+  id          String   @id @default(cuid())
+  principalId String   // senderId (Zalo user ID) — canonical identity
+  type        String   @default("user") // "user" | "group" | "thread"
+  role        String   @default("form_only") // form_only | basic_chat | advanced | admin
+  status      String   @default("active") // active | blocked
+  displayName String?  // from ThreadProfile, for UI only — NEVER for permission
+  threadId    String?  // scope to specific thread (null = global across all threads)
+  notes       String?
+  createdBy   String?  // who assigned this role
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastSeenAt  DateTime?
+
+  @@unique([principalId, threadId]) // one role per user per thread
+  @@index([principalId])
+  @@index([role])
+  @@index([status])
+}

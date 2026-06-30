@@ -777,6 +777,47 @@ export async function handleIncomingMessage(
     return { dispatched: false, reason: group.reason };
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // P1.1 — Permission gate (after safetyCheck + groupGate, before dispatch)
+  // ═══════════════════════════════════════════════════════════════════
+  // Resolve the effective role for this sender.
+  // Permission is matched by senderId — displayName NEVER used.
+  try {
+    const { resolvePrincipal, checkPermission, isBlocked, logPermissionDecision } =
+      await import("./principal.service.js");
+
+    const ctx = await resolvePrincipal(msg.senderId, msg.threadId);
+
+    // Blocked → silent skip
+    if (isBlocked(ctx.status)) {
+      logPermissionDecision({
+        allowed: false,
+        reason: "blocked",
+        currentRole: ctx.role,
+        action: "any",
+        senderId: msg.senderId,
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+      });
+      console.log(`[dispatcher] skip blocked: senderId=${msg.senderId} thread=${msg.threadId}`);
+      return { dispatched: false, reason: "blocked" };
+    }
+
+    // Attach resolved role to message metadata so downstream (Hermes, rules) can use it
+    (msg as any).__principalRole = ctx.role;
+    (msg as any).__principalStatus = ctx.status;
+
+    console.log(
+      `[dispatcher] principal resolved: senderId=${msg.senderId.slice(0, 12)}… ` +
+      `role=${ctx.role} status=${ctx.status} fromDb=${ctx.fromDb} thread=${msg.threadId}`,
+    );
+  } catch (err: unknown) {
+    // Permission lookup error → fail safe (form_only default)
+    const msg2 = err instanceof Error ? err.message : String(err);
+    console.error(`[dispatcher] principal lookup failed: ${msg2} — using form_only default`);
+    (msg as any).__principalRole = "form_only";
+  }
+
   // Create agent task
   const task = await agentTaskService.createAgentTask({
     agentName: "hermes",
