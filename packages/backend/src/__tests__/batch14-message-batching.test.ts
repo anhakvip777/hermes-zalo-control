@@ -2,7 +2,7 @@
 // Batch 14 Tests — Message Batching / Debounce
 // =============================================================================
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock config for batching
 const mockBatchingConfig = vi.hoisted(() => ({
@@ -28,8 +28,25 @@ vi.mock("../db.js", async () => {
 
 // We'll test the service functions directly
 import * as batchService from "../services/message-batch.service.js";
+import { prisma } from "../db.js";
+
+// Clean up test batches before each test to prevent stale data from
+// previous test runs. The mock returns the real Prisma client (importActual),
+// so test batches that weren't cleaned up (e.g. from an early-exit failure)
+// would persist and cause isNew=false assertions to fail.
+const TEST_THREAD_IDS = [
+  "thread-test-1", "thread-test-2", "thread-test-3",
+  "thread-limit-1", "thread-chars-1", "thread-overdue-1",
+  "thread-claim-1", "thread-complete-1",
+];
 
 describe("Message Batching — Service", () => {
+  beforeEach(async () => {
+    await prisma.messageBatch.deleteMany({
+      where: { threadId: { in: TEST_THREAD_IDS } },
+    });
+  });
+
   it("addToBatch creates new batch for first message", async () => {
     const msg = {
       zaloMessageId: "msg-1",
