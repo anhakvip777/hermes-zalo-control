@@ -587,3 +587,23 @@ model ThreadCooldown {
 
   @@index([expiresAt])
 }
+
+// =============================================================================
+// ThreadProfile — thread display name + identity metadata (Batch T1)
+// =============================================================================
+
+model ThreadProfile {
+  id          String    @id @default(cuid())
+  threadId    String    @unique
+  threadType  String?   // "user" | "group"
+  displayName String?
+  avatarUrl   String?
+  source      String?   // "zalo_event_user" | "zalo_event_group" | "manual" | "fallback"
+  lastSeenAt  DateTime?
+  lastSyncAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([displayName])
+  @@index([threadType])
+}

@@ -95,8 +95,18 @@ export default function MessagesPage() {
                       {m.role}
                     </span>
                   </td>
-                  <td className="p-2 font-mono text-xs max-w-[140px] truncate" title={m.threadId}>
-                    {m.threadId.slice(-12)}
+                  <td className="p-2 text-xs max-w-[160px]" title={m.threadId}>
+                    {m.thread?.displayName ? (
+                      <div>
+                        <div className="font-medium text-slate-700 truncate">{m.thread.displayName}</div>
+                        <div className="font-mono text-[10px] text-slate-400 truncate">{m.threadId}</div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="text-slate-400 text-[10px]">Unknown thread</div>
+                        <div className="font-mono text-[10px] text-slate-500 truncate">{m.threadId}</div>
+                      </div>
+                    )}
                   </td>
                   <td className="p-2">
                     <span className={`px-1.5 py-0.5 rounded text-xs ${

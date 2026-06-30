@@ -373,6 +373,13 @@ export interface MessageItem {
   metadata: string | null;
   receivedAt: string;
   createdAt: string;
+  /** ThreadProfile enrichment (Batch T1) */
+  thread?: {
+    id: string;
+    displayName: string | null;
+    type: string | null;
+    avatarUrl: string | null;
+  } | null;
 }
 
 export interface MessageListResponse {

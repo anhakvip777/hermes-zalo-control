@@ -5,6 +5,7 @@
 
 import { prisma } from "../db.js";
 import { normalizeThreadId } from "./thread-id.js";
+import { upsertThreadProfileFromMessage, getThreadProfiles } from "./thread-profile.service.js";
 
 export interface NormalizedMessage {
   zaloMessageId: string | null;
@@ -297,6 +298,15 @@ export async function saveIncomingMessage(
     },
   });
 
+  // Upsert ThreadProfile from inbound message (Batch T1)
+  // Non-blocking: failure here must not affect message processing.
+  upsertThreadProfileFromMessage({
+    threadId: msg.threadId,
+    threadType: msg.threadType,
+    senderName: msg.senderName,
+    threadName: msg.threadName,
+  }).catch(() => {});
+
   // Upsert thread
   await prisma.zaloThread.upsert({
     where: { id: msg.threadId },
@@ -367,7 +377,26 @@ export async function listMessages(opts: {
     prisma.message.count({ where }),
   ]);
 
-  return { data, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+  // Enrich with ThreadProfile display names (Batch T1)
+  const threadIds = Array.from(new Set(data.map((m) => m.threadId).filter(Boolean)));
+  const profiles = await getThreadProfiles(threadIds as string[]);
+
+  const enriched = data.map((m) => {
+    const profile = profiles.get(m.threadId);
+    return {
+      ...m,
+      thread: profile
+        ? {
+            id: m.threadId,
+            displayName: profile.displayName,
+            type: profile.threadType,
+            avatarUrl: profile.avatarUrl,
+          }
+        : { id: m.threadId, displayName: null, type: m.threadType, avatarUrl: null },
+    };
+  });
+
+  return { data: enriched, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
 }
 
 // ═══════════════════════════════════════════════════════════════════
