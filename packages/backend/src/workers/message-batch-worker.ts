@@ -41,31 +41,78 @@ export async function pollBatches(): Promise<void> {
           `${batch.messageCount} msgs, ${batch.totalChars} chars, thread=${batch.threadId}`,
         );
 
-        // Process through dispatcher
-        // Dynamic import to avoid circular dependency at module load time
-        const { handleIncomingMessage } = await import("../services/incoming-dispatcher.service.js");
+        // Process through backend internal API (R3.2 — worker no longer calls handler directly)
+        // Backend owns Zalo session; worker must route outbound via internal API.
+        const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN;
+        const INTERNAL_BASE = process.env.INTERNAL_API_BASE_URL || "http://127.0.0.1:3002";
+
+        if (!INTERNAL_TOKEN) {
+          console.error("[batch-worker] INTERNAL_API_TOKEN not set — cannot process batch.");
+          await batchService.completeBatch(batch.id, {
+            dispatched: false, reason: "internal_api_not_configured",
+            error: "INTERNAL_API_TOKEN missing", messageCount: batch.messageCount, totalChars: batch.totalChars,
+          });
+          stats.failed++;
+          continue;
+        }
 
         const messageIds: string[] = JSON.parse(batch.messageIds);
-        const syntheticMsg = {
-          zaloMessageId: messageIds[messageIds.length - 1] ?? null,
+        const payload = {
           threadId: batch.threadId,
-          threadType: batch.threadType as "user" | "group",
-          senderId: "",
-          content: batch.combinedText ?? "",
-          messageType: "text",
-          rawMetadata: JSON.stringify({
+          threadType: batch.threadType,
+          messages: messageIds.map((id, i) => ({
+            messageId: id,
+            content: batch.combinedText?.split("\n")[i] ?? "",
+          })),
+          combinedContent: batch.combinedText ?? "",
+          metadata: {
             source: "message_batch",
             batchId: batch.id,
             messageIds,
-          }),
-          mentions: undefined,
+            messageCount: batch.messageCount,
+          },
         };
 
-        const result = await handleIncomingMessage(syntheticMsg);
+        let response: Response;
+        try {
+          response = await fetch(`${INTERNAL_BASE}/api/internal/messages/handle-batch`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${INTERNAL_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(30_000),
+          });
+        } catch (err: unknown) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          console.error(`[batch-worker] internal API unreachable: ${errorMsg}`);
+          await batchService.completeBatch(batch.id, {
+            dispatched: false, reason: "internal_api_unreachable",
+            error: errorMsg.slice(0, 500), messageCount: batch.messageCount, totalChars: batch.totalChars,
+          });
+          stats.failed++;
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorBody = await response.text().catch(() => "unknown");
+          console.error(`[batch-worker] internal API error ${response.status}: ${errorBody.slice(0, 200)}`);
+          await batchService.completeBatch(batch.id, {
+            dispatched: false, reason: `internal_api_${response.status}`,
+            error: errorBody.slice(0, 500), messageCount: batch.messageCount, totalChars: batch.totalChars,
+          });
+          stats.failed++;
+          continue;
+        }
+
+        const result = await response.json() as { ok?: boolean; dispatched?: boolean; reason?: string };
+        const dispatched = result.dispatched ?? result.ok ?? false;
+        const reason = result.reason ?? (dispatched ? "success" : "unknown");
 
         await batchService.completeBatch(batch.id, {
-          dispatched: result.dispatched,
-          reason: result.reason,
+          dispatched,
+          reason,
           messageCount: batch.messageCount,
           totalChars: batch.totalChars,
           source: "batch_worker",
@@ -74,7 +121,7 @@ export async function pollBatches(): Promise<void> {
         stats.processed++;
         console.log(
           `[batch-worker] batch ${batch.id.slice(0, 8)} processed: ` +
-          `dispatched=${result.dispatched} reason=${result.reason ?? "none"}`,
+          `dispatched=${dispatched} reason=${reason}`,
         );
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);

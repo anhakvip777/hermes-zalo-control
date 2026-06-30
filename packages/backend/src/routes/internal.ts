@@ -140,4 +140,72 @@ export async function internalRoutes(app: FastifyInstance) {
       });
     }
   });
+
+  // ── POST /api/internal/messages/handle-batch (R3.2) ─────────────────
+  // Worker sends batch content here. Backend (which owns Zalo session)
+  // calls handleIncomingMessage() in the backend process.
+  app.post("/internal/messages/handle-batch", async (req, reply) => {
+    // 1. Localhost check
+    const clientIp = req.ip;
+    if (!isLocalRequest(clientIp)) {
+      return reply.status(403).send({ ok: false, error: "FORBIDDEN", message: "Internal API only accessible from localhost." });
+    }
+
+    // 2. Token check
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token || !safeTokenEquals(token, INTERNAL_TOKEN)) {
+      return reply.status(401).send({ ok: false, error: "UNAUTHORIZED", message: "Invalid or missing internal API token." });
+    }
+
+    // 3. Validate body
+    const body = req.body as Record<string, unknown> | null;
+    if (!body || typeof body.threadId !== "string" || !body.threadId) {
+      return reply.status(400).send({ ok: false, error: "BAD_REQUEST", message: "Missing required field: threadId." });
+    }
+    const threadType = body.threadType === "group" ? "group" : "user";
+    const messages = Array.isArray(body.messages) ? body.messages as Array<Record<string, unknown>> : [];
+    if (messages.length === 0) {
+      return reply.status(400).send({ ok: false, error: "BAD_REQUEST", message: "messages array must not be empty." });
+    }
+    const combinedContent = typeof body.combinedContent === "string" ? body.combinedContent : "";
+    if (!combinedContent) {
+      return reply.status(400).send({ ok: false, error: "BAD_REQUEST", message: "combinedContent must not be empty." });
+    }
+
+    // 4. Build synthetic NormalizedMessage and dispatch via handleIncomingMessage
+    //    (runs in backend process — has Zalo session)
+    try {
+      const { handleIncomingMessage } = await import("../services/incoming-dispatcher.service.js");
+
+      const messageIds = messages.map((m) => String(m.messageId ?? ""));
+      const syntheticMsg = {
+        zaloMessageId: messageIds[messageIds.length - 1] ?? null,
+        threadId: body.threadId as string,
+        threadType: threadType as "user" | "group",
+        senderId: (body.senderId as string) ?? "",
+        content: combinedContent,
+        messageType: "text",
+        rawMetadata: JSON.stringify({
+          source: "message_batch",
+          batchId: (body.metadata as Record<string, unknown>)?.["batchId"] ?? null,
+          messageIds,
+          messageCount: messages.length,
+          ...(body.metadata as Record<string, unknown> ?? {}),
+        }),
+        mentions: undefined,
+      };
+
+      const result = await handleIncomingMessage(syntheticMsg);
+
+      return reply.send({
+        ok: true,
+        dispatched: result.dispatched,
+        reason: result.reason ?? null,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[internal-api] handle-batch error: ${msg}`);
+      return reply.status(500).send({ ok: false, error: "BATCH_PROCESSING_FAILED", message: msg.slice(0, 500) });
+    }
+  });
 }

@@ -17,6 +17,12 @@ vi.mock("../services/outbound-dispatcher.service.js", () => ({
   sendOutbound: (...args: unknown[]) => mockSendOutbound(...args),
 }));
 
+// R3.2 — Mock handleIncomingMessage for batch endpoint tests
+const mockHandleIncoming = vi.fn().mockResolvedValue({ dispatched: true, reason: "success" });
+vi.mock("../services/incoming-dispatcher.service.js", () => ({
+  handleIncomingMessage: (...args: unknown[]) => mockHandleIncoming(...args),
+}));
+
 // ── Import the exported helpers ──────────────────────────────────────
 import { isLocalRequest, safeTokenEquals } from "../routes/internal.js";
 
@@ -259,5 +265,145 @@ describe("Internal API — POST /api/internal/outbound/send", () => {
     // The safeTokenEquals helper covers the comparison logic.
     expect(safeTokenEquals("wrong", VALID_TOKEN)).toBe(false);
     expect(safeTokenEquals(VALID_TOKEN, VALID_TOKEN)).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// R3.2 — POST /api/internal/messages/handle-batch
+// ═══════════════════════════════════════════════════════════════════
+describe("Internal API — POST /api/internal/messages/handle-batch", () => {
+  const VALID_TOKEN = "test-internal-token-12345";
+  let app: import("fastify").FastifyInstance;
+
+  beforeAll(async () => {
+    process.env.INTERNAL_API_TOKEN = VALID_TOKEN;
+
+    const { fastify } = await import("fastify");
+    app = fastify({ logger: false });
+    const { internalRoutes } = await import("../routes/internal.js");
+    await app.register(internalRoutes, { prefix: "/api" });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    await app.close();
+    vi.resetModules();
+  });
+
+  beforeEach(() => {
+    mockHandleIncoming.mockClear();
+  });
+
+  const validBatchBody = {
+    threadId: "thread-test-1",
+    threadType: "user",
+    messages: [
+      { messageId: "msg-1", content: "hello" },
+      { messageId: "msg-2", content: "world" },
+    ],
+    combinedContent: "hello\nworld",
+    metadata: { batchId: "batch-1", messageIds: ["msg-1", "msg-2"], messageCount: 2 },
+  };
+
+  it("rejects request without token → 401", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      payload: validBatchBody,
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects request with wrong token → 401", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: "Bearer wrong-token" },
+      payload: validBatchBody,
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects request from non-localhost → 403", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: validBatchBody,
+      remoteAddress: "8.8.8.8",
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("rejects missing threadId → 400", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: { messages: [{ messageId: "m1", content: "hi" }], combinedContent: "hi" },
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects empty messages array → 400", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: { threadId: "t1", messages: [], combinedContent: "hi" },
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects empty combinedContent → 400", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: { threadId: "t1", messages: [{ messageId: "m1", content: "hi" }], combinedContent: "" },
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("accepts valid request → 200, calls handleIncomingMessage", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: validBatchBody,
+      remoteAddress: "127.0.0.1",
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.ok).toBe(true);
+    expect(body.dispatched).toBe(true);
+    expect(mockHandleIncoming).toHaveBeenCalledTimes(1);
+
+    const callArg = mockHandleIncoming.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.threadId).toBe("thread-test-1");
+    expect(callArg.content).toBe("hello\nworld");
+  });
+
+  it("synthetic message preserves batch metadata in rawMetadata", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: validBatchBody,
+      remoteAddress: "127.0.0.1",
+    });
+    expect(mockHandleIncoming).toHaveBeenCalledTimes(1);
+    const callArg = mockHandleIncoming.mock.calls[0]?.[0] as Record<string, unknown>;
+    const metadata = JSON.parse(callArg.rawMetadata as string);
+    expect(metadata.source).toBe("message_batch");
+    expect(metadata.batchId).toBe("batch-1");
+    expect(metadata.messageCount).toBe(2);
+    expect(metadata.messageIds).toEqual(["msg-1", "msg-2"]);
   });
 });
