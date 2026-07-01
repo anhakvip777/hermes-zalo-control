@@ -24,7 +24,7 @@ Kiểm tra hệ thống như kiểm tra xe trước khi giao khách:
 
 | Check | Status |
 |-------|--------|
-| PM2 (4 processes) | ✅ All online — backend, worker, frontend, document-worker |
+| PM2 (5 processes) | ✅ All online — backend, worker, frontend, document-worker, tunnel |
 | Health API | ✅ `status: ok`, uptime 63+ min |
 | Runtime config | ✅ `dryRun=true`, `enabled=true`, 3 allowed threads |
 | Live test | ✅ inactive |
@@ -148,6 +148,24 @@ Kiểm tra hệ thống như kiểm tra xe trước khi giao khách:
 | permission_denied | 0 | ✅ |
 | Auto-restore failed | 7 (old, pre-QR login) | ✅ Known/resolved |
 | Worker errors | 16 in 100 lines (non-critical, heartbeat/timeout) | ✅ Low |
+
+---
+
+## Cloudflare Tunnel / Public URL
+
+| Check | Status |
+|-------|--------|
+| Public URL | ✅ `https://hermes.nhachungkhuduong.pro.vn` — HTTP/2 200 |
+| Tunnel process | ✅ PM2 `hermes-tunnel` online (4 QUIC connections) |
+| Ingress config | ✅ `hermes.nhachungkhudong.pro.vn` → `http://127.0.0.1:3001` |
+| Domain spelling | ⚠️ `nhachungkhudong` (not `nhachungkhuduong`) |
+
+### Incident: Cloudflare 1033 (2026-07-01)
+
+- Tunnel PM2 process was missing from `pm2 save` after restart
+- Local services (3000, 3002) were healthy
+- Fix: `pm2 start cloudflared --name hermes-tunnel -- tunnel run --token <TOKEN>` + `pm2 save`
+- **No code changes, no DB reset, no session impact**
 
 ---
 

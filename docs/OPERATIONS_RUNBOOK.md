@@ -180,6 +180,43 @@ pm2 status
 
 ---
 
+## Cloudflare Tunnel Recovery
+
+**Public URL:** https://hermes.nhachungkhuduong.pro.vn  
+> Note: domain is `nhachungkhudong`, not `nhachungkhuduong`.
+
+### Symptom
+Cloudflare Error 1033 — `hermes.nhachungkhuduong.pro.vn` not accessible.  
+Local services (3000, 3002) healthy but public URL unreachable.
+
+### Diagnosis
+```bash
+pm2 status | grep tunnel        # Should show hermes-tunnel. If missing → root cause.
+curl -I http://127.0.0.1:3000   # Must return 200
+curl -I http://127.0.0.1:3002/api/system/health  # Must return 200
+```
+
+### Fix
+```bash
+pm2 start cloudflared --name hermes-tunnel -- tunnel run --token <TOKEN>
+pm2 save
+```
+
+### Verify
+```bash
+pm2 status                              # 5 processes including hermes-tunnel
+curl -I http://127.0.0.1:3000           # HTTP 200
+curl -I http://127.0.0.1:3002/api/system/health  # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn   # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn/messages       # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn/access-control # HTTP 200
+```
+
+### Safety
+No code changes. No DB reset. No session delete. No global live. No group rollout.
+
+---
+
 ## Log Inspection
 
 ```bash

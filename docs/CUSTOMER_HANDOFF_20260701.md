@@ -87,6 +87,39 @@
 
 ---
 
+## Cloudflare Tunnel / Public URL
+
+**Public URL:** https://hermes.nhachungkhuduong.pro.vn
+
+> Note: domain is `nhachungkhudong`, not `nhachungkhuduong`.
+
+### Incident: Cloudflare 1033 (2026-07-01)
+
+**Root cause:**
+- Frontend `localhost:3000` was online ✅
+- Backend `localhost:3002` was online ✅
+- Cloudflare tunnel PM2 process was missing ❌
+
+**Fix:**
+```bash
+pm2 start cloudflared --name hermes-tunnel -- tunnel run --token <TOKEN>
+pm2 save
+```
+
+**Verify:**
+```bash
+pm2 status                              # must show 5 processes including hermes-tunnel
+curl -I http://127.0.0.1:3000           # HTTP 200
+curl -I http://127.0.0.1:3002/api/system/health  # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn   # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn/messages       # HTTP 200
+curl -I https://hermes.nhachungkhuduong.pro.vn/access-control # HTTP 200
+```
+
+**Safety:** No code changes, no DB reset, no session delete, no global live, no group rollout.
+
+---
+
 ## Emergency Stop
 
 1. Keep global `dryRun=true`
