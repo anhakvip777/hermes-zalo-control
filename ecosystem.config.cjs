@@ -21,6 +21,7 @@ module.exports = {
         PORT: "3002",
         ZALO_AUTO_REPLY_DRY_RUN: "true",
         ZALO_AUTO_REPLY_ENABLED: "true",
+        ZALO_AUTO_REPLY_ALLOWED_THREADS: "6792540503378312397,5189400998311849354,6906520402993817174",
         ZALO_SESSION_DIR: "/home/anhakvip777/hermes-zalo-control/packages/backend/zalo-session",
         MESSAGE_BATCHING_ENABLED: "true",
         MESSAGE_BATCHING_WINDOW_MS: "6000",
