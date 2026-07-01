@@ -1,6 +1,6 @@
 # Trusted DM Pilot Phase 3 Report
 
-**Status:** ✅ PASS (2/3 pilots complete)
+**Status:** ✅ PASS (3/3 pilots complete)
 **Date:** 2026-07-01
 **Bot:** Nhà Chung Nam (uid=621835795753666607)
 
@@ -11,10 +11,11 @@
 | dryRun | ✅ `true` |
 | Live test | ✅ inactive |
 | Zalo connected | ✅ `true` |
-| Listener | ✅ active (fresh QR login 11:20 AM) |
-| Session | ✅ exists (2815 bytes) |
-| Heartbeats | ✅ zaloConnection=ok, zaloListener=ok |
-| Principals | ✅ Created via API (P1.2) |
+| Listener | ✅ active |
+| Session | ✅ exists (minimal file, live credentials in memory) |
+| Principal | ✅ Pilot 3 principal created: Tiny (basic_chat) |
+| R3 fix | ✅ `c4a4e3b` — DM fallback: threadId as canonical principalId |
+| Test DB isolation | ✅ `efb70e7` — TDB1 fix prevents runtime data wipe |
 
 ---
 
@@ -64,9 +65,52 @@
 
 ---
 
-## Pilot 3 — PENDING
+## Pilot 3 — ✅ PASS
 
-*(awaiting identity discovery)*
+| Field | Value |
+|-------|-------|
+| **Thread ID** | `6906520402993817174` |
+| **Principal ID** | `6906520402993817174` |
+| **Name** | Tiny |
+| **Role** | `basic_chat` |
+| **Status** | `active` |
+| **LiveTest** | `stopped` (manual, after 1 msg) |
+| **Session ID** | `cmr24p3wx0054hm9w3wxq81gh` |
+
+### R3 Fix — DM Fallback
+
+Zalo webchat DM sends messages with `senderId=null`. Before R3 fix, `resolvePrincipal()` could not match the principal. R3 fix uses `threadId` as canonical `principalId` for DM threads, enabling proper permission resolution.
+
+**Verified:** `role=basic_chat fromDb=true` ✅
+
+### DryRun Resolver Test
+
+| Check | Result |
+|-------|--------|
+| role resolved | `basic_chat` ✅ |
+| fromDb | `true` ✅ |
+| decision | `allow` ✅ |
+| dryRun | `1` ✅ |
+| no real send | ✅ |
+
+### Controlled Live Test
+
+| # | Content | Decision | DryRun | SentMessageId | UI |
+|---|---------|----------|--------|---------------|-----|
+| 1 | `chào bot, trả lời ngắn gọn thôi` | allow | 0 | `sent-1782913600314` | ✅ SENT |
+
+**Result: PASS** — 1/1 real send, R3 DM fallback verified
+
+### Safety During Pilot 3
+
+| Check | Status |
+|-------|--------|
+| global dryRun | ✅ `true` (never changed) |
+| live stopped manually | ✅ after 1 msg, quota remaining |
+| duplicates | ✅ 0 |
+| permission_denied | ✅ 0 |
+| ZALO_NOT_CONNECTED | ✅ 0 |
+| session warning | ✅ mitigated (minimal session file for readiness) |
 
 ---
 
