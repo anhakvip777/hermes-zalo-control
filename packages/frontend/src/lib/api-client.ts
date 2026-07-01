@@ -843,3 +843,86 @@ export function stopLiveTest() {
     body: JSON.stringify({}),
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// P1.3 — Access Control (ZaloPrincipal CRUD + Audit)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface ZaloPrincipal {
+  id: string;
+  principalId: string;
+  type: "user" | "group" | "thread";
+  role: "form_only" | "basic_chat" | "advanced" | "admin";
+  status: "active" | "blocked";
+  displayName: string | null;
+  threadId: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PrincipalListResponse {
+  items: ZaloPrincipal[];
+  total: number;
+}
+
+export interface PrincipalAuditEntry {
+  id: string;
+  principalId: string;
+  threadId: string | null;
+  action: string;
+  oldValue: string | null;
+  newValue: string | null;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string;
+}
+
+export interface AuditListResponse {
+  items: PrincipalAuditEntry[];
+  total: number;
+}
+
+export function listPrincipals(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch<PrincipalListResponse>(`/api/access/principals${qs ? `?${qs}` : ""}`);
+}
+
+export function getPrincipal(id: string) {
+  return apiFetch<ZaloPrincipal>(`/api/access/principals/${id}`);
+}
+
+export function createPrincipal(body: Record<string, unknown>) {
+  return apiFetch<ZaloPrincipal>("/api/access/principals", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updatePrincipalRole(id: string, body: Record<string, unknown>) {
+  return apiFetch<ZaloPrincipal>(`/api/access/principals/${id}/role`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updatePrincipalStatus(id: string, body: Record<string, unknown>) {
+  return apiFetch<ZaloPrincipal>(`/api/access/principals/${id}/status`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updatePrincipal(id: string, body: Record<string, unknown>) {
+  return apiFetch<ZaloPrincipal>(`/api/access/principals/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listAudit(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch<AuditListResponse>(`/api/access/audit${qs ? `?${qs}` : ""}`);
+}

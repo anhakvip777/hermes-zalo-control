@@ -22,6 +22,7 @@ const navItems = [
   { href: "/media-send", label: "Gửi Media", icon: "📤" },
   { href: "/attendance", label: "Điểm danh", icon: "✅" },
   { href: "/runtime-settings", label: "Runtime Control", icon: "🎛️" },
+  { href: "/access-control", label: "Access Control", icon: "🔑" },
   { href: "/zalo-ops", label: "Zalo Ops", icon: "📡" },
   { href: "/production-readiness", label: "Go Live?", icon: "🚦" },
 ];
