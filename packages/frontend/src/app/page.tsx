@@ -1,142 +1,130 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import {
-  listSchedules,
-  listAllExecutions,
-  type Schedule,
-  type ScheduleExecution,
-} from "../lib/api-client";
-import { GlobalBanner } from "../components/global-banner";
-import { StatusBadge } from "../components/status-badge";
+import Link from "next/link";
+import { getZaloOpsStatus, getLiveTestStatus, type ZaloOpsStatus } from "../lib/api-client";
 
 export default function DashboardPage() {
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [executions, setExecutions] = useState<ScheduleExecution[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchAll = () => {
-    setLoading(true);
-    Promise.all([
-      listSchedules({ pageSize: "100" }),
-      listAllExecutions({ pageSize: "20" }),
-    ])
-      .then(([sData, eData]) => {
-        setSchedules(sData.data);
-        setExecutions(eData.data);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
+  const [zalo, setZalo] = useState<ZaloOpsStatus | null>(null);
+  const [liveActive, setLiveActive] = useState<boolean | null>(null);
 
   useEffect(() => {
-    fetchAll();
-    const interval = setInterval(fetchAll, 15_000);
+    getZaloOpsStatus().then(setZalo).catch(() => {});
+    getLiveTestStatus().then((s) => setLiveActive(s.active)).catch(() => {});
+    const interval = setInterval(() => {
+      getZaloOpsStatus().then(setZalo).catch(() => {});
+      getLiveTestStatus().then((s) => setLiveActive(s.active)).catch(() => {});
+    }, 30_000);
     return () => clearInterval(interval);
   }, []);
 
-  const activeCount = schedules.filter((s) => s.status === "active").length;
-  const scheduledCount = schedules.filter(
-    (s) => s.status === "scheduled" && s.nextRunAt,
-  ).length;
-  const failedCount = executions.filter((e) => e.status === "failed").length;
-  const successCount = executions.filter((e) => e.status === "success").length;
+  const cards = [
+    {
+      label: "Zalo",
+      value: zalo?.connected ? "Đã kết nối" : zalo ? "Mất kết nối" : "—",
+      icon: zalo?.connected ? "✅" : zalo ? "❌" : "⏳",
+      color: zalo?.connected ? "border-green-200 bg-green-50" : zalo ? "border-red-200 bg-red-50" : "border-slate-200 bg-slate-50",
+    },
+    {
+      label: "Listener",
+      value: zalo?.listenerActive ? "Đang chạy" : zalo ? "Đã dừng" : "—",
+      icon: zalo?.listenerActive ? "✅" : zalo ? "❌" : "⏳",
+      color: zalo?.listenerActive ? "border-green-200 bg-green-50" : zalo ? "border-red-200 bg-red-50" : "border-slate-200 bg-slate-50",
+    },
+    {
+      label: "Live Test",
+      value: liveActive === true ? "ĐANG LIVE" : liveActive === false ? "Không hoạt động" : "—",
+      icon: liveActive ? "🔴" : liveActive === false ? "✅" : "⏳",
+      color: liveActive ? "border-red-200 bg-red-50" : liveActive === false ? "border-green-200 bg-green-50" : "border-slate-200 bg-slate-50",
+    },
+    {
+      label: "Global DryRun",
+      value: zalo?.dryRun ? "BẬT (an toàn)" : zalo ? "TẮT (live!)" : "—",
+      icon: zalo?.dryRun ? "🛡️" : zalo ? "⚠️" : "⏳",
+      color: zalo?.dryRun ? "border-blue-200 bg-blue-50" : zalo ? "border-red-200 bg-red-50" : "border-slate-200 bg-slate-50",
+    },
+  ];
 
-  const stats = [
-    { label: "Active Schedules", value: activeCount },
-    { label: "Scheduled (upcoming)", value: scheduledCount },
-    { label: "Recent Failures", value: failedCount },
-    { label: "Recent Successes", value: successCount },
+  const quickLinks = [
+    { href: "/messages", icon: "📨", label: "Tin nhắn", desc: "Xem timeline tin nhắn và trạng thái gửi" },
+    { href: "/access-control", icon: "🔑", label: "Phân quyền", desc: "Quản lý quyền truy cập người dùng Zalo" },
+    { href: "/zalo-ops", icon: "📡", label: "Zalo Ops", desc: "Trạng thái kết nối, session, heartbeat" },
+    { href: "/production-readiness", icon: "🚦", label: "Go Live?", desc: "Kiểm tra sẵn sàng production" },
+    { href: "/system-health", icon: "🏥", label: "Sức khỏe HT", desc: "Trạng thái toàn hệ thống" },
+    { href: "/schedules", icon: "📅", label: "Lịch trình", desc: "Quản lý cron jobs và scheduled tasks" },
   ];
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-semibold tracking-tight text-white">Dashboard</h2>
+    <div className="space-y-6 max-w-[1400px]">
+      {/* Page Header */}
+      <div>
+        <h1 className="text-xl font-bold text-slate-800">Hermes Zalo Admin Center</h1>
+        <p className="text-xs text-slate-500 mt-1">
+          Trung tâm điều khiển bot Zalo — Controlled DM Pilot
+        </p>
+      </div>
 
-      <GlobalBanner />
-
-      {loading && stats.every((s) => s.value === 0) ? (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="h-24 animate-pulse rounded-lg bg-slate-800" />
-            ))}
+      {/* Status Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {cards.map((c) => (
+          <div key={c.label} className={`rounded-lg border ${c.color} p-4 shadow-card`}>
+            <p className="text-[11px] text-slate-500 uppercase tracking-wider font-semibold mb-1">{c.label}</p>
+            <p className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+              <span>{c.icon}</span> {c.value}
+            </p>
           </div>
+        ))}
+      </div>
+
+      {/* Scope Card */}
+      <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-card">
+        <h2 className="text-sm font-semibold text-slate-700 mb-3">📋 Phạm vi bàn giao</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <ScopeItem status="ready" label="Controlled DM Pilot" detail="3/3 pilots PASS · 7 real sends" />
+          <ScopeItem status="not-ready" label="Global Live" detail="Chưa bật — cần thêm pilot + scoring" />
+          <ScopeItem status="not-ready" label="Group Rollout" detail="Chưa bật — chưa có group mention pilot" />
         </div>
-      ) : (
-        <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {stats.map((s) => (
-              <div
-                key={s.label}
-                className="rounded-lg border border-slate-800 bg-slate-900 p-4"
-              >
-                <p className="text-sm text-slate-400">{s.label}</p>
-                <p className="mt-1 text-2xl font-bold text-white">{s.value}</p>
-              </div>
-            ))}
-          </div>
+      </div>
 
-          <div>
-            <h3 className="mb-2 text-lg font-semibold text-white">
-              Recent Executions
-            </h3>
-            {executions.length === 0 ? (
-              <p className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-center text-sm text-slate-500">
-                No executions yet
-              </p>
-            ) : (
-              <div className="overflow-x-auto rounded-lg border border-slate-800">
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-900 text-left text-xs text-slate-300">
-                    <tr>
-                      <th className="px-3 py-2">Status</th>
-                      <th className="px-3 py-2">Mode</th>
-                      <th className="px-3 py-2">Target</th>
-                      <th className="px-3 py-2">Content</th>
-                      <th className="px-3 py-2">Finished</th>
-                      <th className="px-3 py-2">Msg ID</th>
-                      <th className="px-3 py-2">Error</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {executions.map((e) => (
-                      <tr
-                        key={e.id}
-                        className="border-t border-slate-800 text-slate-200 hover:bg-slate-800/50"
-                      >
-                        <td className="px-3 py-2">
-                          <StatusBadge status={e.status} />
-                        </td>
-                        <td className="px-3 py-2 text-xs text-slate-400">{e.mode}</td>
-                        <td className="max-w-[100px] truncate px-3 py-2 text-xs" title={e.targetName ?? e.targetId}>
-                          {e.targetName ?? e.targetId}
-                        </td>
-                        <td className="max-w-[150px] truncate px-3 py-2 text-xs" title={e.messageContent}>
-                          {e.messageContent.slice(0, 60)}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-400">
-                          {e.finishedAt
-                            ? new Date(e.finishedAt).toLocaleString()
-                            : e.actualRunAt
-                              ? new Date(e.actualRunAt).toLocaleString()
-                              : "—"}
-                        </td>
-                        <td className="max-w-[80px] truncate px-3 py-2 text-xs font-mono text-slate-400">
-                          {e.zaloMessageId?.slice(0, 12) ?? "—"}
-                        </td>
-                        <td className="max-w-[120px] truncate px-3 py-2 text-xs text-red-400">
-                          {e.errorMessage?.slice(0, 40) ?? "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+      {/* Quick Links */}
+      <div>
+        <h2 className="text-sm font-semibold text-slate-700 mb-3">⚡ Truy cập nhanh</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {quickLinks.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className="rounded-lg border border-slate-200 bg-white p-4 shadow-card hover:shadow-card-hover hover:border-brand/30 transition-all group"
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-xl mt-0.5">{link.icon}</span>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-700 group-hover:text-brand transition-colors">{link.label}</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">{link.desc}</p>
+                </div>
               </div>
-            )}
-          </div>
-        </>
-      )}
+            </Link>
+          ))}
+        </div>
+      </div>
+
+      {/* Footer note */}
+      <p className="text-[11px] text-slate-400 text-center pt-4 border-t border-slate-100">
+        Hermes Agent v1.0 · Múi giờ Việt Nam (UTC+7) · Tự động cập nhật mỗi 30s
+      </p>
+    </div>
+  );
+}
+
+function ScopeItem({ status, label, detail }: { status: "ready" | "not-ready"; label: string; detail: string }) {
+  const styles = status === "ready"
+    ? { border: "border-green-200", bg: "bg-green-50", badge: "bg-green-100 text-green-700 border-green-200", icon: "✅" }
+    : { border: "border-slate-200", bg: "bg-slate-50", badge: "bg-slate-100 text-slate-500 border-slate-200", icon: "⏸️" };
+
+  return (
+    <div className={`rounded-lg border ${styles.border} ${styles.bg} p-3`}>
+      <p className="text-xs font-semibold text-slate-700">{label}</p>
+      <p className="text-[11px] text-slate-500 mt-0.5">{detail}</p>
     </div>
   );
 }
