@@ -680,6 +680,10 @@ export interface ZaloOpsStatus {
     path: string | null;
     qrAvailable: boolean;
     qrUpdatedAt: string | null;
+    fileSize: number | null;
+    updatedAt: string | null;
+    quarantinedFiles: string[];
+    warning: string | null;
   };
   heartbeats: {
     zaloConnection: { status: string; lastBeatAt: string | null; ageSeconds: number | null };

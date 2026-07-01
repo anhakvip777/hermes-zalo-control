@@ -9,6 +9,7 @@ import {
   type ConfigCheckResponse,
 } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
+import { formatVnTime } from "../../components/ui/TimeText";
 
 export default function SystemHealthPage() {
   const [health, setHealth] = useState<HealthDetailResponse | null>(null);
@@ -257,5 +258,5 @@ function formatBytes(b: number) {
 
 function fmtTime(iso: string | null | undefined) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("vi-VN");
+  return formatVnTime(iso);
 }

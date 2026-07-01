@@ -11,6 +11,7 @@ import {
   type ReadinessCheck,
   type LiveTestStatusResult,
 } from "../../lib/api-client";
+import { formatVnTime } from "../../components/ui/TimeText";
 
 export default function ProductionReadinessPage() {
   const router = useRouter();
@@ -183,7 +184,7 @@ export default function ProductionReadinessPage() {
           )}
         </div>
         <p className="mt-3 text-xs text-slate-500">
-          Checked at: {new Date(data.timestamp).toLocaleString("vi-VN")}
+          Checked at: {formatVnTime(data.timestamp)}
         </p>
       </div>
 

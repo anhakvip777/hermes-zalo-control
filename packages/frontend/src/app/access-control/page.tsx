@@ -12,6 +12,7 @@ import {
   type PrincipalAuditEntry,
 } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
+import { formatVnTime } from "../../components/ui/TimeText";
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants
@@ -590,12 +591,7 @@ export default function AccessControlPage() {
                     </td>
                     {/* Updated */}
                     <td className="p-3 text-xs text-slate-500">
-                      {new Date(p.updatedAt).toLocaleDateString("vi-VN", {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                      {formatVnTime(p.updatedAt)}
                     </td>
                     {/* Actions */}
                     <td className="p-3">
@@ -709,13 +705,7 @@ export default function AccessControlPage() {
                   {auditEntries.map((a) => (
                     <tr key={a.id} className="border-b hover:bg-slate-50">
                       <td className="p-3 text-xs text-slate-500 whitespace-nowrap">
-                        {new Date(a.createdAt).toLocaleString("vi-VN", {
-                          month: "short",
-                          day: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                          second: "2-digit",
-                        })}
+                        {formatVnTime(a.createdAt)}
                       </td>
                       <td className="p-3">
                         <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">{a.principalId}</code>
