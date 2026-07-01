@@ -631,3 +631,24 @@ model ZaloPrincipal {
   @@index([role])
   @@index([status])
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// P1.2 — ZaloPrincipal Audit Log
+// ═══════════════════════════════════════════════════════════════════
+
+model ZaloPrincipalAudit {
+  id          String   @id @default(cuid())
+  principalId String
+  threadId    String?
+  action      String   // created | role_changed | status_changed | updated | deleted
+  oldValue    String?
+  newValue    String?
+  actor       String?
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  @@index([principalId])
+  @@index([threadId])
+  @@index([action])
+  @@index([createdAt])
+}

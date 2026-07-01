@@ -22,6 +22,7 @@ export async function cleanDatabase() {
     await prisma.message.deleteMany();
     await prisma.zaloThread.deleteMany();
     await prisma.zaloPrincipal.deleteMany();
+    await prisma.zaloPrincipalAudit.deleteMany();
     await prisma.threadProfile.deleteMany();
     await prisma.messageBatch.deleteMany();
     await prisma.outboundRecord.deleteMany();

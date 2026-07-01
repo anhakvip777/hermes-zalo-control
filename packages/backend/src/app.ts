@@ -13,6 +13,7 @@ import { systemRoutes } from "./routes/system.js";
 import { ruleRoutes } from "./routes/rules.js";
 import { documentRoutes } from "./routes/documents.js";
 import { internalRoutes } from "./routes/internal.js";
+import { accessRoutes } from "./routes/access.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { adminAuth } from "./middleware/auth.js";
 import { strictRateLimit, agentRateLimit } from "./middleware/rate-limit.js";
@@ -59,6 +60,7 @@ export async function buildApp() {
   await app.register(ruleRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
   await app.register(documentRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
   await app.register(internalRoutes, { prefix: "/api" }); // Internal auth — localhost + token, no admin middleware
+  await app.register(accessRoutes, { prefix: "/api" }); // Access control — admin auth only
 
   return app;
 }
