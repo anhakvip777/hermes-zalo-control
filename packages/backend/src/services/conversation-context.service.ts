@@ -4,6 +4,7 @@
 
 import { prisma } from "../db.js";
 import { config } from "../config.js";
+import { containsPromptEchoMarker } from "./prompt-safety.service.js";
 
 export interface ConversationMessage {
   role: "user" | "assistant" | "system";
@@ -85,9 +86,23 @@ export async function buildConversationContext(
 export function buildContextString(ctx: ConversationContext): string {
   if (ctx.recentMessages.length === 0) return "";
 
-  const lines: string[] = ["[LỊCH SỬ TRÒ CHUYỆN GẦN ĐÂY]"];
+  // HC1: Filter out contaminated messages (contain prompt/internal markers)
+  // before building the context string. This prevents the AI from learning
+  // to echo leaked markers from old contaminated history entries.
+  const cleanMessages = ctx.recentMessages.filter((m) => {
+    return !containsPromptEchoMarker(m.content);
+  });
 
-  for (const msg of ctx.recentMessages) {
+  const skipped = ctx.recentMessages.length - cleanMessages.length;
+  if (skipped > 0) {
+    console.log(`[history] skipped contaminated messages: count=${skipped} threadId=${ctx.threadId}`);
+  }
+
+  // PT1: Use natural separator text instead of bracket markers that models echo.
+  // The echo guard still blocks old DB leaks and provider echoes.
+  const lines: string[] = ["Dưới đây là các tin nhắn gần đây trong cuộc trò chuyện. Hãy dùng để hiểu ngữ cảnh."];
+
+  for (const msg of cleanMessages) {
     const roleLabel = msg.role === "assistant" ? "Bot" : (msg.senderName || "User");
     const prefix = msg.role === "assistant" ? "🤖" : "👤";
     // Skip image placeholder messages in context (they contain no useful text)
@@ -95,7 +110,7 @@ export function buildContextString(ctx: ConversationContext): string {
     lines.push(`${prefix} ${roleLabel}: ${displayContent}`);
   }
 
-  lines.push("[KẾT THÚC LỊCH SỬ — tin nhắn hiện tại bên dưới]");
+  lines.push("-- hết lịch sử --");
   lines.push("");
 
   return lines.join("\n");

@@ -145,33 +145,27 @@ function validateIntent(intent: OutboundIntent): string | null {
 }
 
 // ── P0: Prompt Echo Guard ─────────────────────────────────────────────
+// Markers and detector are now in prompt-safety.service.ts (shared with history filter)
 
-const PROMPT_ECHO_MARKERS = [
-  "[LỊCH SỬ TRÒ CHUYỆN GẦN ĐÂY]",
-  "[LỊCH SỬ TRÒ CHUYỆN]",
-  "[/LỊCH SỬ]",
-  "[TIN NHẮN HIỆN TẠI]",
-  "[KẾT THÚC LỊCH SỬ",
-  "BEGIN_CONTEXT",
-  "END_CONTEXT",
-];
+import { containsPromptEchoMarker, PROMPT_ECHO_MARKERS } from "./prompt-safety.service.js";
+
+const PROMPT_ECHO_MARKERS_REEXPORT = PROMPT_ECHO_MARKERS; // kept for direct access
 
 /**
  * Check if the AI response contains internal prompt/context markers.
  * Returns the block reason string if blocked, null if safe.
- * Null-safe: falsy/empty/non-string content is treated as safe (no crash).
+ * Null-safe: delegates to shared containsPromptEchoMarker.
  */
 function checkPromptEcho(content: unknown): string | null {
-  if (typeof content !== "string") return null;
-  const text = content.trim();
-  if (!text) return null;
-  const normalized = text.normalize();
+  if (!containsPromptEchoMarker(content)) return null;
+  // Find which marker matched for the detailed reason
+  const text = typeof content === "string" ? content.trim().normalize() : "";
   for (const marker of PROMPT_ECHO_MARKERS) {
-    if (normalized.includes(marker)) {
+    if (text.includes(marker)) {
       return `prompt_echo_guard: response contains internal marker "${marker}"`;
     }
   }
-  return null;
+  return `prompt_echo_guard: response contains internal marker`;
 }
 
 // ── Main dispatcher ──────────────────────────────────────────────────
@@ -200,6 +194,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     const t = intent as TextOutboundIntent;
     const echoBlock = checkPromptEcho(t.content);
     if (echoBlock) {
+      console.log(`[outbound] BLOCKED prompt echo: ${echoBlock} thread=${threadId}`);
       const recordContent = buildRecordContent(intent);
       saveOutboundRecord({
         threadId, threadType, content: recordContent,

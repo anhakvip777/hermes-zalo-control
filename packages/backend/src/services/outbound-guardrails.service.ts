@@ -213,11 +213,15 @@ export async function saveOutboundRecord(
 ): Promise<void> {
   try {
     const { prisma } = await import("../db.js");
+    // Sanitize content: strip non-printable/control chars that break Prisma SQLite
+    const safeContent = (record.content || "")
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // strip C0 control chars (except \t \n \r)
+      .slice(0, 4000);
     await prisma.outboundRecord.create({
       data: {
         threadId: record.threadId,
         threadType: record.threadType,
-        content: record.content.slice(0, 4000), // Truncate for DB
+        content: safeContent,
         contentHash: createHash("sha256")
           .update(`${record.threadId}:${record.content}`)
           .digest("hex"),
@@ -229,9 +233,9 @@ export async function saveOutboundRecord(
         reason: record.reason,
       },
     });
-  } catch {
+  } catch (err: unknown) {
     // Non-fatal — DB may be unavailable, dedup continues in-memory
-    console.error("[outbound] Failed to save OutboundRecord to DB");
+    console.error(`[outbound] Failed to save OutboundRecord to DB: ${(err as Error).message}`);
   }
 }
 
