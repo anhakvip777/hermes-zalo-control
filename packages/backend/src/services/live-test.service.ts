@@ -56,7 +56,7 @@ export interface StopLiveTestResult {
 const CONFIRM_TEXT = "START LIVE TEST";
 const MIN_REASON_LENGTH = 10;
 const MAX_MAX_MESSAGES = 3;
-const MAX_TTL_SECONDS = 300;
+const MAX_TTL_SECONDS = 3600;
 
 // ── Start live test ───────────────────────────────────────────────────
 

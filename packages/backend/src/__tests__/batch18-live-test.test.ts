@@ -144,10 +144,38 @@ describe("Batch 18 — Controlled Live Test Mode", () => {
     expect(result.errorCode).toBe("INVALID_MAX_MESSAGES");
   });
 
-  it("4. TTL > 300 rejected", async () => {
+  it("4. TTL > 3600 rejected", async () => {
     const { startLiveTest } = await import("../services/live-test.service.js");
     const result = await startLiveTest({
-      threadId: "thread-123", maxMessages: 1, ttlSeconds: 999,
+      threadId: "thread-123", maxMessages: 1, ttlSeconds: 3601,
+      confirmText: "START LIVE TEST", reason: "Valid reason for testing",
+    });
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("INVALID_TTL");
+  });
+
+  it("4a. TTL 1800 accepted", async () => {
+    const { startLiveTest } = await import("../services/live-test.service.js");
+    const result = await startLiveTest({
+      threadId: "thread-123", maxMessages: 1, ttlSeconds: 1800,
+      confirmText: "START LIVE TEST", reason: "Valid reason for testing pilot",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("4b. TTL 3600 accepted", async () => {
+    const { startLiveTest } = await import("../services/live-test.service.js");
+    const result = await startLiveTest({
+      threadId: "thread-123", maxMessages: 1, ttlSeconds: 3600,
+      confirmText: "START LIVE TEST", reason: "Valid reason for testing pilot",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("4c. TTL 0 rejected", async () => {
+    const { startLiveTest } = await import("../services/live-test.service.js");
+    const result = await startLiveTest({
+      threadId: "thread-123", maxMessages: 1, ttlSeconds: 0,
       confirmText: "START LIVE TEST", reason: "Valid reason for testing",
     });
     expect(result.success).toBe(false);
