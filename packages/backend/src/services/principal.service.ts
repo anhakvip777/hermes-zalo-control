@@ -63,11 +63,15 @@ const DEFAULT_STATUS: PrincipalStatus = "active";
  * displayName is NOT used for matching — only principalId (senderId).
  */
 export async function resolvePrincipal(
-  senderId: string,
+  senderId: string | null,
   threadId?: string | null,
 ): Promise<PrincipalContext> {
-  if (!senderId) {
-    // No senderId → cannot identify → safest default
+  // DM fallback: Zalo webchat DM has senderId=null.
+  // In DM threads, threadId IS the participant's Zalo ID.
+  // Use threadId as canonical principalId when senderId is missing.
+  const canonicalId = (senderId?.trim() || threadId?.trim() || "");
+  if (!canonicalId) {
+    // No identifier at all → cannot identify → safest default
     return {
       principal: null,
       role: DEFAULT_ROLE,
@@ -80,7 +84,7 @@ export async function resolvePrincipal(
     // 1. Thread-scoped match
     if (threadId) {
       const scoped = await prisma.zaloPrincipal.findFirst({
-        where: { principalId: senderId, threadId },
+        where: { principalId: canonicalId, threadId },
       });
       if (scoped) {
         return {
@@ -94,7 +98,7 @@ export async function resolvePrincipal(
 
     // 2. Global match (threadId = null)
     const global = await prisma.zaloPrincipal.findFirst({
-      where: { principalId: senderId, threadId: null },
+      where: { principalId: canonicalId, threadId: null },
     });
     if (global) {
       return {
@@ -106,7 +110,7 @@ export async function resolvePrincipal(
     }
   } catch {
     // DB error → fail safe with default policy
-    console.error(`[principal] DB lookup failed for senderId=${senderId} threadId=${threadId}`);
+    console.error(`[principal] DB lookup failed for canonicalId=${canonicalId} threadId=${threadId}`);
   }
 
   // 3. Default policy

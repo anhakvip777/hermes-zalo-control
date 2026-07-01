@@ -370,6 +370,34 @@ describe("P1.2 — Safety: displayName not for permission", () => {
     expect(ctx2.fromDb).toBe(true);
     expect(ctx2.role).toBe("advanced");
   });
+  it("DM with senderId=null resolves principal by threadId (DM fallback)", async () => {
+    const { resolvePrincipal } = await import("../services/principal.service.js");
+
+    // Create a DM-style principal where principalId == threadId
+    await createPrincipal({
+      principalId: "6906520402993817174",
+      type: "user",
+      role: "basic_chat",
+      status: "active",
+      threadId: "6906520402993817174",
+      displayName: "Tiny",
+    });
+
+    // DM message: senderId=null, threadId=6906520402993817174
+    const ctx = await resolvePrincipal(null, "6906520402993817174");
+    expect(ctx.fromDb).toBe(true);
+    expect(ctx.role).toBe("basic_chat");
+    expect(ctx.status).toBe("active");
+    expect(ctx.principal?.principalId).toBe("6906520402993817174");
+    expect(ctx.principal?.threadId).toBe("6906520402993817174");
+  });
+
+  it("null senderId + null threadId → default policy", async () => {
+    const { resolvePrincipal } = await import("../services/principal.service.js");
+    const ctx = await resolvePrincipal(null, null);
+    expect(ctx.fromDb).toBe(false);
+    expect(ctx.role).toBe("form_only");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
