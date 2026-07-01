@@ -2,7 +2,7 @@
 // ZaloOpsService — Zalo Live-Safe Operations Dashboard backend
 // =============================================================================
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
@@ -34,6 +34,14 @@ export interface ZaloOpsStatus {
     path: string | null;         // masked: "…/zalo-session/zalo-session.json"
     qrAvailable: boolean;
     qrUpdatedAt: string | null;
+    /** S3: file size in bytes (null if file doesn't exist) */
+    fileSize: number | null;
+    /** S3: ISO timestamp of last modification (null if file doesn't exist) */
+    updatedAt: string | null;
+    /** S3: list of quarantined session filenames (no content, just names) */
+    quarantinedFiles: string[];
+    /** S3: warning code if session integrity is at risk */
+    warning: "NO_SESSION_FILE" | "SESSION_QUARANTINED" | "CONNECTED_BUT_SESSION_NOT_PERSISTED" | null;
   };
 
   heartbeats: {
@@ -106,6 +114,8 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
   const exists = existsSync(sessionPath);
   let age: string | null = null;
   let ageSeconds: number | null = null;
+  let fileSize: number | null = null;
+  let updatedAt: string | null = null;
 
   if (exists) {
     try {
@@ -115,8 +125,21 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
       else if (ageSeconds < 3600) age = `${Math.round(ageSeconds / 60)}m ago`;
       else if (ageSeconds < 86400) age = `${Math.round(ageSeconds / 3600)}h ago`;
       else age = `${Math.round(ageSeconds / 86400)}d ago`;
+      fileSize = st.size;
+      updatedAt = st.mtime.toISOString();
     } catch { /* ignore */ }
   }
+
+  // S3: List quarantined files (match pattern: zalo-session.json.<reason>-<timestamp>)
+  const quarantinedFiles: string[] = [];
+  try {
+    const dirEntries = readdirSync(SESSION_DIR);
+    for (const entry of dirEntries) {
+      if (entry.startsWith(SESSION_FILE + ".")) {
+        quarantinedFiles.push(entry);
+      }
+    }
+  } catch { /* directory may not exist */ }
 
   // Mask the path: only show last 2 segments
   const parts = sessionPath.split("/");
@@ -125,6 +148,16 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
   const gw = getZaloGateway();
   const gwStatus = gw.getStatus();
 
+  // S3: Determine warning based on connected state + file existence
+  let warning: ZaloOpsStatus["session"]["warning"] = null;
+  if (gwStatus.connected && !exists) {
+    warning = "CONNECTED_BUT_SESSION_NOT_PERSISTED";
+  } else if (!exists) {
+    warning = "NO_SESSION_FILE";
+  } else if (quarantinedFiles.length > 0) {
+    warning = "SESSION_QUARANTINED";
+  }
+
   return {
     exists,
     age,
@@ -132,6 +165,10 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
     path: maskedPath,
     qrAvailable: gwStatus.qrAvailable,
     qrUpdatedAt: gwStatus.qrUpdatedAt,
+    fileSize,
+    updatedAt,
+    quarantinedFiles,
+    warning,
   };
 }
 

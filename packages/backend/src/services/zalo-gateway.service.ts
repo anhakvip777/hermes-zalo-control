@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { config } from "../config.js";
@@ -391,11 +391,55 @@ export class ZaloGatewayService extends EventEmitter {
         }),
         "utf-8",
       );
-      console.log(`[zalo-gateway] Session saved: ${sessionPath} (selfUserId=${this.status.selfUserId})`);
+
+      // S3: Verify the file was actually persisted
+      if (!existsSync(sessionPath)) {
+        console.error(`[zalo-gateway] Session save verification FAILED: file missing after write: ${sessionPath}`);
+        return;
+      }
+      const st = statSync(sessionPath);
+      if (st.size === 0) {
+        console.error(`[zalo-gateway] Session save verification FAILED: empty file (0 bytes): ${sessionPath}`);
+        return;
+      }
+      console.log(`[zalo-gateway] Session saved: ${sessionPath} (${st.size} bytes, selfUserId=${this.status.selfUserId})`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[zalo-gateway] Session save FAILED: ${msg}`);
     }
+  }
+
+  /** S3: Check if session file is persisted on disk (non-destructive). */
+  isSessionFilePersisted(): boolean {
+    if (config.zalo.dryRun) return true;
+    try {
+      const sessionPath = resolve(this.sessionDir, SESSION_FILE);
+      if (!existsSync(sessionPath)) return false;
+      return statSync(sessionPath).size > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** S3: Get session file info for ops status (does NOT expose content). */
+  getSessionFileInfo(): { exists: boolean; size: number | null; updatedAt: string | null } {
+    try {
+      const sessionPath = resolve(this.sessionDir, SESSION_FILE);
+      if (!existsSync(sessionPath)) return { exists: false, size: null, updatedAt: null };
+      const st = statSync(sessionPath);
+      return {
+        exists: true,
+        size: st.size,
+        updatedAt: st.mtime.toISOString(),
+      };
+    } catch {
+      return { exists: false, size: null, updatedAt: null };
+    }
+  }
+
+  /** S3: Get session directory (for quarantine file listing). */
+  getSessionDir(): string {
+    return this.sessionDir;
   }
 
   // ═══════════════════════════════════════════════════════════════════
