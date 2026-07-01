@@ -1,23 +1,38 @@
 # Hermes Zalo Admin Center — Customer Handoff
 
-**Date:** 2026-07-01  
-**Status:** Controlled DM pilot ready
+**Date:** 2026-07-01
+**Last Updated:** 2026-07-01 17:40 UTC+7 (after PT2 AI content/context separation fix)
+**Status:** Controlled DM handoff READY — AI safety verified ✅
 
 ---
 
 ## Ready
 
-- Zalo connected through backend
-- Backend is the only Zalo sender
-- Worker sends through backend internal API
-- Access Control UI ready
-- Permission roles ready: `form_only`, `basic_chat`, `advanced`, `admin`
-- Message status UI ready: SENT, DRY RUN, FAILED, BLOCKED, PERM DENIED, COOLDOWN
-- Controlled Live Test ready
-- Global dryRun safety remains enabled
-- Test DB isolation fixed (TDB1)
-- UI polished — DESIGN.md created, sidebar grouped, VN time (UTC+7) on all pages, zalo-ops light theme
-- Status badges follow DESIGN.md color system (SENT=green, DRY RUN=info, FAILED=danger, etc.)
+- Zalo connected through backend ✅
+- Backend is the only Zalo sender ✅
+- Worker sends through backend internal API ✅
+- Access Control UI ready ✅
+- Permission roles: `form_only`, `basic_chat`, `advanced`, `admin` ✅
+- Message status UI: SENT, DRY RUN, FAILED, BLOCKED, PERM DENIED, COOLDOWN ✅
+- Controlled Live Test ready ✅
+- Global dryRun safety remains enabled ✅
+- Test DB isolation fixed (TDB1) ✅
+- UI polished — DESIGN.md, sidebar grouped, VN time (UTC+7), zalo-ops light theme ✅
+- Status badges follow DESIGN.md color system ✅
+
+---
+
+## AI Prompt Safety — 3-Layer Defense ✅
+
+| Layer | What | Commit | Status |
+|---|---|---|---|
+| **Output Guard** | Block internal markers in outbound | `a24d84d` `f922e5d` | ✅ Active |
+| **History Filter** | Exclude contaminated messages from AI context | `cfa61df` | ✅ Active |
+| **Content/Context Separation** | User content never mixed with history | `cfa61df` | ✅ Active |
+
+**DryRun "bạn là ai" verification (2026-07-01 17:39):**
+- decision=allow, reason=dry_run, dryRun=true, real send=NO ✅
+- Output: `"bạn là ai"` — CLEAN, no markers, no context, no history echo ✅
 
 ---
 
@@ -45,12 +60,24 @@
 ## Safety Status
 
 | Control | State |
-|---------|-------|
-| Global dryRun | `true` |
-| Global live | disabled |
-| Group auto-reply | not enabled |
-| Unknown users | not enabled |
-| Controlled live only | by thread + quota |
+|---|---|
+| Global dryRun | `true` ✅ |
+| Global live | disabled ✅ |
+| Group auto-reply | not enabled ✅ |
+| Unknown users | not enabled ✅ |
+| Controlled live only | by thread + quota ✅ |
+| AI prompt echo guard | 3-layer active ✅ |
+
+---
+
+## Test Gates
+
+| Gate | Result |
+|---|---|
+| Backend tests | **819 PASS** (49 files) ✅ |
+| TypeScript typecheck | **PASS** (exit 0) ✅ |
+| Backend build | **PASS** ✅ |
+| Frontend build | **PASS** (21 static pages) ✅ |
 
 ---
 
@@ -71,29 +98,31 @@
 - INTERNAL_API_TOKEN should be moved to final secret management
 - AI answer reliability scoring not fully built yet
 - Group mention-only pilot not done yet
-- zaloConnection heartbeat shows "stale" (2.5h) even though Zalo IS connected — monitoring gap, not a functional issue
+- zaloConnection heartbeat shows "stale" (2.5h) — monitoring gap, not functional
+
+---
 
 ## Production Readiness Scope
 
 **Current production-readiness page may show NOT_READY. This gates full global production, not controlled DM pilot.**
 
 | Scope | Status |
-|-------|--------|
-| Controlled DM Pilot | ✅ READY — 3/3 pilots PASS, 7 real sends, zero errors |
+|---|---|
+| Controlled DM Pilot | ✅ READY — 3/3 pilots, 7 real sends, AI safety verified, zero prompt leaks |
 | Global Production Live | ❌ NOT READY — session persistence + heartbeat monitoring needed |
 | Group Rollout | ❌ NOT READY — no group mention pilot yet |
 
 **Remaining readiness issues (do NOT block controlled DM):**
 
 1. **backup.session (FAIL, high):** No session file persisted on disk. Zalo is connected via in-memory credentials. If disconnected, QR re-login required.
-2. **errors.heartbeats (WARN, high):** zaloConnection heartbeat is stale (recorded at connection time, not updated periodically). Zalo IS connected and listener IS active — purely a monitoring gap.
+2. **errors.heartbeats (WARN, high):** zaloConnection heartbeat is stale — monitoring gap, not functional issue.
 
 ---
 
 ## Admin Pages
 
 | Page | Path |
-|------|------|
+|---|---|
 | Messages | `/messages` |
 | Access Control | `/access-control` |
 | Zalo Ops | `/zalo-ops` |
@@ -111,10 +140,7 @@
 
 ### Incident: Cloudflare 1033 (2026-07-01)
 
-**Root cause:**
-- Frontend `localhost:3000` was online ✅
-- Backend `localhost:3002` was online ✅
-- Cloudflare tunnel PM2 process was missing ❌
+**Root cause:** Cloudflare tunnel PM2 process was missing.
 
 **Fix:**
 ```bash
@@ -124,15 +150,11 @@ pm2 save
 
 **Verify:**
 ```bash
-pm2 status                              # must show 5 processes including hermes-tunnel
+pm2 status
 curl -I http://127.0.0.1:3000           # HTTP 200
 curl -I http://127.0.0.1:3002/api/system/health  # HTTP 200
 curl -I https://hermes.nhachungkhuduong.pro.vn   # HTTP 200
-curl -I https://hermes.nhachungkhuduong.pro.vn/messages       # HTTP 200
-curl -I https://hermes.nhachungkhuduong.pro.vn/access-control # HTTP 200
 ```
-
-**Safety:** No code changes, no DB reset, no session delete, no global live, no group rollout.
 
 ---
 
@@ -149,5 +171,6 @@ curl -I https://hermes.nhachungkhuduong.pro.vn/access-control # HTTP 200
 
 ## Final Recommendation
 
-Ready for controlled DM handoff.  
-Not ready for global live or group rollout.
+**Ready for controlled DM handoff.** AI prompt safety verified with 3-layer defense. Output clean on "bạn là ai" dryRun test.  
+
+**Not ready for global live or group rollout.**
