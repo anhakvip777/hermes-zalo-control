@@ -159,9 +159,13 @@ const PROMPT_ECHO_MARKERS = [
 /**
  * Check if the AI response contains internal prompt/context markers.
  * Returns the block reason string if blocked, null if safe.
+ * Null-safe: falsy/empty/non-string content is treated as safe (no crash).
  */
-function checkPromptEcho(content: string): string | null {
-  const normalized = content.normalize();
+function checkPromptEcho(content: unknown): string | null {
+  if (typeof content !== "string") return null;
+  const text = content.trim();
+  if (!text) return null;
+  const normalized = text.normalize();
   for (const marker of PROMPT_ECHO_MARKERS) {
     if (normalized.includes(marker)) {
       return `prompt_echo_guard: response contains internal marker "${marker}"`;
