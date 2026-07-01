@@ -92,3 +92,4 @@ coverage/
 *.tgz
 tmp/
 temp/
+.codegraph/

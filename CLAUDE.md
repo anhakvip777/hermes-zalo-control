@@ -1,5 +1,37 @@
 # CLAUDE.md — Hermes Zalo Control Center
 
+## Agent Operating Protocol (Iron Laws)
+
+> See full protocol: [docs/AGENT_OPERATING_PROTOCOL.md](docs/AGENT_OPERATING_PROTOCOL.md)
+
+### Iron Laws
+
+1. **Verification:** No PASS/SUCCESS claim without fresh evidence (test output, exit code, API response). Exit code != 0 → CANNOT claim PASS.
+2. **Mini-Plan:** No code/config changes without user-approved plan first.
+3. **State Reconciliation:** After empty response, interruption, tool error — reconcile state before proceeding.
+4. **Safety:** ⛔ Never set global live=true. Never delete session/DB without approval. Never expose tokens/session.
+5. **Evidence:** Every status report includes actual command output, not interpretation.
+
+### Pre-Commit Gates
+
+```
+[ ] npm test -w packages/backend         → All pass, exit 0
+[ ] npm run typecheck -w packages/backend → exit 0
+[ ] npm run build -w packages/backend     → exit 0
+[ ] npm run build -w packages/frontend    → exit 0
+[ ] git diff --stat                       → No unintended changes
+```
+
+Failure at any gate → STOP. Do not commit. Fix first.
+
+### Live Ops Verification
+
+After any live system change, verify:
+- Runtime config: `dryRun=true`, allowedThreads correct
+- Live test: `active=false` (unless intentional)
+- Zalo: `connected=true`, `listenerActive=true`, session exists
+- Heartbeats: all `"ok"` (not `"down"`)
+
 ## Project Summary
 
 A web dashboard for controlling AI agents that operate through Zalo. The system lets an AI agent (Hermes) create schedules, send messages, and interact with Zalo groups — but every action is transparent, auditable, and user-controllable via the web UI.
