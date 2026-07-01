@@ -71,6 +71,22 @@
 - INTERNAL_API_TOKEN should be moved to final secret management
 - AI answer reliability scoring not fully built yet
 - Group mention-only pilot not done yet
+- zaloConnection heartbeat shows "stale" (2.5h) even though Zalo IS connected — monitoring gap, not a functional issue
+
+## Production Readiness Scope
+
+**Current production-readiness page may show NOT_READY. This gates full global production, not controlled DM pilot.**
+
+| Scope | Status |
+|-------|--------|
+| Controlled DM Pilot | ✅ READY — 3/3 pilots PASS, 7 real sends, zero errors |
+| Global Production Live | ❌ NOT READY — session persistence + heartbeat monitoring needed |
+| Group Rollout | ❌ NOT READY — no group mention pilot yet |
+
+**Remaining readiness issues (do NOT block controlled DM):**
+
+1. **backup.session (FAIL, high):** No session file persisted on disk. Zalo is connected via in-memory credentials. If disconnected, QR re-login required.
+2. **errors.heartbeats (WARN, high):** zaloConnection heartbeat is stale (recorded at connection time, not updated periodically). Zalo IS connected and listener IS active — purely a monitoring gap.
 
 ---
 

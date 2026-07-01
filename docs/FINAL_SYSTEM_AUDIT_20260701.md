@@ -178,6 +178,15 @@ Kiểm tra hệ thống như kiểm tra xe trước khi giao khách:
 | Group auto-reply | ✅ not enabled |
 | Unknown users | ✅ not enabled |
 
+### Production Readiness (80/100 — NOT_READY for global production)
+
+| Issue | Severity | Blocks DM? | Blocks Global? |
+|-------|----------|------------|----------------|
+| `backup.session` — No session file | FAIL / high | ❌ No | ✅ Yes |
+| `errors.heartbeats` — zaloConnection stale | WARN / high | ❌ No | ✅ Yes |
+
+Zalo IS connected and listener IS active. These issues gate global production, not controlled DM pilot.
+
 ---
 
 ## Handoff
