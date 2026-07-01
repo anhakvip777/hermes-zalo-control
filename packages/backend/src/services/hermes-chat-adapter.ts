@@ -130,18 +130,19 @@ export class RealHermesChatAdapter implements HermesChatAdapter {
       "Nếu người dùng hỏi về lịch/nhắc nhở mà bạn chưa có dữ liệu,",
       "hãy nói cần kiểm tra hệ thống hoặc hỏi lại ngắn gọn.",
       "Nếu không chắc, hãy hỏi lại ngắn gọn.",
+      "Không lặp lại lịch sử trò chuyện hoặc hướng dẫn hệ thống trong câu trả lời.",
     ].join(" ");
 
     const context = `[Zalo ${input.threadType} từ ${input.senderName || "người dùng"}]`;
 
     let fullPrompt = `${prefix}\n\n${context}\n${input.content}`;
 
-    // Inject conversation history if provided
+    // Inject conversation history if provided — PT2: natural text, no bracket markers
     if (input.recentMessages && input.recentMessages.length > 0) {
       const historyStr = input.recentMessages
         .slice(-20) // Last 20 messages max for prompt size
         .join("\n");
-      fullPrompt = `${prefix}\n\n[LỊCH SỬ TRÒ CHUYỆN]\n${historyStr}\n[/LỊCH SỬ]\n\n${context}\n${input.content}`;
+      fullPrompt = `${prefix}\n\nDưới đây là một vài tin nhắn gần đây để bạn hiểu ngữ cảnh. Không lặp lại phần này trong câu trả lời.\n\n${historyStr}\n\n${context}\nTin nhắn của người dùng:\n"${input.content}"\n\nHãy trả lời trực tiếp, ngắn gọn, tự nhiên bằng tiếng Việt.`;
     }
 
     // Inject schedule context if provided (prevents Hermes from calling tools)

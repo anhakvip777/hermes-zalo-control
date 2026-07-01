@@ -1549,11 +1549,11 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     const convState = activeConvState;
     const stateContext = convState ? buildStateContextString(convState) : "";
 
-    // Build full context for Hermes
+    // Build full context for Hermes (passed separately, NOT in content)
     const fullContext = [stateContext, contextString].filter(Boolean).join("\n");
-    const effectiveContent = fullContext
-      ? `${fullContext}\n[TIN NHẮN HIỆN TẠI]\n👤 ${msg.senderName || "User"}: ${msg.content}`
-      : msg.content;
+    // PT2: Content MUST remain the raw user message only.
+    // Never inject context/history into content — the adapter/model will echo it back.
+    const effectiveContent = msg.content;
 
     // Pre-fetch schedule context for reminder-related queries
     let scheduleContext: string | undefined;
