@@ -2,9 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { CreateAttendanceSessionSchema } from "@hermes/shared";
 import * as attendanceService from "../services/attendance.service.js";
-import { MockMessageSender } from "../services/message-sender.js";
-
-const mockSender = new MockMessageSender();
 
 const UpdateAttendanceBody = z.object({
   name: z.string().min(1).optional(),
@@ -84,7 +81,8 @@ export async function attendanceRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = SendReminderBody.parse(request.body ?? {});
     try {
-      const result = await attendanceService.sendReminder(id, mockSender, body.message);
+      // sendReminder now routes through sendOutbound for full guard coverage
+      const result = await attendanceService.sendReminder(id, body.message);
       return { data: result };
     } catch (err: unknown) {
       return reply.status(400).send({ error: "ReminderFailed", message: (err as Error).message });

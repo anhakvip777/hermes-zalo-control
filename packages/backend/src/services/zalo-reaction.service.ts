@@ -4,6 +4,7 @@
 
 import type { NormalizedReaction } from "./zalo-reaction-utils.js";
 import { config } from "../config.js";
+import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // Reaction audit
@@ -126,7 +127,7 @@ export async function handleIncomingReaction(
   selfUserId: string | null,
 ): Promise<void> {
   const threadType: "user" | "group" = reaction.isGroup ? "group" : "user";
-  const dryRun = config.autoReply.dryRun;
+  const dryRun = getCurrentEffectiveDryRun();
 
   // Check gates
   const gate = await checkReactionGates(reaction, selfUserId);

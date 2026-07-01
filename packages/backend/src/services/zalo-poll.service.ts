@@ -1,4 +1,5 @@
 import { getZaloGateway } from "../services/zalo-gateway.service.js";
+import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js";
 
 interface PollOptions {
   question: string;
@@ -15,6 +16,11 @@ export async function createPollInGroup(opts: PollOptions) {
   const gw = getZaloGateway();
   if (!gw.isConnected()) {
     return { success: false, error: "ZALO_NOT_CONNECTED", errorCode: "ZALO_NOT_CONNECTED" };
+  }
+
+  // DryRun guard — block poll creation when dryRun is active
+  if (getCurrentEffectiveDryRun()) {
+    return { success: false, error: "DRY_RUN_ACTIVE", errorCode: "DRY_RUN_ACTIVE" };
   }
 
   const api = gw.getApi();

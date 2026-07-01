@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { prisma } from "../db.js";
-import type { MessageSender } from "./message-sender.js";
+import { sendOutbound } from "./outbound-dispatcher.service.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // Session CRUD
@@ -103,14 +103,20 @@ const DEFAULT_REMINDER = "Các huynh đệ điểm danh giúp anh nhé. Ai có m
 
 export async function sendReminder(
   sessionId: string,
-  sender: MessageSender,
   customMessage?: string,
 ) {
   const session = await prisma.attendanceSession.findUnique({ where: { id: sessionId } });
   if (!session) throw new Error("Session not found");
 
   const content = customMessage || DEFAULT_REMINDER;
-  const result = await sender.sendMessage(content, session.targetId, "group");
+
+  // Route through sendOutbound for full guard coverage (dryRun, cooldown, prompt echo, etc.)
+  const result = await sendOutbound({
+    threadId: session.targetId,
+    threadType: "group",
+    source: "schedule",
+    content,
+  });
 
   await prisma.attendanceSession.update({
     where: { id: sessionId },
