@@ -6,6 +6,7 @@
 import { prisma } from "../db.js";
 import { normalizeThreadId } from "./thread-id.js";
 import { upsertThreadProfileFromMessage, getThreadProfiles } from "./thread-profile.service.js";
+import { createHash } from "node:crypto";
 
 export interface NormalizedMessage {
   zaloMessageId: string | null;
@@ -381,8 +382,59 @@ export async function listMessages(opts: {
   const threadIds = Array.from(new Set(data.map((m) => m.threadId).filter(Boolean)));
   const profiles = await getThreadProfiles(threadIds as string[]);
 
+  // U1: Enrich with OutboundRecord status
+  // Match by content hash (same algorithm as outbound-guardrails.service.ts)
+  const outboundRecords = await prisma.outboundRecord.findMany({
+    where: { threadId: { in: threadIds.length > 0 ? (threadIds as string[]) : undefined } },
+    orderBy: { createdAt: "desc" },
+    take: 200, // enough for current page + buffer
+  });
+
+  // Build hash → record map for O(1) lookup
+  const outboundByHash = new Map<string, typeof outboundRecords[0]>();
+  for (const rec of outboundRecords) {
+    outboundByHash.set(rec.contentHash, rec);
+  }
+
+  // Fallback: match by threadId + closest timestamp (within 10s)
+  function findOutboundFallback(threadId: string, messageTime: Date) {
+    const candidates = outboundRecords.filter(
+      (r) => r.threadId === threadId && Math.abs(r.createdAt.getTime() - messageTime.getTime()) < 10_000,
+    );
+    if (candidates.length === 0) return null;
+    // Pick the closest
+    candidates.sort(
+      (a, b) =>
+        Math.abs(a.createdAt.getTime() - messageTime.getTime()) -
+        Math.abs(b.createdAt.getTime() - messageTime.getTime()),
+    );
+    return candidates[0];
+  }
+
   const enriched = data.map((m) => {
     const profile = profiles.get(m.threadId);
+
+    // Only enrich assistant messages (bot replies)
+    let outbound = null;
+    if (m.role === "assistant" && m.content) {
+      const hash = createHash("sha256")
+        .update(`${m.threadId}:${m.content}`)
+        .digest("hex");
+      const matched = outboundByHash.get(hash) ?? findOutboundFallback(m.threadId, m.receivedAt);
+      if (matched) {
+        outbound = {
+          id: matched.id,
+          decision: matched.decision,
+          reason: matched.reason,
+          dryRun: matched.dryRun,
+          sentMessageId: matched.sentMessageId,
+          errorCode: matched.errorCode,
+          source: matched.source,
+          createdAt: matched.createdAt.toISOString(),
+        };
+      }
+    }
+
     return {
       ...m,
       thread: profile
@@ -393,6 +445,7 @@ export async function listMessages(opts: {
             avatarUrl: profile.avatarUrl,
           }
         : { id: m.threadId, displayName: null, type: m.threadType, avatarUrl: null },
+      outbound,
     };
   });
 

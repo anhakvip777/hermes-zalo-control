@@ -380,6 +380,17 @@ export interface MessageItem {
     type: string | null;
     avatarUrl: string | null;
   } | null;
+  /** OutboundRecord enrichment (U1) — null when no outbound record found */
+  outbound?: {
+    id: string;
+    decision: string;
+    reason: string;
+    dryRun: boolean;
+    sentMessageId: string | null;
+    errorCode: string | null;
+    source: string;
+    createdAt: string;
+  } | null;
 }
 
 export interface MessageListResponse {
