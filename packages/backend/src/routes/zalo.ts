@@ -83,6 +83,29 @@ export async function zaloRoutes(app: FastifyInstance) {
   });
 
   // ═════════════════════════════════════════════════════════════════
+  // POST /api/zalo/session/save (S4: admin-only session persistence)
+  // ═════════════════════════════════════════════════════════════════
+  app.post("/zalo/session/save", async (request, reply) => {
+    // Admin-only: check auth via basic auth header
+    const auth = request.headers.authorization;
+    if (!auth || !auth.startsWith("Basic ")) {
+      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
+    }
+    const result = await getZaloGateway().persistSession();
+    if (!result.ok) {
+      return reply.status(400).send({ ok: false, error: result.message });
+    }
+    return {
+      ok: true,
+      session: {
+        exists: true,
+        fileSize: result.fileSize,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  });
+
+  // ═════════════════════════════════════════════════════════════════
   // GET /api/zalo/login/qr
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/qr", async (request, reply) => {

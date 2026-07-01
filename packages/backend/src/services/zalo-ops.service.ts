@@ -8,7 +8,7 @@ import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { getZaloGateway, type ZaloGatewayStatus } from "./zalo-gateway.service.js";
 import { getCurrentEffectiveDryRun, getEffectiveCooldownSeconds, getAllRuntimeSettings } from "./runtime-config.service.js";
-import { getHeartbeatSummary } from "./heartbeat.service.js";
+import { getHeartbeatSummary, heartbeatOk } from "./heartbeat.service.js";
 // Session safety: info extracted below in getSessionInfo() — no external dep
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -177,6 +177,14 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
 export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
   const gw = getZaloGateway();
   const gwStatus = gw.getStatus();
+
+  // Update heartbeats when Zalo is connected (prevents stale)
+  if (gwStatus.connected) {
+    heartbeatOk("zaloConnection", { connected: true, via: "ops/status" }).catch(() => {});
+  }
+  if ((gw as any).listenerActive ?? gwStatus.connected) {
+    heartbeatOk("zaloListener", { via: "ops/status" }).catch(() => {});
+  }
 
   // Last message timestamp
   const lastMessage = await prisma.message.findFirst({

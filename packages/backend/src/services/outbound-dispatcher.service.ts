@@ -144,6 +144,32 @@ function validateIntent(intent: OutboundIntent): string | null {
   return null;
 }
 
+// ── P0: Prompt Echo Guard ─────────────────────────────────────────────
+
+const PROMPT_ECHO_MARKERS = [
+  "[LỊCH SỬ TRÒ CHUYỆN GẦN ĐÂY]",
+  "[LỊCH SỬ TRÒ CHUYỆN]",
+  "[/LỊCH SỬ]",
+  "[TIN NHẮN HIỆN TẠI]",
+  "[KẾT THÚC LỊCH SỬ",
+  "BEGIN_CONTEXT",
+  "END_CONTEXT",
+];
+
+/**
+ * Check if the AI response contains internal prompt/context markers.
+ * Returns the block reason string if blocked, null if safe.
+ */
+function checkPromptEcho(content: string): string | null {
+  const normalized = content.normalize();
+  for (const marker of PROMPT_ECHO_MARKERS) {
+    if (normalized.includes(marker)) {
+      return `prompt_echo_guard: response contains internal marker "${marker}"`;
+    }
+  }
+  return null;
+}
+
 // ── Main dispatcher ──────────────────────────────────────────────────
 
 export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResult> {
@@ -165,7 +191,20 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     }
   } catch { /* non-fatal */ }
 
-  // 2. ── Cooldown check (R5: sole authority, DB-backed) ──────────
+  // P0: Prompt echo guard — block AI responses containing internal markers
+  if (kind === "text" || !kind) {
+    const t = intent as TextOutboundIntent;
+    const echoBlock = checkPromptEcho(t.content);
+    if (echoBlock) {
+      const recordContent = buildRecordContent(intent);
+      saveOutboundRecord({
+        threadId, threadType, content: recordContent,
+        sentMessageId: "", source: mapSource(source), dryRun: true,
+        decision: "block", reason: echoBlock,
+      }).catch(() => {});
+      return { success: false, dryRun: true, decision: "block", reason: echoBlock };
+    }
+  }
   const cooldownAcquired = await acquireCooldown(threadId);
   if (!cooldownAcquired) {
     const recordContent = buildRecordContent(intent);

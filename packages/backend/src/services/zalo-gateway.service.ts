@@ -284,8 +284,8 @@ export class ZaloGatewayService extends EventEmitter {
 
     this.setConnected({ selfUserId: selfId, selfDisplayName: selfName });
 
-    // C1: Save full credentials for session restore
-    await this.saveCredentials();
+    // C1: Save full credentials for session restore (S4: bypass dryRun)
+    await this.persistSession();
 
     // Start message listener
     await this.startListener();
@@ -337,8 +337,8 @@ export class ZaloGatewayService extends EventEmitter {
 
         this.setConnected({ selfUserId: selfId, selfDisplayName: selfName });
 
-        // Save refreshed credentials
-        await this.saveCredentials();
+        // Save refreshed credentials (S4: bypass dryRun)
+        await this.persistSession();
 
         // Start listener only if requested (API needs it, worker doesn't)
         if (startListener) {
@@ -370,7 +370,37 @@ export class ZaloGatewayService extends EventEmitter {
     }
   }
 
+  /** S4: Persist current session credentials to disk (callable from admin endpoint). */
+  async persistSession(): Promise<{ ok: boolean; message: string; fileSize?: number }> {
+    if (!this.status.connected) {
+      return { ok: false, message: "Zalo not connected — cannot save session" };
+    }
+    if (!this.savedCredentials) {
+      return { ok: false, message: "No credentials to save — QR login may be needed" };
+    }
+    try {
+      mkdirSync(this.sessionDir, { recursive: true });
+      const sessionPath = resolve(this.sessionDir, SESSION_FILE);
+      writeFileSync(sessionPath, JSON.stringify({
+        selfUserId: this.status.selfUserId,
+        selfDisplayName: this.status.selfDisplayName,
+        credentials: this.savedCredentials,
+        savedAt: new Date().toISOString(),
+      }), "utf-8");
+      if (!existsSync(sessionPath) || statSync(sessionPath).size === 0) {
+        return { ok: false, message: "Write verification failed" };
+      }
+      const st = statSync(sessionPath);
+      console.log(`[zalo-gateway] Session persisted via admin: ${sessionPath} (${st.size} bytes)`);
+      return { ok: true, message: "Session saved", fileSize: st.size };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, message: `Save failed: ${msg}` };
+    }
+  }
+
   private async saveCredentials(): Promise<void> {
+    // S4: dryRun no longer blocks session persistence — call persistSession() instead
     if (config.zalo.dryRun) return;
 
     try {

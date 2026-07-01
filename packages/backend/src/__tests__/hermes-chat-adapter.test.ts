@@ -73,7 +73,7 @@ describe("MockHermesChatAdapter", () => {
   it("echoes exact content in reply", async () => {
     const adapter = new MockHermesChatAdapter();
     const result = await adapter.generateReply(baseCtx({ content: "Test 123" }));
-    expect(result.reply).toBe('Bạn vừa nói: "Test 123"');
+    expect(result.reply).toContain("Test 123");
   });
 });
 

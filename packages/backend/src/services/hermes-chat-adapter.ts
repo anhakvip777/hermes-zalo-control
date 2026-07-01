@@ -30,7 +30,7 @@ export interface HermesChatAdapter {
 
 export class MockHermesChatAdapter implements HermesChatAdapter {
   async generateReply(input: ChatContext): Promise<ChatReply> {
-    const reply = `Bạn vừa nói: "${input.content}"`;
+    const reply = `Xin chào! Tôi là trợ lý Zalo (chế độ test). Bạn đã nói: "${input.content.slice(0, 60)}${input.content.length > 60 ? "..." : ""}"`;
     return { reply, confidence: 1.0 };
   }
 }
