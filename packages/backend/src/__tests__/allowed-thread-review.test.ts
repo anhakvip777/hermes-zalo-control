@@ -7,6 +7,7 @@ import {
 import type { ThreadReviewResponse } from "../services/allowed-thread-review.service.js";
 import { getHealthSnapshot } from "../services/system-health.service.js";
 import { runConfigChecks } from "../config-consistency.js";
+import { prisma } from "../db.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // Validate review output structure
@@ -97,21 +98,32 @@ describe("Allowed Thread Review — review output structure", () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe("Allowed Thread Review — single thread", () => {
+  const TEST_THREAD_ID = "6792540503378312397";
+
+  beforeAll(async () => {
+    // Seed a message so reviewSingleThread() finds an existing record.
+    // Without this, a clean test DB causes the gateway existence check
+    // (Message | ZaloThread | ThreadSetting) to fail → return null.
+    await prisma.message.create({
+      data: {
+        threadId: TEST_THREAD_ID,
+        threadType: "user",
+        content: "test seed for allowed-thread-review",
+        isFromBot: false,
+        role: "user",
+      },
+    });
+  });
+
   it("returns null for nonexistent thread", async () => {
     const entry = await reviewSingleThread("nonexistent-thread-999999");
     expect(entry).toBeNull();
   });
 
   it("returns entry for existing thread", async () => {
-    // Use the first allowed thread from config
-    const review = await reviewAllowedThreads();
-    if (review.threads.length === 0) return; // skip if no threads
-
-    const first = review.threads[0]!;
-    const threadId = first.threadId;
-    const entry = await reviewSingleThread(threadId);
+    const entry = await reviewSingleThread(TEST_THREAD_ID);
     expect(entry).not.toBeNull();
-    expect(entry!.threadId).toBe(threadId);
+    expect(entry!.threadId).toBe(TEST_THREAD_ID);
     expect(["user", "group", "unknown"]).toContain(entry!.threadType);
   });
 });

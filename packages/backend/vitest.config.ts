@@ -14,5 +14,12 @@ export default defineConfig({
         singleFork: true,
       },
     },
+    // TDB1: Force test environment variables in the worker process.
+    // This is a defense-in-depth layer; the package.json test script
+    // also sets these in the shell environment for prisma db push.
+    env: {
+      NODE_ENV: "test",
+      DATABASE_URL: "file:./test.db",
+    },
   },
 });
