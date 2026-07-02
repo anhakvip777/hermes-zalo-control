@@ -32,6 +32,13 @@ module.exports = {
         ERROR_ALERT_DRY_RUN: "true",
         LOG_LEVEL: "info",
         INTERNAL_API_TOKEN: process.env.INTERNAL_API_TOKEN || "CHANGE_ME_INTERNAL_TOKEN",
+        // AI adapter — must be "real" to use Hermes CLI, not mock echo
+        HERMES_CHAT_ADAPTER: "real",
+        HERMES_CHAT_MODE: "cli",
+        HERMES_CHAT_CLI_BIN: "/home/anhakvip777/ai-agents/hermes-agent/venv/bin/hermes",
+        HERMES_CHAT_TIMEOUT_MS: "30000",
+        HERMES_CHAT_CLI_TIMEOUT_MS: "60000",
+        HERMES_CHAT_MIN_CONFIDENCE: "0.5",
       },
       autorestart: true,
       max_restarts: 5,
