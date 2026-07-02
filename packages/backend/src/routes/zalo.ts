@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, normalize, relative, sep } from "node:path";
 import { SendMessageSchema } from "@hermes/shared";
@@ -9,6 +9,7 @@ import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js
 import { sendOutbound } from "../services/outbound-dispatcher.service.js";
 import { normalizeThreadId } from "../services/thread-id.js";
 import { prisma } from "../db.js";
+import { adminAuth } from "../middleware/auth.js";
 
 /**
  * Validate that a file path is within the allowed media base directory.
@@ -41,6 +42,14 @@ function validateSafeMediaPath(filePath: string): { allowed: false; error: strin
 }
 
 export async function zaloRoutes(app: FastifyInstance) {
+  // Guard: all routes in this plugin require admin authentication.
+  // Fastify register-level preHandler options do NOT propagate into plugins —
+  // addHook is the correct pattern to protect an entire plugin scope.
+  app.addHook("preHandler", adminAuth);
+  // Protect all /api/zalo/* routes with admin auth
+  // Note: Fastify register-level preHandler options are not propagated into plugins;
+  // addHook ensures the guard runs for every route in this plugin scope.
+  app.addHook("preHandler", adminAuth);
   // ═════════════════════════════════════════════════════════════════
   // GET /api/zalo/status
   // ═════════════════════════════════════════════════════════════════
@@ -541,11 +550,6 @@ export async function zaloRoutes(app: FastifyInstance) {
   // Batch 16 — Zalo Live-Safe Operations Dashboard endpoints
   // ═════════════════════════════════════════════════════════════════
 
-  app.get("/zalo/ops/status", async () => {
-    const { getZaloOpsStatus } = await import("../services/zalo-ops.service.js");
-    return getZaloOpsStatus();
-  });
-
   app.post("/zalo/ops/reconnect", async (request) => {
     const body = request.body as { userId?: string } | undefined;
     const { reconnectZalo } = await import("../services/zalo-ops.service.js");
@@ -570,6 +574,20 @@ export async function zaloRoutes(app: FastifyInstance) {
     }
     const { testDM } = await import("../services/zalo-ops.service.js");
     return testDM({ threadId: body.threadId, content: body.content }, body.userId);
+  });
+
+
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// Public Ops Routes — no auth required (used by /zalo-ops dashboard)
+// Exposed as a separate plugin registered WITHOUT adminAuth.
+// ═══════════════════════════════════════════════════════════
+export async function zaloPublicOpsRoutes(app: FastifyInstance) {
+  app.get("/zalo/ops/status", async () => {
+    const { getZaloOpsStatus } = await import("../services/zalo-ops.service.js");
+    return getZaloOpsStatus();
   });
 
   app.get("/zalo/ops/recent-events", async () => {

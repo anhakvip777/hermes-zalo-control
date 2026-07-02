@@ -5,7 +5,7 @@ import { healthRoutes } from "./routes/health.js";
 import { scheduleRoutes } from "./routes/schedules.js";
 import { executionRoutes } from "./routes/executions.js";
 import { adminRoutes } from "./routes/admin.js";
-import { zaloRoutes } from "./routes/zalo.js";
+import { zaloRoutes, zaloPublicOpsRoutes } from "./routes/zalo.js";
 import { agentRoutes } from "./routes/agent.js";
 import { attendanceRoutes } from "./routes/attendance.js";
 import { threadSettingsRoutes } from "./routes/thread-settings.js";
@@ -47,6 +47,8 @@ export async function buildApp() {
 
   // Public routes
   await app.register(healthRoutes, { prefix: "/api" });
+  // Public zalo ops status endpoints — no auth required (dashboard polling)
+  await app.register(zaloPublicOpsRoutes, { prefix: "/api" });
 
   // Protected routes (auth + rate limit)
   await app.register(scheduleRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
