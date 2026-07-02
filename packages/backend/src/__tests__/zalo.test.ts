@@ -448,6 +448,10 @@ describe("ZaloGatewayService — QR login flow", () => {
 
   it("qrAvailable is false when no qr-current.png exists", () => {
     const gw = new ZaloGatewayService();
+    // Ensure QR file does not exist (may be left from previous run)
+    const sessionDir = (gw as any).sessionDir as string;
+    const qrPath = join(sessionDir, "qr-current.png");
+    try { rmSync(qrPath); } catch { /* already gone */ }
     const status = gw.getStatus();
     // No QR file → qrAvailable = false
     expect(status.qrAvailable).toBe(false);

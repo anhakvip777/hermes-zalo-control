@@ -80,12 +80,8 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // POST /api/zalo/login/cancel
   // ═════════════════════════════════════════════════════════════════
-  app.post("/zalo/login/cancel", async (request, reply) => {
-    // Admin-only
-    const auth = request.headers.authorization;
-    if (!auth || !auth.startsWith("Basic ")) {
-      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
-    }
+  app.post("/zalo/login/cancel", async (_request, _reply) => {
+    // Admin-only: enforced by global adminAuth preHandler in app.ts
     const result = getZaloGateway().cancelLogin();
     return { data: result };
   });
@@ -117,11 +113,7 @@ export async function zaloRoutes(app: FastifyInstance) {
   // GET /api/zalo/login/qr
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/qr", async (request, reply) => {
-    // Admin-only: QR must not be public
-    const auth = request.headers.authorization;
-    if (!auth || !auth.startsWith("Basic ")) {
-      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
-    }
+    // Admin-only: enforced by global adminAuth preHandler in app.ts
 
     // Gateway stores QR at sessionDir/qr-current.png
     const qrPath = resolve(config.zalo.sessionDir, "qr-current.png");

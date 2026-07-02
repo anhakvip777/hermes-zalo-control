@@ -973,34 +973,8 @@ export interface QRImageResult {
   updatedAt: string | null;
 }
 
-/** apiFetch with Basic auth header for admin-only endpoints */
-function apiFetchAdmin<T>(path: string, init?: RequestInit): Promise<T> {
-  const creds = sessionStorage.getItem("zalo_admin_creds") ?? "";
-  return apiFetch<T>(path, {
-    ...init,
-    headers: {
-      ...(init?.headers ?? {}),
-      Authorization: `Basic ${creds}`,
-    },
-  });
-}
-
-/** Store admin credentials (base64) in sessionStorage for this tab */
-export function setAdminCredentials(username: string, password: string): void {
-  const b64 = btoa(`${username}:${password}`);
-  sessionStorage.setItem("zalo_admin_creds", b64);
-}
-
-export function clearAdminCredentials(): void {
-  sessionStorage.removeItem("zalo_admin_creds");
-}
-
-export function hasAdminCredentials(): boolean {
-  return !!sessionStorage.getItem("zalo_admin_creds");
-}
-
 export function startZaloLogin() {
-  return apiFetchAdmin<{ data: LoginStartResult }>("/api/zalo/login/start", { method: "POST" });
+  return apiFetch<{ data: LoginStartResult }>("/api/zalo/login/start", { method: "POST" });
 }
 
 export function getZaloLoginStatus() {
@@ -1008,9 +982,9 @@ export function getZaloLoginStatus() {
 }
 
 export function getZaloLoginQR() {
-  return apiFetchAdmin<QRImageResult>("/api/zalo/login/qr");
+  return apiFetch<QRImageResult>("/api/zalo/login/qr");
 }
 
 export function cancelZaloLogin() {
-  return apiFetchAdmin<{ data: LoginCancelResult }>("/api/zalo/login/cancel", { method: "POST" });
+  return apiFetch<{ data: LoginCancelResult }>("/api/zalo/login/cancel", { method: "POST" });
 }

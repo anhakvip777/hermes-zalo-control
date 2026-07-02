@@ -3,11 +3,16 @@
 /**
  * ZaloLoginCard — Web QR Login (ZALO-WEB-LOGIN)
  *
- * Shows when Zalo is disconnected. Admin can:
- *   - Enter credentials (stored in sessionStorage, never sent to any log)
- *   - Start QR login → poll status every 2s
- *   - See QR image, refresh it, cancel it
- *   - See connected state with selfUserId / listenerActive / session persisted
+ * Admin đã đăng nhập web → bấm "Tạo QR đăng nhập Zalo" → QR hiện ngay.
+ * Không cần nhập username/password — browser tự inject Basic auth đã lưu.
+ * Nếu chưa auth thì browser tự hiện WWW-Authenticate dialog (behavior chuẩn).
+ *
+ * Phases:
+ *   idle      → disconnected, nút "Tạo QR"
+ *   pending   → QR hiển thị, polling 2s
+ *   connected → scan thành công
+ *   expired   → QR hết hạn, cho tạo lại
+ *   error     → lỗi, cho thử lại
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -16,95 +21,43 @@ import {
   getZaloLoginStatus,
   getZaloLoginQR,
   cancelZaloLogin,
-  setAdminCredentials,
-  hasAdminCredentials,
   type LoginStatusOutput,
 } from "../lib/api-client";
 
-type LoginPhase =
-  | "idle"           // Not started
-  | "creds"          // Asking for admin credentials
-  | "pending"        // QR shown, waiting for scan
-  | "connected"      // Scan succeeded
-  | "expired"        // QR expired
-  | "error";         // Error
+type LoginPhase = "idle" | "starting" | "pending" | "connected" | "expired" | "error";
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_MS = 2000;
 
-// ── Helpers ─────────────────────────────────────────────────────────
-function Badge({ color, children }: { color: string; children: React.ReactNode }) {
-  const map: Record<string, string> = {
+// ── Badge helper ─────────────────────────────────────────────────────
+function Badge({ color, children }: { color: "green" | "yellow" | "red" | "blue" | "slate"; children: React.ReactNode }) {
+  const cls = {
     green: "border-green-800 bg-green-950/40 text-green-400",
     yellow: "border-yellow-800 bg-yellow-950/40 text-yellow-400",
     red: "border-red-800 bg-red-950/40 text-red-400",
     blue: "border-blue-800 bg-blue-950/40 text-blue-400",
     slate: "border-slate-700 bg-slate-800/60 text-slate-400",
-  };
+  }[color];
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${map[color] ?? map.slate}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${cls}`}>
       {children}
     </span>
   );
 }
 
-// ── Main Component ───────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────
 export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
   const [phase, setPhase] = useState<LoginPhase>("idle");
   const [status, setStatus] = useState<LoginStatusOutput | null>(null);
   const [qrDataURL, setQrDataURL] = useState<string | null>(null);
   const [qrUpdatedAt, setQrUpdatedAt] = useState<string | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [starting, setStarting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── Poll login status ─────────────────────────────────────────────
-  const pollStatus = useCallback(async () => {
-    try {
-      const s = await getZaloLoginStatus();
-      setStatus(s);
-
-      if (s.connected) {
-        setPhase("connected");
-        stopPolling();
-        onConnected?.();
-        return;
-      }
-
-      if (!s.qrAvailable && phase === "pending") {
-        // QR disappeared but not connected → expired
-        setPhase("expired");
-        setQrDataURL(null);
-        stopPolling();
-        return;
-      }
-    } catch {
-      // Non-fatal — will retry
-    }
-  }, [phase, onConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopPolling = () => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   };
 
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollRef.current = setInterval(pollStatus, POLL_INTERVAL_MS);
-  }, [pollStatus]);
-
-  useEffect(() => {
-    // On mount: check current status
-    getZaloLoginStatus().then((s) => {
-      setStatus(s);
-      if (s.connected) setPhase("connected");
-    }).catch(() => {});
-
-    return () => stopPolling();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Load QR image ─────────────────────────────────────────────────
+  // ── Fetch QR image ───────────────────────────────────────────────
   const loadQR = useCallback(async () => {
     try {
       const r = await getZaloLoginQR();
@@ -116,89 +69,112 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
         setPhase("expired");
         setQrDataURL(null);
         stopPolling();
-      } else if (msg.includes("QR_NOT_FOUND")) {
-        // Not ready yet, will retry via poll
-      } else {
-        setErrMsg(msg);
       }
+      // QR_NOT_FOUND: QR đang sinh, sẽ retry qua poll
     }
   }, []);
 
-  // ── Start login ───────────────────────────────────────────────────
-  const doStart = async () => {
-    if (!username.trim() || !password.trim()) {
-      setErrMsg("Nhập username và password admin.");
-      return;
-    }
-    setAdminCredentials(username.trim(), password.trim());
-    setStarting(true);
-    setErrMsg(null);
+  // ── Poll status every 2s ─────────────────────────────────────────
+  const pollStatus = useCallback(async () => {
+    try {
+      const s = await getZaloLoginStatus();
+      setStatus(s);
+      if (s.connected) {
+        setPhase("connected");
+        setQrDataURL(null);
+        stopPolling();
+        onConnected?.();
+        return;
+      }
+      // Refresh QR if still pending
+      if (!s.qrAvailable && phase === "pending") {
+        setPhase("expired");
+        setQrDataURL(null);
+        stopPolling();
+        return;
+      }
+      if (s.qrAvailable) {
+        await loadQR();
+      }
+    } catch { /* retry next tick */ }
+  }, [phase, loadQR, onConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollRef.current = setInterval(pollStatus, POLL_MS);
+  }, [pollStatus]);
+
+  // ── Mount: check current status ──────────────────────────────────
+  useEffect(() => {
+    getZaloLoginStatus()
+      .then((s) => { setStatus(s); if (s.connected) setPhase("connected"); })
+      .catch(() => {});
+    return () => stopPolling();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Tạo QR ──────────────────────────────────────────────────────
+  const doStart = useCallback(async () => {
+    setPhase("starting");
+    setErrMsg(null);
+    setQrDataURL(null);
     try {
       const r = await startZaloLogin();
       if (r.data.status === "already_connected") {
         const s = await getZaloLoginStatus();
         setStatus(s);
         setPhase("connected");
-        setStarting(false);
         return;
       }
       setPhase("pending");
       startPolling();
+      // QR có thể cần vài giây mới sinh — thử ngay + poll tự retry
       await loadQR();
     } catch (e: unknown) {
-      setErrMsg(e instanceof Error ? e.message : "Không thể tạo QR. Thử lại.");
+      const msg = e instanceof Error ? e.message : "Không thể tạo QR — kiểm tra kết nối backend.";
+      setErrMsg(msg);
       setPhase("error");
-    } finally {
-      setStarting(false);
     }
-  };
+  }, [startPolling, loadQR]);
 
-  // ── Refresh QR ────────────────────────────────────────────────────
-  const doRefreshQR = async () => {
-    setRefreshing(true);
+  // ── Tạo QR mới (refresh) ─────────────────────────────────────────
+  const doRefresh = useCallback(async () => {
     stopPolling();
-    setErrMsg(null);
-    setPhase("idle");
-    setQrDataURL(null);
     await doStart();
-    setRefreshing(false);
-  };
+  }, [doStart]);
 
-  // ── Cancel login ──────────────────────────────────────────────────
-  const doCancel = async () => {
+  // ── Hủy ─────────────────────────────────────────────────────────
+  const doCancel = useCallback(async () => {
     stopPolling();
-    try { await cancelZaloLogin(); } catch { /* ignore */ }
+    try { await cancelZaloLogin(); } catch { /* non-critical */ }
     setPhase("idle");
     setQrDataURL(null);
     setErrMsg(null);
-  };
+  }, []);
 
-  // ── Styles ────────────────────────────────────────────────────────
+  // ── Styles ───────────────────────────────────────────────────────
   const btnPrimary = "px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
   const btnSecondary = "px-3 py-1.5 border border-slate-700 text-slate-300 hover:bg-slate-700 text-xs rounded-md transition-colors";
   const btnDanger = "px-3 py-1.5 bg-red-800 hover:bg-red-700 text-white text-xs rounded-md transition-colors";
-  const inp = "w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none";
 
-  // ── Render: Connected ─────────────────────────────────────────────
+  // ── Connected ────────────────────────────────────────────────────
   if (phase === "connected" && status?.connected) {
     return (
       <div className="rounded-lg border border-green-800 bg-green-950/20 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <span className="text-lg">✅</span>
+          <span>✅</span>
           <p className="text-sm font-semibold text-green-400">Zalo đã kết nối thành công</p>
         </div>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div>
-            <span className="text-slate-500 uppercase tracking-wider">Bot UID</span>
+            <span className="text-slate-500 uppercase tracking-wider text-[10px]">Bot UID</span>
             <p className="text-blue-400 font-mono mt-0.5">{status.selfUserId ?? "—"}</p>
           </div>
           <div>
-            <span className="text-slate-500 uppercase tracking-wider">Display Name</span>
+            <span className="text-slate-500 uppercase tracking-wider text-[10px]">Display Name</span>
             <p className="text-slate-300 mt-0.5">{status.selfDisplayName ?? "—"}</p>
           </div>
           <div>
-            <span className="text-slate-500 uppercase tracking-wider">Listener</span>
+            <span className="text-slate-500 uppercase tracking-wider text-[10px]">Listener</span>
             <div className="mt-0.5">
               {status.listenerActive
                 ? <Badge color="green">● Active</Badge>
@@ -206,84 +182,85 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
             </div>
           </div>
           <div>
-            <span className="text-slate-500 uppercase tracking-wider">Session</span>
-            <div className="mt-0.5">
-              <Badge color="green">💾 Persisted</Badge>
-            </div>
+            <span className="text-slate-500 uppercase tracking-wider text-[10px]">Session</span>
+            <div className="mt-0.5"><Badge color="green">💾 Persisted</Badge></div>
           </div>
         </div>
         <div className="rounded-md border border-blue-800/50 bg-blue-950/20 px-3 py-2 text-xs text-blue-400">
-          🔄 <strong>Auto reconnect enabled</strong> — PM2 restart sẽ tự restore session, không cần QR lại.
+          🔄 <strong>Auto reconnect enabled</strong> — PM2 restart tự restore, không cần QR lại.
         </div>
       </div>
     );
   }
 
-  // ── Render: Pending QR ────────────────────────────────────────────
-  if (phase === "pending") {
+  // ── Pending: QR đang hiển thị ────────────────────────────────────
+  if (phase === "pending" || phase === "starting") {
     return (
       <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-4 space-y-4">
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold text-slate-200">📱 Scan QR để đăng nhập Zalo</p>
-          <Badge color="yellow">⏳ Waiting for scan</Badge>
+          <Badge color="yellow">⏳ Đang chờ quét</Badge>
         </div>
 
         {/* QR Image */}
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-3">
           {qrDataURL ? (
-            <div className="space-y-2 text-center">
+            <>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={qrDataURL}
-                alt="Zalo QR Code"
-                className="w-56 h-56 rounded-lg border-4 border-white shadow-xl"
+                alt="Zalo QR Code — mở app Zalo và quét"
+                className="w-60 h-60 rounded-xl border-4 border-white shadow-2xl"
               />
               {qrUpdatedAt && (
                 <p className="text-[10px] text-slate-600">
-                  Updated: {new Date(qrUpdatedAt).toLocaleTimeString("vi-VN")}
+                  QR tạo lúc {new Date(qrUpdatedAt).toLocaleTimeString("vi-VN")}
                 </p>
               )}
-            </div>
+            </>
           ) : (
-            <div className="w-56 h-56 rounded-lg border border-slate-700 bg-slate-900 flex items-center justify-center">
-              <div className="text-center space-y-2">
-                <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-xs text-slate-500">Đang tải QR…</p>
-              </div>
+            <div className="w-60 h-60 rounded-xl border border-slate-700 bg-slate-900 flex flex-col items-center justify-center gap-3">
+              <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <p className="text-xs text-slate-500">
+                {phase === "starting" ? "Đang tạo QR…" : "Đang tải QR…"}
+              </p>
             </div>
           )}
+
+          <p className="text-xs text-slate-500 text-center max-w-[240px]">
+            Mở <strong className="text-slate-300">app Zalo</strong> →{" "}
+            biểu tượng QR → quét mã này để đăng nhập.
+            <br />
+            <span className="text-slate-600">Tự động cập nhật mỗi 2 giây.</span>
+          </p>
         </div>
 
-        <p className="text-xs text-slate-500 text-center">
-          Mở app Zalo → Quét mã QR để đăng nhập.
-          <br />
-          QR tự động cập nhật mỗi vài giây.
-        </p>
-
         <div className="flex gap-2 justify-center">
-          <button onClick={loadQR} disabled={refreshing} className={btnSecondary}>
-            🔄 Refresh QR
+          <button onClick={doRefresh} className={btnSecondary} disabled={phase === "starting"}>
+            🔄 Tạo QR mới
           </button>
           <button onClick={doCancel} className={btnDanger}>
-            ✕ Cancel
+            ✕ Hủy
           </button>
         </div>
       </div>
     );
   }
 
-  // ── Render: Expired ───────────────────────────────────────────────
+  // ── Expired ──────────────────────────────────────────────────────
   if (phase === "expired") {
     return (
       <div className="rounded-lg border border-yellow-800 bg-yellow-950/20 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <span className="text-lg">⏱️</span>
+          <span>⏱️</span>
           <p className="text-sm font-semibold text-yellow-400">QR đã hết hạn</p>
         </div>
-        <p className="text-xs text-slate-500">QR code hết hiệu lực trước khi scan. Tạo mới để thử lại.</p>
+        <p className="text-xs text-slate-500">
+          QR hết hiệu lực trước khi quét. Tạo mới để thử lại.
+        </p>
         <div className="flex gap-2">
-          <button onClick={doRefreshQR} disabled={refreshing} className={btnPrimary}>
-            {refreshing ? "Đang tạo…" : "🔄 Tạo QR mới"}
+          <button onClick={doRefresh} className={btnPrimary}>
+            🔄 Tạo QR mới
           </button>
           <button onClick={() => setPhase("idle")} className={btnSecondary}>Hủy</button>
         </div>
@@ -291,97 +268,60 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
     );
   }
 
-  // ── Render: Error ─────────────────────────────────────────────────
+  // ── Error ────────────────────────────────────────────────────────
   if (phase === "error") {
     return (
       <div className="rounded-lg border border-red-800 bg-red-950/20 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <span className="text-lg">❌</span>
-          <p className="text-sm font-semibold text-red-400">Lỗi đăng nhập</p>
-        </div>
-        {errMsg && <p className="text-xs text-red-400 font-mono">{errMsg}</p>}
-        <button onClick={() => { setPhase("idle"); setErrMsg(null); }} className={btnSecondary}>
-          Thử lại
-        </button>
-      </div>
-    );
-  }
-
-  // ── Render: Creds form ────────────────────────────────────────────
-  if (phase === "creds") {
-    return (
-      <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-4 space-y-4">
-        <p className="text-sm font-semibold text-slate-200">🔐 Admin Authentication</p>
-        <p className="text-xs text-slate-500">
-          Nhập thông tin admin để tạo QR đăng nhập. Credentials chỉ lưu trong tab này, không log.
-        </p>
-        <div className="space-y-2">
-          <input
-            type="text"
-            placeholder="Admin username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="username"
-            className={inp}
-          />
-          <input
-            type="password"
-            placeholder="Admin password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            onKeyDown={(e) => { if (e.key === "Enter") doStart(); }}
-            className={inp}
-          />
+          <span>❌</span>
+          <p className="text-sm font-semibold text-red-400">Lỗi tạo QR</p>
         </div>
         {errMsg && (
-          <div className="rounded-md border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-400">
+          <p className="text-xs text-red-400 font-mono bg-red-950/30 rounded px-2 py-1">
             {errMsg}
-          </div>
+          </p>
         )}
         <div className="flex gap-2">
-          <button onClick={doStart} disabled={starting} className={btnPrimary}>
-            {starting ? "Đang tạo QR…" : "📱 Tạo QR Login"}
+          <button onClick={doStart} className={btnPrimary}>Thử lại</button>
+          <button onClick={() => { setPhase("idle"); setErrMsg(null); }} className={btnSecondary}>
+            Hủy
           </button>
-          <button onClick={() => setPhase("idle")} className={btnSecondary}>Hủy</button>
         </div>
       </div>
     );
   }
 
-  // ── Render: Idle (disconnected) ───────────────────────────────────
+  // ── Idle: disconnected ───────────────────────────────────────────
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-semibold text-slate-200">Zalo Login</p>
-          <p className="text-xs text-slate-500 mt-0.5">Đăng nhập Zalo bằng QR ngay trên web — không cần terminal.</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Tạo QR và quét bằng app Zalo để kết nối bot.
+          </p>
         </div>
-        <Badge color="red">○ Disconnected</Badge>
+        <Badge color="red">○ Chưa kết nối</Badge>
       </div>
 
       {status?.lastError && (
-        <div className="rounded-md border border-red-800/50 bg-red-950/20 px-3 py-2 text-xs text-red-400">
-          ⚠ Last error: {status.lastError}
+        <div className="rounded-md border border-red-800/40 bg-red-950/20 px-3 py-2 text-xs text-red-400">
+          ⚠ {status.lastError}
         </div>
       )}
 
-      {/* Session missing warning */}
       {status && !status.connected && (
         <div className="rounded-md border border-yellow-800/40 bg-yellow-950/10 px-3 py-2 text-xs text-yellow-500">
-          ⚠ Session chưa có hoặc đã hết hạn. Cần đăng nhập QR để kết nối lại.
+          ⚠ Session chưa có hoặc đã hết hạn. Quét QR để kết nối lại.
         </div>
       )}
 
       <button
-        onClick={() => {
-          setErrMsg(null);
-          setPhase(hasAdminCredentials() ? "creds" : "creds");
-        }}
+        onClick={doStart}
         className={`${btnPrimary} w-full flex items-center justify-center gap-2`}
       >
         <span>📱</span>
-        <span>Login with QR</span>
+        <span>Tạo QR đăng nhập Zalo</span>
       </button>
     </div>
   );
