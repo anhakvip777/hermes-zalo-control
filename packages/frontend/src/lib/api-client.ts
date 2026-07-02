@@ -974,7 +974,7 @@ export interface QRImageResult {
 }
 
 export function startZaloLogin() {
-  return apiFetch<{ data: LoginStartResult }>("/api/zalo/login/start", { method: "POST" });
+  return apiFetch<{ data: LoginStartResult }>("/api/zalo/login/start", { method: "POST", body: JSON.stringify({}) });
 }
 
 export function getZaloLoginStatus() {

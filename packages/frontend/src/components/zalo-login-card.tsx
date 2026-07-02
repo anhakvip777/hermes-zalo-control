@@ -107,7 +107,17 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
   // ── Mount: check current status ──────────────────────────────────
   useEffect(() => {
     getZaloLoginStatus()
-      .then((s) => { setStatus(s); if (s.connected) setPhase("connected"); })
+      .then((s) => {
+        setStatus(s);
+        if (s.connected) {
+          setPhase("connected");
+        } else if (s.qrAvailable && s.connectionStatus === "waiting_qr_scan") {
+          // QR already available (e.g. page reload mid-login) — jump straight to pending + fetch
+          setPhase("pending");
+          void loadQR();
+          pollRef.current = setInterval(pollStatus, POLL_MS);
+        }
+      })
       .catch(() => {});
     return () => stopPolling();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -125,7 +135,7 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
         await new Promise((res) => setTimeout(res, 500));
         r = await startZaloLogin();
       }
-      if (r.data.status === "already_connected") {
+      if (r.data.status === "already_connected" || r.data.status === "connected") {
         const s = await getZaloLoginStatus();
         setStatus(s);
         setPhase("connected");
