@@ -199,6 +199,11 @@ export function detectCreateReminderIntent(content: string): boolean {
     /(nhắn|nhắc|báo)\s+(mình|tôi|tui)\s+(sau|lúc|vào)/i,
     // Batch 14.1: "nhắc [target] <content> lúc <time>" — multi-word content
     /\bnhắc\s+(?:mình|tôi|tui|em|anh|chị)?\s*.+?\s+lúc\s+\d+/iu,
+    // SCHED1: "nhắn" synonym + compact "2p" + "sau X phút/p" patterns
+    /\d+p\s*(nữa|later)\s+(nhắn|nhắc|báo)/i,
+    /(nhắn|nhắc|báo)\s+(mình|tôi|tui|em|anh|chị)\s+\d+p\s*(nữa|later)/i,
+    /sau\s+\d+\s*(p|phút|giây|giờ|h|tiếng|ngày)\s+(nhắn|nhắc|báo|remind)/i,
+    /\d+\s*(p|phút|giây|giờ|h)\s*(nữa|later)\s+(nhắn|báo)/i,
   ];
   return patterns.some((p) => p.test(content));
 }
@@ -314,8 +319,26 @@ export function parseReminderFromMessage(content: string): ParsedReminder | null
     reminderContent = afterNua || "Nhắc bạn";
   }
 
-  // Pattern: "X phút nữa nhắc ..."
-  const matchNumNua = lower.match(/(\d+)\s*(p|phút|giây|giờ|h)\s*(nữa|later)\s+nhắc/i);
+  // Pattern: "nhắc/nhắn TARGET Xp nữa CONTENT" — SCHED1: verb-first + compact time
+  const matchVerbTimeNua = lower.match(/(nhắc|nhắn|báo)\s+\p{L}+\s+(\d+)\s*(p|phút|giây|giờ|h|tiếng|ngày)\s*(nữa|later)/iu);
+  if (matchVerbTimeNua && matchVerbTimeNua[2] && matchVerbTimeNua[3] && offsetMs === 0) {
+    const num = parseInt(matchVerbTimeNua[2], 10);
+    const unit = matchVerbTimeNua[3].toLowerCase();
+    if (unit === "giây" || unit === "s") offsetMs = num * 1000;
+    else if (unit === "p" || unit === "phút") offsetMs = num * 60_000;
+    else if (unit === "h" || unit === "giờ" || unit === "tiếng") offsetMs = num * 3600_000;
+    else if (unit === "ngày") offsetMs = num * 86400_000;
+    timeDesc = `${num} ${unit} nữa`;
+    let afterTime = content.slice(matchVerbTimeNua.index! + matchVerbTimeNua[0].length).trim();
+    // Strip "nữa/later" if still present at start
+    afterTime = afterTime.replace(/^(nữa|later)\s*/i, "").trim();
+    // Strip leading pronoun only (not content words) — SCHED1 fix
+    afterTime = afterTime.replace(/^(mình|tôi|tui|em|anh|chị|bạn)\s+/iu, "").trim();
+    reminderContent = afterTime || "Nhắc bạn";
+  }
+
+  // Pattern: "X phút nữa nhắc/nhắn ..." — SCHED1: includes "nhắn" + compact "2p"
+  const matchNumNua = lower.match(/(\d+)\s*(p|phút|giây|giờ|h)\s*(nữa|later)\s+(nhắc|nhắn|báo)/i);
   if (matchNumNua && matchNumNua[1] && matchNumNua[2] && offsetMs === 0) {
     const num = parseInt(matchNumNua[1], 10);
     const unit = matchNumNua[2].toLowerCase();
@@ -324,9 +347,24 @@ export function parseReminderFromMessage(content: string): ParsedReminder | null
     else if (unit === "h" || unit === "giờ") offsetMs = num * 3600_000;
     timeDesc = `${num} ${unit} nữa`;
     let afterNua = content.slice(matchNumNua.index! + matchNumNua[0].length).trim();
-    // For "X phút nữa nhắc TARGET CONTENT", strip TARGET pronoun
+    // For "X phút nữa nhắc/nhắn TARGET CONTENT", strip TARGET pronoun
     afterNua = afterNua.replace(/^\p{L}+\s+/u, "").trim();
     reminderContent = afterNua || "Nhắc bạn";
+  }
+
+  // Pattern: "sau X phút/p nhắc/nhắn ..." — SCHED1: "sau" prefix variant
+  const matchSau = lower.match(/sau\s+(\d+)\s*(p|phút|giây|giờ|h|tiếng|ngày)\s+(nhắc|nhắn|báo|remind)/i);
+  if (matchSau && matchSau[1] && matchSau[2] && offsetMs === 0) {
+    const num = parseInt(matchSau[1], 10);
+    const unit = matchSau[2].toLowerCase();
+    if (unit === "giây" || unit === "s") offsetMs = num * 1000;
+    else if (unit === "p" || unit === "phút") offsetMs = num * 60_000;
+    else if (unit === "h" || unit === "giờ" || unit === "tiếng") offsetMs = num * 3600_000;
+    else if (unit === "ngày") offsetMs = num * 86400_000;
+    timeDesc = `${num} ${unit} nữa`;
+    let afterVerb = content.slice(matchSau.index! + matchSau[0].length).trim();
+    afterVerb = afterVerb.replace(/^\p{L}+\s+/u, "").trim();
+    reminderContent = afterVerb || "Nhắc bạn";
   }
 
   if (offsetMs === 0) return null;
