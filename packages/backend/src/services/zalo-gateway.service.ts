@@ -525,12 +525,41 @@ export class ZaloGatewayService extends EventEmitter {
       }
     });
 
+    // ── ZR1: Bắt disconnect/closed/error từ zca-js WebSocket ────────
+    // zca-js listener emit "disconnected", "closed", "error" khi WS chết.
+    // Không bắt → listenerActive=true bị stuck (stale flag), không trigger reconnect.
+    const onWsDisconnected = (code: number, _reason: unknown) => {
+      if (!this.listenerActive) return;
+      console.warn(`[listener] WS disconnected (code=${code}) — scheduling reconnect`);
+      this.listenerActive = false;
+      this.setStatus({ connectionStatus: "error", lastError: `WS_DISCONNECTED:${code}` });
+      this.scheduleReconnect();
+    };
+    const onWsClosed = (code: number, _reason: unknown) => {
+      if (!this.listenerActive) return;
+      console.warn(`[listener] WS closed (code=${code}) — scheduling reconnect`);
+      this.listenerActive = false;
+      this.setStatus({ connectionStatus: "error", lastError: `WS_CLOSED:${code}` });
+      this.scheduleReconnect();
+    };
+    const onWsError = (err: unknown) => {
+      const msg = (err as Error)?.message ?? String(err);
+      if (!this.listenerActive) return;
+      console.error(`[listener] WS error: ${msg} — scheduling reconnect`);
+      this.listenerActive = false;
+      this.setStatus({ connectionStatus: "error", lastError: `WS_ERROR:${msg.slice(0, 60)}` });
+      this.scheduleReconnect();
+    };
+    this.api.listener.on("disconnected", onWsDisconnected);
+    this.api.listener.on("closed", onWsClosed);
+    this.api.listener.on("error", onWsError);
+
     console.log("[listener] Starting zca-js listener...");
     await this.api.listener.start();
     console.log("[listener] zca-js listener started successfully");
     this.listenerActive = true;
     // ── Heartbeat: listener active ───────────────────────────────
-        heartbeatOk("zaloListener", { listenerStarted: true, selfUserId: this.status.selfUserId }).catch(() => {});
+    heartbeatOk("zaloListener", { listenerStarted: true, selfUserId: this.status.selfUserId }).catch(() => {});
   }
 
   private async stopListener(): Promise<void> {
