@@ -418,3 +418,71 @@ function makeNorm(overrides: Partial<{
     rawMetadata: "{}",
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// ZaloGatewayService — QR login flow (ZALO-WEB-LOGIN)
+// ═══════════════════════════════════════════════════════════════════
+describe("ZaloGatewayService — QR login flow", () => {
+  it("start login when disconnected returns connecting status", async () => {
+    const gw = new ZaloGatewayService();
+    // In dry-run mode (test env), startLogin returns connected immediately
+    const result = await gw.startLogin();
+    expect(["connecting", "connected"]).toContain(result.status);
+  });
+
+  it("start login when already connected returns already_connected", async () => {
+    const gw = new ZaloGatewayService();
+    // Simulate already connected
+    (gw as any).status = { ...gw.getStatus(), connected: true, connectionStatus: "connected" };
+    (gw as any).api = {};
+    const result = await gw.startLogin();
+    expect(result.status).toBe("already_connected");
+  });
+
+  it("login status reflects disconnected when not started", () => {
+    const gw = new ZaloGatewayService();
+    const status = gw.getStatus();
+    expect(status.connected).toBe(false);
+    expect(status.connectionStatus).toBe("disconnected");
+  });
+
+  it("qrAvailable is false when no qr-current.png exists", () => {
+    const gw = new ZaloGatewayService();
+    const status = gw.getStatus();
+    // No QR file → qrAvailable = false
+    expect(status.qrAvailable).toBe(false);
+  });
+
+  it("qrAvailable is true when qr-current.png exists and is large enough", () => {
+    const gw = new ZaloGatewayService();
+    const sessionDir = (gw as any).sessionDir as string;
+    mkdirSync(sessionDir, { recursive: true });
+    const qrPath = join(sessionDir, "qr-current.png");
+    // Write a fake QR file > 500 bytes
+    writeFileSync(qrPath, Buffer.alloc(1000, 0xff));
+    const status = gw.getStatus();
+    expect(status.qrAvailable).toBe(true);
+    // Cleanup
+    try { rmSync(qrPath); } catch {}
+  });
+
+  it("cancelLogin cancels pending login and removes qr file", () => {
+    const gw = new ZaloGatewayService();
+    const sessionDir = (gw as any).sessionDir as string;
+    mkdirSync(sessionDir, { recursive: true });
+    const qrPath = join(sessionDir, "qr-current.png");
+    writeFileSync(qrPath, Buffer.alloc(1000, 0xff));
+    (gw as any).loginInProgress = true;
+    const result = gw.cancelLogin();
+    expect(result.cancelled).toBe(true);
+    expect((gw as any).loginInProgress).toBe(false);
+    expect(existsSync(qrPath)).toBe(false);
+  });
+
+  it("cancelLogin no-op when not in progress", () => {
+    const gw = new ZaloGatewayService();
+    const result = gw.cancelLogin();
+    expect(result.cancelled).toBe(false);
+    expect(result.message).toContain("No login");
+  });
+});

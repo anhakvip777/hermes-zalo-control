@@ -167,6 +167,23 @@ export class ZaloGatewayService extends EventEmitter {
     return this.loginInProgress;
   }
 
+  /** Cancel a pending QR login (no-op if not in progress or already connected). */
+  cancelLogin(): { cancelled: boolean; message: string } {
+    if (!this.loginInProgress) {
+      return { cancelled: false, message: "No login in progress" };
+    }
+    // Mark as no longer in progress — the background promise will resolve/reject on its own
+    this.loginInProgress = false;
+    this.qrUpdatedAt = null;
+    // Remove stale QR file
+    try {
+      const qrPath = resolve(this.sessionDir, "qr-current.png");
+      if (existsSync(qrPath)) unlinkSync(qrPath);
+    } catch { /* non-critical */ }
+    this.setStatus({ connectionStatus: "disconnected", lastError: null });
+    return { cancelled: true, message: "Login cancelled" };
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   // Login — QR flow (non-blocking)
   // ═══════════════════════════════════════════════════════════════════

@@ -13,6 +13,7 @@ import {
   type TestDMResult,
   type RecentEventsResponse,
 } from "../../lib/api-client";
+import { ZaloLoginCard } from "../../components/zalo-login-card";
 import { formatVnTime } from "../../components/ui/TimeText";
 
 type ActionStatus =
@@ -191,6 +192,11 @@ export default function ZaloOpsPage() {
             <button onClick={doCheckQR} className="ml-3 underline text-yellow-300 text-xs hover:text-yellow-100">Kiểm tra QR →</button>
           </div>
         </div>
+      )}
+
+      {/* Zalo Login Card — shown when disconnected */}
+      {!status?.connected && (
+        <ZaloLoginCard onConnected={fetchAll} />
       )}
 
       {/* Connection */}

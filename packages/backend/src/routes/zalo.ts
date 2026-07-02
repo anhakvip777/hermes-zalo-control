@@ -73,13 +73,21 @@ export async function zaloRoutes(app: FastifyInstance) {
   // GET /api/zalo/login/status
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/status", async () => {
-    const status = getZaloGateway().getStatus();
-    const qrExists = existsSync(resolve(config.zalo.sessionDir, "..", "qr.png")) ||
-                     existsSync(resolve(process.cwd(), "qr.png"));
-    return {
-      ...status,
-      qrAvailable: qrExists,
-    };
+    // gateway.getStatus() already checks qr-current.png path correctly
+    return getZaloGateway().getStatus();
+  });
+
+  // ═════════════════════════════════════════════════════════════════
+  // POST /api/zalo/login/cancel
+  // ═════════════════════════════════════════════════════════════════
+  app.post("/zalo/login/cancel", async (request, reply) => {
+    // Admin-only
+    const auth = request.headers.authorization;
+    if (!auth || !auth.startsWith("Basic ")) {
+      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
+    }
+    const result = getZaloGateway().cancelLogin();
+    return { data: result };
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -109,18 +117,29 @@ export async function zaloRoutes(app: FastifyInstance) {
   // GET /api/zalo/login/qr
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/qr", async (request, reply) => {
-    const qrPath1 = resolve(config.zalo.sessionDir, "..", "qr.png");
-    const qrPath2 = resolve(process.cwd(), "qr.png");
-    const qrPath = existsSync(qrPath1) ? qrPath1 : existsSync(qrPath2) ? qrPath2 : null;
+    // Admin-only: QR must not be public
+    const auth = request.headers.authorization;
+    if (!auth || !auth.startsWith("Basic ")) {
+      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
+    }
 
-    if (!qrPath) {
+    // Gateway stores QR at sessionDir/qr-current.png
+    const qrPath = resolve(config.zalo.sessionDir, "qr-current.png");
+
+    if (!existsSync(qrPath)) {
       return reply.status(404).send({ error: { code: "QR_NOT_FOUND", message: "QR code not yet generated or expired. Call POST /api/zalo/login/start first." } });
     }
 
+    // Check file is recent enough (not expired — gateway sets qrUpdatedAt=null on expire)
+    const status = getZaloGateway().getStatus();
+    if (!status.qrAvailable) {
+      return reply.status(404).send({ error: { code: "QR_EXPIRED", message: "QR code has expired. Call POST /api/zalo/login/start to generate a new one." } });
+    }
+
     const data = readFileSync(qrPath);
-    reply.header("Content-Type", "image/png");
-    reply.header("Content-Disposition", "inline; filename=\"zalo-qr.png\"");
-    return reply.send(data);
+    // Return as base64 data URL so frontend can display inline without extra auth headers
+    const b64 = data.toString("base64");
+    return { qrDataURL: `data:image/png;base64,${b64}`, updatedAt: status.qrUpdatedAt };
   });
 
   // ═════════════════════════════════════════════════════════════════
