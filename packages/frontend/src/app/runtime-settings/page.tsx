@@ -39,13 +39,40 @@ interface AuditEntry {
 
 // ── Category labels ────────────────────────────────────────────────────
 
-const CATEGORY_LABELS: Record<string, { title: string; icon: string; color: string }> = {
-  autoReply: { title: "Auto Reply", icon: "💬", color: "border-blue-500 bg-blue-50" },
-  messageBatching: { title: "Message Batching", icon: "📦", color: "border-green-500 bg-green-50" },
-  document: { title: "Document Understanding", icon: "📄", color: "border-purple-500 bg-purple-50" },
-  vision: { title: "Vision / OCR", icon: "👁️", color: "border-orange-500 bg-orange-50" },
-  ruleEngine: { title: "Rule Engine", icon: "⚙️", color: "border-gray-500 bg-gray-50" },
+const CATEGORY_LABELS: Record<
+  string,
+  { title: string; icon: string; accent: string }
+> = {
+  autoReply: {
+    title: "Auto Reply",
+    icon: "💬",
+    accent: "border-l-blue-500",
+  },
+  messageBatching: {
+    title: "Message Batching",
+    icon: "📦",
+    accent: "border-l-green-500",
+  },
+  document: {
+    title: "Document Understanding",
+    icon: "📄",
+    accent: "border-l-purple-500",
+  },
+  vision: {
+    title: "Vision / OCR",
+    icon: "👁️",
+    accent: "border-l-orange-500",
+  },
+  ruleEngine: {
+    title: "Rule Engine",
+    icon: "⚙️",
+    accent: "border-l-slate-500",
+  },
 };
+
+// ── Danger zone keys ───────────────────────────────────────────────────
+
+const DANGER_KEYS = new Set(["autoReply.dryRun", "autoReply.enabled", "autoReply.liveTest"]);
 
 // ── Component ──────────────────────────────────────────────────────────
 
@@ -107,10 +134,15 @@ export default function RuntimeSettingsPage() {
       toast("Vui lòng nhập lý do thay đổi", "error");
       return;
     }
+    if (DANGER_KEYS.has(key)) {
+      const ok = window.confirm(
+        `⚠️ DANGER ZONE\n\nThay đổi "${key}" ảnh hưởng trực tiếp đến live/dryRun.\nBạn chắc chắn không?`,
+      );
+      if (!ok) return;
+    }
     setSaving(true);
     try {
       let value: unknown = editValue;
-      // Coerce types
       const meta = settings?.meta.find((m) => m.key === key);
       if (meta?.type === "number") {
         value = parseFloat(editValue);
@@ -123,13 +155,16 @@ export default function RuntimeSettingsPage() {
         value = editValue.toLowerCase() === "true" || editValue === "1";
       }
 
-      const res = await apiFetch<{ success: boolean; error?: string; errorCode?: string; oldValue?: string; newValue?: string }>(
-        "/api/system/runtime-settings",
-        {
-          method: "PATCH",
-          body: JSON.stringify({ key, value, reason }),
-        },
-      );
+      const res = await apiFetch<{
+        success: boolean;
+        error?: string;
+        errorCode?: string;
+        oldValue?: string;
+        newValue?: string;
+      }>("/api/system/runtime-settings", {
+        method: "PATCH",
+        body: JSON.stringify({ key, value, reason }),
+      });
 
       if (res.success) {
         toast(`✅ ${key} đã được cập nhật`, "success");
@@ -148,62 +183,112 @@ export default function RuntimeSettingsPage() {
     }
   };
 
-  const formatValue = (entry: SettingEntry): string => {
-    if (entry.value.startsWith("[") && entry.value.endsWith("]")) {
-      return entry.value; // Already JSON array string
-    }
-    return entry.value;
-  };
+  // ── Loading / error states ─────────────────────────────────────────
 
-  if (loading) {
+  if (loading && !settings) {
     return (
-      <div className="p-8">
-        <h1 className="text-2xl font-bold mb-4">⚙️ Runtime Settings</h1>
-        <p className="text-gray-500">Đang tải...</p>
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-slate-400 text-sm">Đang tải runtime settings...</p>
       </div>
     );
   }
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">⚙️ Runtime Settings</h1>
-        <button
-          onClick={() => { setShowAudit(!showAudit); if (!showAudit) fetchAudit(); }}
-          className="text-sm px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 transition-colors"
-        >
-          {showAudit ? "Ẩn Audit" : "📋 Xem Audit Log"}
-        </button>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-100">⚙️ Runtime Settings</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Thay đổi có hiệu lực ngay — không cần restart. Auto-refresh 30s.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => {
+              setShowAudit(!showAudit);
+              if (!showAudit) fetchAudit();
+            }}
+            className="px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg border border-slate-600 transition-colors"
+          >
+            {showAudit ? "✕ Ẩn audit" : "📋 Audit Log"}
+          </button>
+          <button
+            onClick={fetchData}
+            className="px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg border border-slate-600 transition-colors"
+          >
+            🔄 Làm mới
+          </button>
+        </div>
       </div>
 
-      <p className="text-sm text-gray-500 mb-6">
-        Chỉnh sửa các thông số vận hành. Thay đổi có hiệu lực ngay lập tức, không cần restart.
-        Các giá trị <code className="bg-gray-100 px-1 rounded">gạch chân</code> là từ file .env (mặc định).
-      </p>
+      {/* Danger zone banner */}
+      <div className="rounded-xl border border-red-800/60 bg-red-900/20 px-5 py-4 flex items-start gap-3">
+        <span className="text-2xl shrink-0">🚨</span>
+        <div>
+          <p className="text-sm font-semibold text-red-300">Danger Zone</p>
+          <p className="text-xs text-red-400/80 mt-0.5">
+            Các trường <code className="bg-red-900/40 px-1 rounded">dryRun</code>,{" "}
+            <code className="bg-red-900/40 px-1 rounded">enabled</code>,{" "}
+            <code className="bg-red-900/40 px-1 rounded">liveTest</code> ảnh hưởng trực tiếp tới
+            việc gửi tin thật. Luôn giữ dryRun=true nếu chưa được authorize live.
+          </p>
+        </div>
+      </div>
 
-      {/* Settings Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+      {/* Settings cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {Object.keys(grouped).length === 0 && !loading && (
+          <div className="col-span-2 rounded-xl border border-slate-700 bg-slate-800/60 p-10 text-center text-slate-500">
+            Không tải được settings — kiểm tra kết nối backend.
+          </div>
+        )}
         {Object.entries(grouped).map(([category, entries]) => {
-          const cat = CATEGORY_LABELS[category] || { title: category, icon: "📌", color: "border-gray-300" };
+          const cat = CATEGORY_LABELS[category] || {
+            title: category,
+            icon: "📌",
+            accent: "border-l-slate-500",
+          };
           return (
-            <div key={category} className={`border-2 rounded-lg p-4 ${cat.color} bg-white shadow-sm`}>
-              <h2 className="font-bold text-lg mb-3">
+            <div
+              key={category}
+              className={`rounded-lg border border-slate-700 bg-slate-800/60 p-5 border-l-2 ${cat.accent}`}
+            >
+              <h2 className="font-bold text-slate-200 mb-4">
                 {cat.icon} {cat.title}
               </h2>
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {entries.map((entry) => {
                   const isEditing = editingKey === entry.key;
                   const meta = settings?.meta.find((m) => m.key === entry.key);
+                  const isDanger = DANGER_KEYS.has(entry.key);
+
                   return (
-                    <div key={entry.key} className="border-t pt-2 first:border-t-0 first:pt-0">
-                      <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-gray-700">
-                          {entry.label}
-                        </label>
+                    <div
+                      key={entry.key}
+                      className={`border-t border-slate-700/60 pt-3 first:border-t-0 first:pt-0 ${
+                        isDanger ? "rounded-lg border border-red-800/40 bg-red-900/10 p-3 mt-2" : ""
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <label className="text-sm font-medium text-slate-300 flex items-center gap-1.5">
+                            {isDanger && (
+                              <span className="text-[10px] font-bold bg-red-800/60 text-red-300 px-1.5 py-0.5 rounded border border-red-700/60 uppercase tracking-wide">
+                                DANGER
+                              </span>
+                            )}
+                            {entry.label}
+                          </label>
+                          <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                            {entry.key}
+                          </p>
+                        </div>
                         {!isEditing && (
                           <button
                             onClick={() => startEdit(entry)}
-                            className="text-xs px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 transition-colors"
+                            className="shrink-0 text-xs px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600 transition-colors"
                           >
                             ✏️ Sửa
                           </button>
@@ -211,23 +296,22 @@ export default function RuntimeSettingsPage() {
                       </div>
 
                       {isEditing ? (
-                        <div className="mt-2 space-y-2">
-                          {/* Value input based on type */}
+                        <div className="mt-3 space-y-2">
                           {meta?.type === "boolean" ? (
                             <select
                               value={editValue}
                               onChange={(e) => setEditValue(e.target.value)}
-                              className="w-full border rounded px-2 py-1 text-sm"
+                              className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             >
-                              <option value="true">true (Bật)</option>
-                              <option value="false">false (Tắt)</option>
+                              <option value="true">true — Bật</option>
+                              <option value="false">false — Tắt</option>
                             </select>
                           ) : meta?.type === "string[]" ? (
                             <input
                               type="text"
                               value={editValue}
                               onChange={(e) => setEditValue(e.target.value)}
-                              className="w-full border rounded px-2 py-1 text-sm font-mono"
+                              className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                               placeholder='e.g. ["user"]'
                             />
                           ) : (
@@ -235,7 +319,7 @@ export default function RuntimeSettingsPage() {
                               type={meta?.type === "number" ? "number" : "text"}
                               value={editValue}
                               onChange={(e) => setEditValue(e.target.value)}
-                              className="w-full border rounded px-2 py-1 text-sm font-mono"
+                              className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
                           )}
                           <input
@@ -243,32 +327,34 @@ export default function RuntimeSettingsPage() {
                             value={reason}
                             onChange={(e) => setReason(e.target.value)}
                             placeholder="Lý do thay đổi (bắt buộc)"
-                            className="w-full border rounded px-2 py-1 text-sm"
+                            className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                           <div className="flex gap-2">
                             <button
                               onClick={() => saveSetting(entry.key)}
                               disabled={saving || !reason.trim()}
-                              className="text-xs px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                              className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 transition-colors font-medium"
                             >
                               {saving ? "Đang lưu..." : "💾 Lưu"}
                             </button>
                             <button
                               onClick={cancelEdit}
-                              className="text-xs px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 transition-colors"
+                              className="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600 transition-colors"
                             >
                               Hủy
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="text-sm mt-1">
-                          <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs font-mono break-all">
-                            {formatValue(entry)}
+                        <div className="mt-2">
+                          <code className="bg-slate-900 border border-slate-700 px-2 py-1 rounded text-xs font-mono text-slate-200 break-all">
+                            {entry.value}
                           </code>
-                          <div className="text-xs text-gray-400 mt-0.5">
-                            {entry.updatedBy !== "default" ? `bởi ${entry.updatedBy}` : "mặc định"}
-                          </div>
+                          <p className="text-[11px] text-slate-600 mt-1">
+                            {entry.updatedBy !== "default"
+                              ? `bởi ${entry.updatedBy}`
+                              : "mặc định (.env)"}
+                          </p>
                         </div>
                       )}
                     </div>
@@ -280,38 +366,60 @@ export default function RuntimeSettingsPage() {
         })}
       </div>
 
-      {/* Audit Log */}
+      {/* Audit log */}
       {showAudit && (
-        <div className="border rounded-lg p-4 bg-white shadow-sm">
-          <h2 className="font-bold text-lg mb-3">📋 Audit Log</h2>
+        <div className="rounded-xl border border-slate-700 bg-slate-800/60 overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-700 flex justify-between items-center">
+            <h2 className="text-sm font-semibold text-slate-300">
+              📋 Audit Log
+              <span className="ml-2 text-slate-500 font-normal">
+                — {audit.length} entries
+              </span>
+            </h2>
+            <button
+              onClick={() => setShowAudit(false)}
+              className="text-slate-500 hover:text-slate-300 transition-colors text-lg leading-none"
+            >
+              ✕
+            </button>
+          </div>
           {audit.length === 0 ? (
-            <p className="text-sm text-gray-400">Chưa có thay đổi nào.</p>
+            <div className="p-10 text-center text-slate-500">Chưa có thay đổi nào.</div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-left text-gray-500">
-                    <th className="py-1 pr-3">Thời gian</th>
-                    <th className="py-1 pr-3">Key</th>
-                    <th className="py-1 pr-3">Cũ</th>
-                    <th className="py-1 pr-3">Mới</th>
-                    <th className="py-1 pr-3">Lý do</th>
-                    <th className="py-1">Người đổi</th>
+              <table className="w-full text-xs">
+                <thead className="border-b border-slate-700">
+                  <tr>
+                    {["Thời gian", "Key", "Cũ", "Mới", "Lý do", "Người đổi"].map((h) => (
+                      <th
+                        key={h}
+                        className="text-left px-4 py-2 font-medium text-slate-500 uppercase tracking-wide text-[11px]"
+                      >
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
                   {audit.map((a) => (
-                    <tr key={a.id} className="border-b last:border-b-0">
-                      <td className="py-1 pr-3 text-xs text-gray-400 whitespace-nowrap">
+                    <tr
+                      key={a.id}
+                      className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors"
+                    >
+                      <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">
                         {new Date(a.createdAt).toLocaleString("vi-VN")}
                       </td>
-                      <td className="py-1 pr-3 font-mono text-xs">{a.key}</td>
-                      <td className="py-1 pr-3 font-mono text-xs text-gray-400 max-w-[120px] truncate">
+                      <td className="px-4 py-2.5 font-mono text-slate-300">{a.key}</td>
+                      <td className="px-4 py-2.5 font-mono text-slate-500 max-w-[100px] truncate">
                         {a.oldValue ?? "—"}
                       </td>
-                      <td className="py-1 pr-3 font-mono text-xs max-w-[120px] truncate">{a.newValue}</td>
-                      <td className="py-1 pr-3 text-xs max-w-[150px] truncate">{a.reason || "—"}</td>
-                      <td className="py-1 text-xs">{a.changedBy}</td>
+                      <td className="px-4 py-2.5 font-mono text-slate-200 max-w-[100px] truncate">
+                        {a.newValue}
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-400 max-w-[140px] truncate">
+                        {a.reason || "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-400">{a.changedBy}</td>
                     </tr>
                   ))}
                 </tbody>
