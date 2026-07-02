@@ -1,6 +1,16 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import {
+  Card,
+  PageHeader,
+  ErrorBanner,
+  DarkButton,
+  DarkInput,
+  DarkSelect,
+  DarkTextarea,
+  StatusPill,
+} from "../../components/ui/dark";
 
 // ── Types ──────────────────────────────────────────────────────────────
 interface ThreadOption {
@@ -25,26 +35,19 @@ function getHeaders(contentType = "application/json"): Record<string, string> {
   const h: Record<string, string> = {
     Authorization: "Basic " + btoa("admin:" + ADMIN_PASS),
   };
-  if (contentType) {
-    h["Content-Type"] = contentType;
-  }
+  if (contentType) h["Content-Type"] = contentType;
   return h;
 }
 
 // ── Main Page ──────────────────────────────────────────────────────────
 export default function MediaSendPage() {
-  // Thread list
   const [threads, setThreads] = useState<ThreadOption[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
-
-  // Form state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [threadIdInput, setThreadIdInput] = useState("");
   const [threadType, setThreadType] = useState<"user" | "group">("user");
   const [caption, setCaption] = useState("");
   const [mediaType, setMediaType] = useState<"image" | "file">("image");
-
-  // Sending state
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendResult | null>(null);
   const [error, setError] = useState("");
@@ -52,20 +55,16 @@ export default function MediaSendPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Fetch threads for dropdown ──────────────────────────────────────
   useEffect(() => {
     async function loadThreads() {
       try {
-        const res = await fetch(`${API_BASE}/api/threads`, {
-          headers: getHeaders(),
-        });
+        const res = await fetch(`${API_BASE}/api/threads`, { headers: getHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const list = Array.isArray(data) ? data : data.threads ?? [];
         setThreads(list);
-      } catch (err: any) {
-        console.warn("Không thể tải danh sách thread:", err.message);
-        // Non-fatal: user can still type threadId manually
+      } catch (err: unknown) {
+        console.warn("Không thể tải danh sách thread:", err instanceof Error ? err.message : err);
       } finally {
         setLoadingThreads(false);
       }
@@ -73,192 +72,126 @@ export default function MediaSendPage() {
     loadThreads();
   }, []);
 
-  // ── Handle file upload to /api/upload ──────────────────────────────
   const handleUpload = async () => {
-    if (!selectedFile) {
-      setError("Vui lòng chọn một tệp trước");
-      return;
-    }
+    if (!selectedFile) { setError("Vui lòng chọn một tệp trước"); return; }
     setError("");
     const formData = new FormData();
     formData.append("file", selectedFile);
-
     try {
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: "POST",
         headers: getHeaders(""),
         body: formData,
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
+      if (!res.ok) { const text = await res.text(); throw new Error(text || `HTTP ${res.status}`); }
       const data = await res.json();
       const url = data.url || data.filePath || data.path || "";
-      if (url) {
-        setUploadedUrl(url);
-        setResult({
-          sentMessageId: undefined,
-          error: undefined,
-        });
-      } else {
-        // No upload endpoint? Fall back to local blob URL
-        setUploadedUrl(URL.createObjectURL(selectedFile));
-      }
-    } catch (err: any) {
-      // If upload endpoint doesn't exist, use local blob as fallback
-      console.warn("Upload endpoint failed, using local file:", err.message);
+      if (url) { setUploadedUrl(url); setResult({ sentMessageId: undefined, error: undefined }); }
+      else { setUploadedUrl(URL.createObjectURL(selectedFile)); }
+    } catch (err: unknown) {
+      console.warn("Upload endpoint failed, using local file:", err instanceof Error ? err.message : err);
       setUploadedUrl(URL.createObjectURL(selectedFile));
     }
   };
 
-  // ── Handle send via /api/zalo/send-media ──────────────────────────
   const handleSend = async () => {
-    setError("");
-    setResult(null);
-
+    setError(""); setResult(null);
     const tid = threadIdInput.trim();
-    if (!tid) {
-      setError("Vui lòng chọn hoặc nhập Thread ID");
-      return;
-    }
-    if (!uploadedUrl && !selectedFile) {
-      setError("Vui lòng chọn và tải lên một tệp");
-      return;
-    }
-
+    if (!tid) { setError("Vui lòng chọn hoặc nhập Thread ID"); return; }
+    if (!uploadedUrl && !selectedFile) { setError("Vui lòng chọn và tải lên một tệp"); return; }
     setSending(true);
     try {
-      const body: Record<string, any> = {
-        threadId: tid,
-        threadType,
-        mediaType,
-        mediaUrl: uploadedUrl,
-        fileName: selectedFile?.name || "unknown",
+      const body: Record<string, unknown> = {
+        threadId: tid, threadType, mediaType,
+        mediaUrl: uploadedUrl, fileName: selectedFile?.name || "unknown",
         fileSize: selectedFile?.size || 0,
       };
-      if (caption.trim()) {
-        body.caption = caption.trim();
-      }
-
+      if (caption.trim()) body.caption = caption.trim();
       const res = await fetch(`${API_BASE}/api/zalo/send-media`, {
-        method: "POST",
-        headers: getHeaders(),
-        body: JSON.stringify(body),
+        method: "POST", headers: getHeaders(), body: JSON.stringify(body),
       });
-
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || data.error || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
       setResult({ sentMessageId: data.sentMessageId || data.messageId || "OK" });
-    } catch (err: any) {
-      setError("Lỗi gửi media: " + err.message);
-      setResult({ error: err.message });
-    } finally {
-      setSending(false);
-    }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError("Lỗi gửi media: " + msg);
+      setResult({ error: msg });
+    } finally { setSending(false); }
   };
 
-  // ── Derived ────────────────────────────────────────────────────────
-  const selectedThreadMeta = threads.find(
-    (t) => t.threadId === threadIdInput
-  );
+  const selectedThreadMeta = threads.find(t => t.threadId === threadIdInput);
 
   return (
     <div className="max-w-2xl">
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-gray-900">
-          📤 Gửi Media
-        </h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Tải lên và gửi ảnh hoặc tệp PDF đến một thread Zalo
-        </p>
-      </div>
+      <PageHeader
+        title="📤 Gửi Media"
+        subtitle="Tải lên và gửi ảnh hoặc tệp PDF đến một thread Zalo"
+      />
 
-      {/* Result Banner */}
       {result?.sentMessageId && (
-        <div className="mb-6 rounded-lg bg-green-50 px-4 py-4 text-sm text-green-800">
+        <div className="mb-4 rounded-xl border border-green-700/60 bg-green-900/20 px-4 py-3 text-sm text-green-300">
           ✅ Đã gửi thành công! <strong>Message ID:</strong>{" "}
-          <code className="rounded bg-green-100 px-1.5 py-0.5 font-mono text-xs">
+          <code className="rounded bg-green-900/40 px-1.5 py-0.5 font-mono text-xs text-green-400">
             {result.sentMessageId}
           </code>
         </div>
       )}
-      {error && (
-        <div className="mb-6 rounded-lg bg-red-50 px-4 py-4 text-sm text-red-800">
-          ❌ {error}
-        </div>
-      )}
+      {error && <ErrorBanner message={error} />}
 
-      {/* Form Card */}
-      <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm space-y-5">
+      <Card className="space-y-5">
         {/* 1. File Upload */}
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">
-            📎 Chọn tệp (ảnh hoặc PDF)
-          </label>
+          <label className="block text-sm font-semibold text-slate-200 mb-2">📎 Chọn tệp (ảnh hoặc PDF)</label>
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*,application/pdf"
             onChange={(e) => {
               const file = e.target.files?.[0] || null;
-              setSelectedFile(file);
-              setUploadedUrl(null);
-              setResult(null);
+              setSelectedFile(file); setUploadedUrl(null); setResult(null);
             }}
-            className="block w-full text-sm text-gray-600 file:mr-4 file:rounded file:border-0
-                       file:bg-blue-50 file:px-4 file:py-2 file:text-sm file:font-semibold
-                       file:text-blue-700 hover:file:bg-blue-100
+            className="block w-full text-sm text-slate-400
+                       file:mr-4 file:rounded-lg file:border-0 file:cursor-pointer
+                       file:bg-slate-700 file:px-4 file:py-2 file:text-sm file:font-medium
+                       file:text-slate-200 hover:file:bg-slate-600
                        cursor-pointer"
           />
           {selectedFile && (
-            <p className="mt-2 text-xs text-gray-500">
-              Đã chọn: <strong>{selectedFile.name}</strong> (
-              {(selectedFile.size / 1024).toFixed(1)} KB)
+            <p className="mt-2 text-xs text-slate-500">
+              Đã chọn: <strong className="text-slate-300">{selectedFile.name}</strong>{" "}
+              ({(selectedFile.size / 1024).toFixed(1)} KB)
             </p>
           )}
         </div>
 
         {/* Upload button */}
-        <div>
-          <button
-            onClick={handleUpload}
-            disabled={!selectedFile || !!uploadedUrl}
-            className="rounded bg-indigo-600 px-4 py-2 text-sm font-semibold text-white
-                       hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed
-                       transition-colors"
-          >
+        <div className="flex items-center gap-3">
+          <DarkButton variant="primary" size="md" onClick={handleUpload} disabled={!selectedFile || !!uploadedUrl}>
             {uploadedUrl ? "✅ Đã tải lên" : "⬆️ Tải lên"}
-          </button>
+          </DarkButton>
           {selectedFile && !uploadedUrl && (
-            <span className="ml-3 text-xs text-gray-400">
-              Nhấn &quot;Tải lên&quot; trước khi gửi
-            </span>
+            <span className="text-xs text-slate-500">Nhấn &quot;Tải lên&quot; trước khi gửi</span>
           )}
+          {uploadedUrl && <StatusPill variant="ready">Sẵn sàng</StatusPill>}
         </div>
 
-        <hr className="border-gray-100" />
+        <div className="border-t border-slate-700/60" />
 
         {/* 2. Thread selection */}
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">
-            🧵 Chọn Thread
-          </label>
+          <label className="block text-sm font-semibold text-slate-200 mb-2">🧵 Chọn Thread</label>
           {loadingThreads ? (
-            <p className="text-sm text-gray-400">Đang tải danh sách...</p>
+            <p className="text-sm text-slate-500">Đang tải danh sách...</p>
           ) : (
-            <select
+            <DarkSelect
               value={threadIdInput}
               onChange={(e) => {
                 const val = e.target.value;
                 setThreadIdInput(val);
-                const meta = threads.find((t) => t.threadId === val);
+                const meta = threads.find(t => t.threadId === val);
                 if (meta) setThreadType(meta.type);
               }}
-              className="block w-full rounded border border-gray-300 bg-white px-3 py-2.5
-                         text-sm shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             >
               <option value="">-- Chọn một thread --</option>
               {threads.map((t) => (
@@ -267,21 +200,17 @@ export default function MediaSendPage() {
                   {t.name ? ` (${t.name})` : ""}
                 </option>
               ))}
-            </select>
+            </DarkSelect>
           )}
-          <p className="mt-2 text-xs text-gray-400">
-            Hoặc nhập thủ công phía dưới
-          </p>
-          <input
-            type="text"
+          <p className="mt-2 text-xs text-slate-600">Hoặc nhập thủ công:</p>
+          <DarkInput
+            className="mt-1 font-mono"
             value={threadIdInput}
             onChange={(e) => setThreadIdInput(e.target.value)}
             placeholder="Nhập Thread ID thủ công..."
-            className="mt-2 block w-full rounded border border-gray-300 px-3 py-2.5
-                       text-sm shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
           />
           {selectedThreadMeta && (
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-slate-500">
               Loại: {selectedThreadMeta.type === "group" ? "Nhóm" : "Cá nhân"}
               {selectedThreadMeta.name ? ` — ${selectedThreadMeta.name}` : ""}
             </p>
@@ -290,127 +219,86 @@ export default function MediaSendPage() {
 
         {/* 3. Thread Type */}
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">
-            👥 Loại Thread
-          </label>
+          <label className="block text-sm font-semibold text-slate-200 mb-2">👥 Loại Thread</label>
           <div className="flex gap-3">
-            <label className="flex items-center gap-2 rounded border border-gray-300 px-4 py-2.5
-                            text-sm cursor-pointer hover:bg-gray-50 transition-colors
-                            has-[:checked]:border-blue-500 has-[:checked]:bg-blue-50 has-[:checked]:text-blue-700">
-              <input
-                type="radio"
-                name="threadType"
-                value="user"
-                checked={threadType === "user"}
-                onChange={() => setThreadType("user")}
-                className="text-blue-600 focus:ring-blue-500"
-              />
-              👤 Cá nhân
-            </label>
-            <label className="flex items-center gap-2 rounded border border-gray-300 px-4 py-2.5
-                            text-sm cursor-pointer hover:bg-gray-50 transition-colors
-                            has-[:checked]:border-blue-500 has-[:checked]:bg-blue-50 has-[:checked]:text-blue-700">
-              <input
-                type="radio"
-                name="threadType"
-                value="group"
-                checked={threadType === "group"}
-                onChange={() => setThreadType("group")}
-                className="text-blue-600 focus:ring-blue-500"
-              />
-              👥 Nhóm
-            </label>
+            {(["user", "group"] as const).map((val) => (
+              <label
+                key={val}
+                className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm cursor-pointer transition-colors ${
+                  threadType === val
+                    ? "border-blue-500 bg-blue-900/30 text-blue-300"
+                    : "border-slate-700 bg-slate-800/60 text-slate-400 hover:border-slate-600"
+                }`}
+              >
+                <input
+                  type="radio" name="threadType" value={val}
+                  checked={threadType === val}
+                  onChange={() => setThreadType(val)}
+                  className="accent-blue-500"
+                />
+                {val === "user" ? "👤 Cá nhân" : "👥 Nhóm"}
+              </label>
+            ))}
           </div>
         </div>
 
         {/* 4. Media Type */}
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">
-            🖼️ Loại Media
-          </label>
+          <label className="block text-sm font-semibold text-slate-200 mb-2">🖼️ Loại Media</label>
           <div className="flex gap-3">
-            <label className="flex items-center gap-2 rounded border border-gray-300 px-4 py-2.5
-                            text-sm cursor-pointer hover:bg-gray-50 transition-colors
-                            has-[:checked]:border-blue-500 has-[:checked]:bg-blue-50 has-[:checked]:text-blue-700">
-              <input
-                type="radio"
-                name="mediaType"
-                value="image"
-                checked={mediaType === "image"}
-                onChange={() => setMediaType("image")}
-                className="text-blue-600 focus:ring-blue-500"
-              />
-              🖼️ Ảnh
-            </label>
-            <label className="flex items-center gap-2 rounded border border-gray-300 px-4 py-2.5
-                            text-sm cursor-pointer hover:bg-gray-50 transition-colors
-                            has-[:checked]:border-blue-500 has-[:checked]:bg-blue-50 has-[:checked]:text-blue-700">
-              <input
-                type="radio"
-                name="mediaType"
-                value="file"
-                checked={mediaType === "file"}
-                onChange={() => setMediaType("file")}
-                className="text-blue-600 focus:ring-blue-500"
-              />
-              📄 Tệp (PDF)
-            </label>
+            {(["image", "file"] as const).map((val) => (
+              <label
+                key={val}
+                className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm cursor-pointer transition-colors ${
+                  mediaType === val
+                    ? "border-blue-500 bg-blue-900/30 text-blue-300"
+                    : "border-slate-700 bg-slate-800/60 text-slate-400 hover:border-slate-600"
+                }`}
+              >
+                <input
+                  type="radio" name="mediaType" value={val}
+                  checked={mediaType === val}
+                  onChange={() => setMediaType(val)}
+                  className="accent-blue-500"
+                />
+                {val === "image" ? "🖼️ Ảnh" : "📄 Tệp (PDF)"}
+              </label>
+            ))}
           </div>
         </div>
 
         {/* 5. Caption */}
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">
-            💬 Chú thích <span className="font-normal text-gray-400">(tuỳ chọn)</span>
+          <label className="block text-sm font-semibold text-slate-200 mb-2">
+            💬 Chú thích <span className="font-normal text-slate-500">(tuỳ chọn)</span>
           </label>
-          <textarea
+          <DarkTextarea
+            rows={3}
             value={caption}
             onChange={(e) => setCaption(e.target.value)}
-            rows={3}
             placeholder="Nhập chú thích cho media..."
-            className="block w-full rounded border border-gray-300 px-3 py-2.5
-                       text-sm shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500
-                       resize-y"
           />
         </div>
 
         {/* 6. Send Button */}
-        <button
+        <DarkButton
+          variant="success"
+          size="lg"
+          className="w-full justify-center text-base font-semibold"
           onClick={handleSend}
           disabled={sending || !threadIdInput.trim()}
-          className="w-full rounded bg-green-600 px-6 py-3 text-base font-semibold text-white
-                     hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed
-                     transition-colors shadow-sm"
         >
           {sending ? (
             <span className="flex items-center justify-center gap-2">
-              <svg
-                className="h-5 w-5 animate-spin"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                />
+              <svg className="h-5 w-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
               Đang gửi...
             </span>
-          ) : (
-            "📨 Gửi Media"
-          )}
-        </button>
-      </div>
+          ) : "📨 Gửi Media"}
+        </DarkButton>
+      </Card>
     </div>
   );
 }

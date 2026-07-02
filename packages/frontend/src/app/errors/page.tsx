@@ -7,6 +7,16 @@ import {
   type ErrorSummaryResponse,
 } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
+import {
+  Card,
+  PageHeader,
+  LoadingSpinner,
+  DarkButton,
+  StatCard,
+  StatusPill,
+  SectionLabel,
+  SeverityPill,
+} from "../../components/ui/dark";
 
 export default function ErrorsPage() {
   const [data, setData] = useState<ErrorSummaryResponse | null>(null);
@@ -38,110 +48,105 @@ export default function ErrorsPage() {
     finally { setAlerting(false); }
   };
 
-  if (loading && !data) {
-    return <div className="flex items-center justify-center h-64"><p className="text-slate-400">Đang tải...</p></div>;
-  }
+  if (loading && !data) return <LoadingSpinner />;
 
-  const statusColor =
-    data?.status === "error" ? "bg-red-50 border-red-300 text-red-800" :
-    data?.status === "warn" ? "bg-yellow-50 border-yellow-300 text-yellow-800" : "bg-green-50 border-green-300 text-green-800";
+  const statusVariant =
+    data?.status === "error" ? "failed" : data?.status === "warn" ? "warn" : "active";
+
+  const statusBanner = data?.status === "error"
+    ? "border-red-700/60 bg-red-900/20"
+    : data?.status === "warn"
+      ? "border-yellow-700/60 bg-yellow-900/20"
+      : "border-green-700/60 bg-green-900/20";
 
   const statusEmoji = data?.status === "error" ? "🚨" : data?.status === "warn" ? "⚠️" : "✅";
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">🚨 Error Dashboard</h1>
-          <p className="text-sm text-slate-500 mt-1">Tổng hợp lỗi hệ thống trong {data?.windowHours ?? 24}h qua</p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={fetchData} className="px-4 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg">🔄 Làm mới</button>
-          <button onClick={handleTestAlert} disabled={alerting}
-            className="px-4 py-2 text-sm bg-orange-100 hover:bg-orange-200 border border-orange-300 rounded-lg disabled:opacity-50">
-            {alerting ? "..." : "🧪 Test Alert"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="🚨 Error Dashboard"
+        subtitle={`Tổng hợp lỗi hệ thống trong ${data?.windowHours ?? 24}h qua`}
+        onRefresh={fetchData}
+      >
+        <DarkButton variant="warn" size="sm" onClick={handleTestAlert} disabled={alerting}>
+          {alerting ? "..." : "🧪 Test Alert"}
+        </DarkButton>
+      </PageHeader>
 
-      {/* Status */}
-      <div className={`rounded-xl border p-6 shadow-sm ${statusColor}`}>
+      {/* Status banner */}
+      <div className={`rounded-xl border p-6 ${statusBanner}`}>
         <div className="flex items-center gap-4">
           <span className="text-3xl">{statusEmoji}</span>
           <div>
-            <h2 className="text-xl font-bold uppercase">{data?.status ?? "unknown"}</h2>
-            <p className="text-sm opacity-75">Window: {data?.windowHours}h</p>
+            <h2 className="text-xl font-bold uppercase text-slate-100">{data?.status ?? "unknown"}</h2>
+            <p className="text-sm text-slate-400">Window: {data?.windowHours}h</p>
+          </div>
+          <div className="ml-auto">
+            <StatusPill variant={statusVariant as "failed" | "warn" | "active"}>
+              {(data?.status ?? "unknown").toUpperCase()}
+            </StatusPill>
           </div>
         </div>
       </div>
 
       {/* Totals */}
       <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-        <Stat label="Errors" value={data?.totals.errors ?? 0} accent="red" />
-        <Stat label="Warnings" value={data?.totals.warnings ?? 0} accent="yellow" />
-        <Stat label="Failed Tasks" value={data?.totals.failedAgentTasks ?? 0} />
-        <Stat label="Failed Execs" value={data?.totals.failedExecutions ?? 0} />
-        <Stat label="Blocked" value={data?.totals.blockedOutbound ?? 0} />
-        <Stat label="Stale HBs" value={data?.totals.staleHeartbeats ?? 0} />
+        <StatCard label="Errors" value={data?.totals.errors ?? 0} accent={data?.totals.errors ? "red" : undefined} />
+        <StatCard label="Warnings" value={data?.totals.warnings ?? 0} accent={data?.totals.warnings ? "yellow" : undefined} />
+        <StatCard label="Failed Tasks" value={data?.totals.failedAgentTasks ?? 0} />
+        <StatCard label="Failed Execs" value={data?.totals.failedExecutions ?? 0} />
+        <StatCard label="Blocked" value={data?.totals.blockedOutbound ?? 0} />
+        <StatCard label="Stale HBs" value={data?.totals.staleHeartbeats ?? 0} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Error groups */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">📊 Error Groups ({data?.groups?.length ?? 0})</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">📊 Error Groups ({data?.groups?.length ?? 0})</h2>
           {data?.groups?.length ? (
             <div className="space-y-2">
               {data.groups.map((g, i) => (
-                <div key={i} className={`flex items-center justify-between p-3 rounded border text-sm ${
-                  g.severity === "high" ? "border-red-200 bg-red-50" :
-                  g.severity === "medium" ? "border-yellow-200 bg-yellow-50" : "bg-slate-50 border-slate-200"
+                <div key={i} className={`flex items-center justify-between p-3 rounded-lg border text-sm ${
+                  g.severity === "high" ? "border-red-700/50 bg-red-900/20" :
+                  g.severity === "medium" ? "border-yellow-700/50 bg-yellow-900/20" :
+                  "border-slate-700 bg-slate-800/60"
                 }`}>
                   <div className="min-w-0 flex-1">
-                    <div className="font-semibold flex items-center gap-2">
-                      <span>{g.severity === "high" ? "🔴" : g.severity === "medium" ? "🟡" : "🟢"}</span>
-                      <span>{g.source}</span>
+                    <div className="flex items-center gap-2">
+                      <SeverityPill severity={g.severity} />
+                      <span className="text-slate-200 font-medium">{g.source}</span>
                     </div>
                     <div className="text-xs text-slate-500 mt-0.5 truncate">{g.errorCode}</div>
-                    <div className="text-xs text-slate-400">Last: {new Date(g.lastSeenAt).toLocaleString("vi-VN")}</div>
+                    <div className="text-xs text-slate-600">Last: {new Date(g.lastSeenAt).toLocaleString("vi-VN")}</div>
                   </div>
-                  <span className="text-lg font-bold ml-4">{g.count}</span>
+                  <span className="text-lg font-bold text-slate-200 ml-4 shrink-0">{g.count}</span>
                 </div>
               ))}
             </div>
-          ) : <p className="text-sm text-slate-400">Không có lỗi nào. ✅</p>}
-        </div>
+          ) : <p className="text-sm text-green-400">Không có lỗi nào. ✅</p>}
+        </Card>
 
         {/* Recent errors */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">📋 Recent Errors ({data?.recent?.length ?? 0})</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">📋 Recent Errors ({data?.recent?.length ?? 0})</h2>
           {data?.recent?.length ? (
             <div className="space-y-1 max-h-[500px] overflow-y-auto">
               {data.recent.map((r, i) => (
-                <div key={i} className="text-xs p-2 border-b border-slate-100">
+                <div key={i} className="text-xs p-2 border-b border-slate-700/50">
                   <div className="flex items-center gap-2">
-                    <span className={r.severity === "high" ? "text-red-500" : r.severity === "medium" ? "text-yellow-500" : "text-slate-400"}>
+                    <span className={r.severity === "high" ? "text-red-400" : r.severity === "medium" ? "text-yellow-400" : "text-slate-600"}>
                       {r.severity === "high" ? "🔴" : r.severity === "medium" ? "🟡" : "⚪"}
                     </span>
-                    <span className="font-semibold">{r.source}</span>
-                    <span className="text-slate-400 font-mono">{new Date(r.seenAt).toLocaleTimeString("vi-VN")}</span>
+                    <span className="font-semibold text-slate-300">{r.source}</span>
+                    <span className="text-slate-500 font-mono">{new Date(r.seenAt).toLocaleTimeString("vi-VN")}</span>
                   </div>
                   <div className="text-slate-500 mt-0.5 truncate">{r.message}</div>
                 </div>
               ))}
             </div>
-          ) : <p className="text-sm text-slate-400">Không có lỗi gần đây. ✅</p>}
-        </div>
+          ) : <p className="text-sm text-green-400">Không có lỗi gần đây. ✅</p>}
+        </Card>
       </div>
-    </div>
-  );
-}
-
-function Stat({ label, value, accent }: { label: string; value: number; accent?: string }) {
-  const bg = accent === "red" ? "bg-red-50 border-red-200" : accent === "yellow" ? "bg-yellow-50 border-yellow-200" : "bg-slate-50 border-slate-200";
-  return (
-    <div className={`rounded-lg border p-3 text-center ${bg}`}>
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );
 }

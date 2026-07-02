@@ -3,13 +3,22 @@
 import { useEffect, useState } from "react";
 import {
   getConfigCheck,
-  getHeartbeats,
   getHealthDetail,
   getAdminSettings,
   type ConfigCheckResponse,
   type HealthDetailResponse,
 } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
+import {
+  Card,
+  PageHeader,
+  LoadingSpinner,
+  DarkButton,
+  Kv,
+  SeverityPill,
+  CodeBlock,
+  StatusPill,
+} from "../../components/ui/dark";
 
 export default function AdminToolsPage() {
   const [config, setConfig] = useState<ConfigCheckResponse | null>(null);
@@ -25,72 +34,71 @@ export default function AdminToolsPage() {
       getHealthDetail().catch(() => null),
       getAdminSettings().catch(() => null),
     ])
-      .then(([c, h, s]) => {
-        setConfig(c);
-        setHealth(h);
-        setSettings(s);
-      })
+      .then(([c, h, s]) => { setConfig(c); setHealth(h); setSettings(s); })
       .catch(() => toast("Failed to load tools data", "error"))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { fetchAll(); }, []);
 
-  if (loading && !config) {
-    return <div className="flex items-center justify-center h-64"><p className="text-slate-400">Đang tải...</p></div>;
-  }
+  if (loading && !config) return <LoadingSpinner />;
+
+  const statusVariant =
+    config?.status === "CONFIG_OK" ? "ready" :
+    config?.status === "CONFIG_WARN" ? "warn" : "failed";
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">🔧 Admin Tools</h1>
-          <p className="text-sm text-slate-500 mt-1">Công cụ vận hành — kiểm tra, bảo trì, audit</p>
-        </div>
-        <button onClick={fetchAll} className="px-4 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg">🔄 Làm mới</button>
-      </div>
+      <PageHeader
+        title="🔧 Admin Tools"
+        subtitle="Công cụ vận hành — kiểm tra, bảo trì, audit"
+        onRefresh={fetchAll}
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Config check */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">🔍 Config Consistency Check</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">🔍 Config Consistency Check</h2>
           {config && (
             <>
-              <div className={`inline-block px-3 py-1 rounded-full text-xs font-bold mb-3 ${
-                config.status === "CONFIG_OK" ? "bg-green-100 text-green-800" :
-                config.status === "CONFIG_WARN" ? "bg-yellow-100 text-yellow-800" : "bg-red-100 text-red-800"
-              }`}>{config.status}</div>
+              <div className="mb-3">
+                <StatusPill variant={statusVariant as "ready" | "warn" | "failed"}>{config.status}</StatusPill>
+              </div>
               <div className="space-y-2 max-h-96 overflow-y-auto">
                 {config.checks.map((c, i) => (
-                  <div key={i} className={`text-xs p-2 rounded border ${
-                    c.severity === "ERROR" ? "border-red-200 bg-red-50" :
-                    c.severity === "WARN" ? "border-yellow-200 bg-yellow-50" : "border-green-200 bg-green-50"
+                  <div key={i} className={`text-xs p-3 rounded-lg border ${
+                    c.severity === "ERROR" ? "bg-red-900/20 border-red-700/50" :
+                    c.severity === "WARN" ? "bg-yellow-900/20 border-yellow-700/50" :
+                    "bg-green-900/20 border-green-700/50"
                   }`}>
-                    <div className="font-semibold">{c.severity}: {c.name}</div>
-                    <div className="text-slate-600 mt-0.5">{c.message}</div>
+                    <div className="flex items-center gap-2 font-semibold">
+                      <SeverityPill severity={c.severity} />
+                      <span className="text-slate-200">{c.name}</span>
+                    </div>
+                    <div className="text-slate-400 mt-1">{c.message}</div>
                   </div>
                 ))}
               </div>
             </>
           )}
-        </div>
+        </Card>
 
         {/* DB Status */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">🗄️ Database Status</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">🗄️ Database Status</h2>
           {health && (
-            <div className="space-y-2 text-sm">
-              <div className={`px-3 py-2 rounded border ${health.db.ok ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"}`}>
+            <div className="space-y-2">
+              <div className={`px-3 py-2 rounded-lg border text-sm ${health.db.ok ? "border-green-700/50 bg-green-900/20 text-green-300" : "border-red-700/50 bg-red-900/20 text-red-300"}`}>
                 <span className="font-semibold">Status:</span> {health.db.ok ? "✅ OK" : "❌ Error"}
               </div>
-              <div className="text-xs text-slate-500">Path: {health.db.path}</div>
-              <div className="text-xs text-slate-500">Size: {(health.db.sizeBytes / 1024 / 1024).toFixed(2)} MB</div>
+              <Kv label="Path" value={health.db.path} mono />
+              <Kv label="Size" value={`${(health.db.sizeBytes / 1024 / 1024).toFixed(2)} MB`} />
               <div className="mt-3">
-                <p className="text-xs font-semibold mb-1">Critical Tables:</p>
+                <p className="text-xs font-semibold text-slate-500 mb-1">Critical Tables:</p>
                 {health.db.criticalTables && Object.entries(health.db.criticalTables).map(([k, v]) => (
-                  <div key={k} className="flex justify-between text-xs py-1 border-b border-slate-100">
-                    <span>{k}</span>
-                    <span className={`font-mono ${v === null ? "text-red-500" : "text-slate-600"}`}>
+                  <div key={k} className="flex justify-between text-xs py-1 border-b border-slate-700/50">
+                    <span className="text-slate-400">{k}</span>
+                    <span className={`font-mono ${v === null ? "text-red-400" : "text-slate-300"}`}>
                       {v === null ? "MISSING" : `${v} rows`}
                     </span>
                   </div>
@@ -98,87 +106,69 @@ export default function AdminToolsPage() {
               </div>
             </div>
           )}
-        </div>
+        </Card>
 
         {/* Process Lock */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">🔒 Process Lock</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">🔒 Process Lock</h2>
           {health?.processLock && (
-            <div className="space-y-2 text-sm">
+            <div className="space-y-1.5">
               <Kv label="Locked" value={health.processLock.locked ? "🔒 Yes" : "🔓 No"} />
               <Kv label="Owner PID" value={health.processLock.ownerPid ?? "—"} />
               <Kv label="This Process" value={health.processLock.isOwner ? "✅ Owner" : "❌ Not owner"} />
               <Kv label="Started" value={fmtTime(health.processLock.startedAt)} />
             </div>
           )}
-        </div>
+        </Card>
 
         {/* App Settings */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">⚙️ App Settings</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">⚙️ App Settings</h2>
           {settings ? (
             <div className="space-y-1 max-h-96 overflow-y-auto">
               {Object.entries(settings).map(([k, v]) => (
-                <div key={k} className="flex justify-between text-xs py-1 border-b border-slate-100">
-                  <span className="text-slate-500">{k}</span>
-                  <span className="font-mono">{String(v ?? "—")}</span>
-                </div>
+                <Kv key={k} label={k} value={String(v ?? "—")} mono />
               ))}
             </div>
           ) : (
-            <p className="text-sm text-slate-400">Không tải được settings.</p>
+            <p className="text-sm text-slate-500">Không tải được settings.</p>
           )}
-        </div>
+        </Card>
 
         {/* Backup info */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">💾 Backup</h2>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">💾 Backup</h2>
           {health && (
-            <div className="space-y-2 text-sm">
+            <div className="space-y-1.5">
               <Kv label="Total backups" value={health.backup.backupCount} />
               <Kv label="Latest" value={health.backup.latestBackupName ?? "—"} />
               <Kv label="Age" value={health.backup.latestBackupAgeHours != null ? `${health.backup.latestBackupAgeHours}h` : "—"} />
               <Kv label="Last at" value={fmtTime(health.backup.latestBackupAt)} />
             </div>
           )}
-          <div className="mt-4 p-3 rounded bg-slate-50 border text-xs font-mono text-slate-500">
-            <p className="font-semibold mb-1">Backup command:</p>
-            <code>npm run backup:create</code>
-            <br />
-            <code>npm run backup:list</code>
+          <div className="mt-4">
+            <CodeBlock>
+              {"npm run backup:create\nnpm run backup:list"}
+            </CodeBlock>
           </div>
-        </div>
+        </Card>
 
         {/* Secret audit */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">🛡️ Secret Audit</h2>
-          <div className="p-3 rounded bg-slate-50 border text-xs font-mono text-slate-500">
-            <p className="font-semibold mb-1">Run audit:</p>
-            <code>npm run secret:audit</code>
-            <br />
-            <code>npm run secret:audit:strict</code>
-          </div>
-          <p className="text-xs text-slate-400 mt-2">Kiểm tra secrets trong codebase, không leak API key.</p>
-        </div>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">🛡️ Secret Audit</h2>
+          <CodeBlock>
+            {"npm run secret:audit\nnpm run secret:audit:strict"}
+          </CodeBlock>
+          <p className="text-xs text-slate-500 mt-2">Kiểm tra secrets trong codebase, không leak API key.</p>
+        </Card>
 
         {/* DB guard */}
-        <div className="rounded-xl border bg-white shadow-sm p-6">
-          <h2 className="text-lg font-semibold mb-3">🛡️ DB Guard</h2>
-          <div className="p-3 rounded bg-slate-50 border text-xs font-mono text-slate-500">
-            <code>npm run db:guard</code>
-          </div>
-          <p className="text-xs text-slate-400 mt-2">Ngăn chặn reset DB vô tình trước khi push schema.</p>
-        </div>
+        <Card>
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">🛡️ DB Guard</h2>
+          <CodeBlock>npm run db:guard</CodeBlock>
+          <p className="text-xs text-slate-500 mt-2">Ngăn chặn reset DB vô tình trước khi push schema.</p>
+        </Card>
       </div>
-    </div>
-  );
-}
-
-function Kv({ label, value }: { label: string; value: unknown }) {
-  return (
-    <div className="flex justify-between text-xs">
-      <span className="text-slate-400">{label}</span>
-      <span className="font-medium text-slate-700">{String(value ?? "—")}</span>
     </div>
   );
 }

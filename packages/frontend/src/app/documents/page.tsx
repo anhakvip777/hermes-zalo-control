@@ -14,6 +14,24 @@ import {
   type DocumentChunkOutput,
   type AskResult,
 } from "../../lib/api-client";
+import {
+  Card,
+  PageHeader,
+  LoadingSpinner,
+  EmptyState,
+  ErrorBanner,
+  DarkButton,
+  DarkInput,
+  StatusPill,
+  DarkTable,
+  DarkThead,
+  DarkTh,
+  DarkTr,
+  DarkTd,
+  SectionLabel,
+  CodeBlock,
+  Kv,
+} from "../../components/ui/dark";
 
 export default function DocumentsPage() {
   const [docs, setDocs] = useState<DocumentOutput[]>([]);
@@ -53,7 +71,6 @@ export default function DocumentsPage() {
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
-  // ── Ingest ──────────────────────────────────────────────────
   const handleIngest = async () => {
     if (!ingestPath.trim()) return;
     setIngesting(true);
@@ -69,14 +86,9 @@ export default function DocumentsPage() {
     }
   };
 
-  // ── View detail ─────────────────────────────────────────────
   const viewDetail = async (docId: string) => {
     if (selectedDoc === docId) {
-      setSelectedDoc(null);
-      setMarkdown(null);
-      setChunks([]);
-      setJobs([]);
-      setAskResult(null);
+      setSelectedDoc(null); setMarkdown(null); setChunks([]); setJobs([]); setAskResult(null);
       return;
     }
     setSelectedDoc(docId);
@@ -89,15 +101,9 @@ export default function DocumentsPage() {
       ]);
       setMarkdown(mdRes.data ?? null);
       setChunks(chRes.data ?? []);
-
-      // Fetch jobs
-      if (docRes.data) {
-        fetchJobs(docId);
-      }
+      if (docRes.data) fetchJobs(docId);
     } catch {
-      setMarkdown(null);
-      setChunks([]);
-      setJobs([]);
+      setMarkdown(null); setChunks([]); setJobs([]);
     }
   };
 
@@ -106,12 +112,9 @@ export default function DocumentsPage() {
       const res = await fetch(`/api/documents/${docId}/jobs`);
       const json = await res.json();
       setJobs(json.data ?? []);
-    } catch {
-      setJobs([]);
-    }
+    } catch { setJobs([]); }
   };
 
-  // ── Re-ingest ───────────────────────────────────────────────
   const handleReingest = async (docId: string) => {
     if (!confirm("Re-ingest tài liệu này? Job mới sẽ được tạo mà không xóa dữ liệu cũ.")) return;
     setActioning(docId);
@@ -121,12 +124,9 @@ export default function DocumentsPage() {
       if (selectedDoc === docId) fetchJobs(docId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Re-ingest failed");
-    } finally {
-      setActioning(null);
-    }
+    } finally { setActioning(null); }
   };
 
-  // ── Delete ──────────────────────────────────────────────────
   const handleDelete = async (docId: string) => {
     if (!confirm("Xóa tài liệu này? Tất cả chunks và jobs sẽ bị xóa vĩnh viễn.")) return;
     setActioning(docId);
@@ -136,29 +136,18 @@ export default function DocumentsPage() {
       fetchDocs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
-    } finally {
-      setActioning(null);
-    }
+    } finally { setActioning(null); }
   };
 
-  // ── Ask ─────────────────────────────────────────────────────
   const handleAsk = async () => {
     if (!selectedDoc || !question.trim()) return;
-    setAsking(true);
-    setAskResult(null);
+    setAsking(true); setAskResult(null);
     try {
       const res = await askDocument(selectedDoc, question.trim());
       setAskResult(res.data);
     } catch (err) {
-      setAskResult({
-        question: question,
-        answer: `Lỗi: ${err instanceof Error ? err.message : "Unknown"}`,
-        chunksUsed: 0,
-        provider: "error",
-      });
-    } finally {
-      setAsking(false);
-    }
+      setAskResult({ question, answer: `Lỗi: ${err instanceof Error ? err.message : "Unknown"}`, chunksUsed: 0, provider: "error" });
+    } finally { setAsking(false); }
   };
 
   const formatBytes = (bytes: number) => {
@@ -167,324 +156,231 @@ export default function DocumentsPage() {
     return `${(bytes / 1048576).toFixed(1)}MB`;
   };
 
-  const statusColor = (status: string) => {
+  const docStatusVariant = (status: string) => {
     switch (status) {
-      case "completed": return "text-green-600 bg-green-50";
-      case "processing": return "text-blue-600 bg-blue-50";
-      case "failed": return "text-red-600 bg-red-50";
-      case "queued": return "text-yellow-600 bg-yellow-50";
-      default: return "text-gray-500 bg-gray-100";
+      case "completed": return "ready";
+      case "processing": return "info";
+      case "failed": return "failed";
+      case "queued": return "warn";
+      default: return "inactive";
     }
   };
 
-  type ErrorLevel = "critical" | "medium";
-  const classifyError = (errorCode: string | null): { level: ErrorLevel; label: string } => {
-    if (!errorCode) return { level: "medium", label: "Unknown error" };
-    const CRITICAL_CODES = [
-      "DOCLING_TIMEOUT", "DOCLING_SPAWN_ERROR", "DOCLING_POSTPROCESS_FAILED",
-      "DOCUMENT_NOT_FOUND",
-    ];
-    if (CRITICAL_CODES.includes(errorCode)) {
-      return { level: "critical", label: "⚡ System error" };
-    }
-    if (errorCode === "DOCLING_FAILED") {
-      return { level: "medium", label: "📄 Conversion failed" };
-    }
-    if (errorCode === "DOCLING_NO_OUTPUT") {
-      return { level: "medium", label: "📄 No extractable text" };
-    }
-    if (errorCode === "PROCESSING_FAILED") {
-      return { level: "medium", label: "⚠️ Processing error" };
-    }
-    return { level: "medium", label: "⚠️ Other" };
+  const classifyError = (errorCode: string | null) => {
+    if (!errorCode) return { level: "medium" as const, label: "Unknown error" };
+    const CRITICAL = ["DOCLING_TIMEOUT", "DOCLING_SPAWN_ERROR", "DOCLING_POSTPROCESS_FAILED", "DOCUMENT_NOT_FOUND"];
+    if (CRITICAL.includes(errorCode)) return { level: "critical" as const, label: "⚡ System error" };
+    if (errorCode === "DOCLING_FAILED") return { level: "medium" as const, label: "📄 Conversion failed" };
+    if (errorCode === "DOCLING_NO_OUTPUT") return { level: "medium" as const, label: "📄 No extractable text" };
+    if (errorCode === "PROCESSING_FAILED") return { level: "medium" as const, label: "⚠️ Processing error" };
+    return { level: "medium" as const, label: "⚠️ Other" };
   };
 
   const fileIcon = (ext: string) => {
     switch (ext.toLowerCase()) {
-      case "pdf": return "📕";
-      case "docx": return "📘";
-      case "pptx": return "📊";
-      case "xlsx": return "📈";
-      case "txt": return "📄";
-      case "md": return "📝";
-      case "csv": return "📊";
-      default: return "📎";
+      case "pdf": return "📕"; case "docx": return "📘"; case "pptx": return "📊";
+      case "xlsx": return "📈"; case "txt": return "📄"; case "md": return "📝";
+      case "csv": return "📊"; default: return "📎";
     }
   };
 
-  // ── Render ───────────────────────────────────────────────────
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">📄 Documents</h1>
-          <p className="text-gray-600 mt-1">
-            Docling — đọc PDF, DOCX, PPTX, XLSX, TXT, MD, CSV
-          </p>
-        </div>
-        <button
-          onClick={fetchDocs}
-          className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50"
-        >
-          🔄 Refresh
-        </button>
-      </div>
+      <PageHeader title="📄 Documents" subtitle="Docling — đọc PDF, DOCX, PPTX, XLSX, TXT, MD, CSV" onRefresh={fetchDocs} />
 
-      {error && (
-        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
-        </div>
-      )}
+      {error && <ErrorBanner message={error} />}
 
-      {/* ── Ingest Panel ──────────────────────────────────────── */}
-      <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
-        <h2 className="font-semibold mb-3">📥 Ingest Document</h2>
+      {/* Ingest Panel */}
+      <Card>
+        <h2 className="font-semibold text-slate-100 mb-3">📥 Ingest Document</h2>
         <div className="flex gap-3">
-          <input
-            className="flex-1 border rounded px-3 py-2 text-sm font-mono"
+          <DarkInput
+            className="flex-1 font-mono"
             placeholder="File path: /tmp/hermes-media/documents/test.pdf"
             value={ingestPath}
             onChange={(e) => setIngestPath(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleIngest()}
           />
-          <button
-            onClick={handleIngest}
-            disabled={ingesting || !ingestPath.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
-          >
+          <DarkButton variant="primary" size="md" onClick={handleIngest} disabled={ingesting || !ingestPath.trim()}>
             {ingesting ? "Processing..." : "Ingest"}
-          </button>
+          </DarkButton>
         </div>
-        <p className="text-xs text-gray-400 mt-2">
-          Safe dir: /tmp/hermes-media/documents/ — chỉ chấp nhận file trong thư mục này
-        </p>
-      </div>
+        <p className="text-xs text-slate-600 mt-2">Safe dir: /tmp/hermes-media/documents/ — chỉ chấp nhận file trong thư mục này</p>
+      </Card>
 
-      {/* ── Documents Table ────────────────────────────────────── */}
+      {/* Documents Table */}
       {loading ? (
-        <div className="text-center py-8 text-gray-500">Loading...</div>
+        <LoadingSpinner />
       ) : docs.length === 0 ? (
-        <div className="text-center py-8 text-gray-500">
-          No documents yet. Ingest one above.
-        </div>
+        <EmptyState message="Chưa có tài liệu nào. Ingest một file để bắt đầu." icon="📄" />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="bg-gray-100 text-left">
-                <th className="p-3 font-medium">File</th>
-                <th className="p-3 font-medium">Status</th>
-                <th className="p-3 font-medium">Chunks</th>
-                <th className="p-3 font-medium">Size</th>
-                <th className="p-3 font-medium">Date</th>
-                <th className="p-3 font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {docs.map((doc) => (
-                <tr
-                  key={doc.id}
-                  className="border-t hover:bg-gray-50 cursor-pointer"
-                  onClick={() => viewDetail(doc.id)}
-                >
-                  <td className="p-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg">{fileIcon(doc.extension)}</span>
-                      <div>
-                        <span className="font-medium block">{doc.fileName}</span>
-                        <span className="text-xs text-gray-400">.{doc.extension} · {doc.provider}</span>
-                      </div>
+        <DarkTable>
+          <DarkThead>
+            <DarkTh>File</DarkTh>
+            <DarkTh>Status</DarkTh>
+            <DarkTh>Chunks</DarkTh>
+            <DarkTh>Size</DarkTh>
+            <DarkTh>Date</DarkTh>
+            <DarkTh>Actions</DarkTh>
+          </DarkThead>
+          <tbody>
+            {docs.map((doc) => (
+              <DarkTr key={doc.id} highlight={selectedDoc === doc.id ? "blue" : undefined}>
+                <DarkTd>
+                  <button onClick={() => viewDetail(doc.id)} className="flex items-center gap-2 text-left hover:text-blue-400 transition-colors">
+                    <span className="text-lg">{fileIcon(doc.extension)}</span>
+                    <div>
+                      <span className="font-medium text-slate-200 block text-sm">{doc.fileName}</span>
+                      <span className="text-xs text-slate-500">.{doc.extension} · {doc.provider}</span>
                     </div>
-                  </td>
-                  <td className="p-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(doc.status)}`}>
-                      {doc.status}
-                    </span>
-                    {doc.status === "failed" && doc.errorCode && (
-                      <div className="mt-1 flex flex-col gap-0.5">
-                        <span className={`text-[10px] font-medium ${classifyError(doc.errorCode).level === "critical" ? "text-red-700" : "text-orange-600"}`}>
-                          {classifyError(doc.errorCode).label}
-                        </span>
-                        <code className="text-[10px] text-gray-400">{doc.errorCode}</code>
-                      </div>
-                    )}
-                  </td>
-                  <td className="p-3 text-sm text-gray-600">
-                    {doc.status === "completed" ? (
-                      <span
-                        className="text-blue-600 underline cursor-pointer"
-                        onClick={(e) => { e.stopPropagation(); viewDetail(doc.id); }}
-                      >
-                        View chunks →
+                  </button>
+                </DarkTd>
+                <DarkTd>
+                  <StatusPill variant={docStatusVariant(doc.status) as "ready" | "info" | "failed" | "warn" | "inactive"}>
+                    {doc.status}
+                  </StatusPill>
+                  {doc.status === "failed" && doc.errorCode && (
+                    <div className="mt-1">
+                      <span className={`text-[10px] font-medium ${classifyError(doc.errorCode).level === "critical" ? "text-red-400" : "text-orange-400"}`}>
+                        {classifyError(doc.errorCode).label}
                       </span>
-                    ) : doc.status === "processing" || doc.status === "queued" ? (
-                      "⏳"
-                    ) : "—"}
-                  </td>
-                  <td className="p-3 text-xs text-gray-500">{formatBytes(doc.sizeBytes)}</td>
-                  <td className="p-3 text-xs text-gray-500">
-                    {new Date(doc.createdAt).toLocaleString("vi-VN")}
-                  </td>
-                  <td className="p-3">
-                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                      {doc.status === "failed" && (
-                        <button
-                          onClick={() => handleReingest(doc.id)}
-                          disabled={actioning === doc.id}
-                          className="px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded hover:bg-amber-200 disabled:opacity-50"
-                        >
-                          {actioning === doc.id ? "..." : "🔄 Re-ingest"}
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleDelete(doc.id)}
-                        disabled={actioning === doc.id}
-                        className="px-2 py-1 text-xs bg-red-50 text-red-600 rounded hover:bg-red-100 disabled:opacity-50"
-                      >
-                        🗑️
-                      </button>
+                      <code className="text-[10px] text-slate-500 block">{doc.errorCode}</code>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  )}
+                </DarkTd>
+                <DarkTd>
+                  {doc.status === "completed" ? (
+                    <button onClick={() => viewDetail(doc.id)} className="text-blue-400 hover:underline text-xs">View chunks →</button>
+                  ) : doc.status === "processing" || doc.status === "queued" ? (
+                    <span className="text-slate-500 text-xs">⏳</span>
+                  ) : <span className="text-slate-600 text-xs">—</span>}
+                </DarkTd>
+                <DarkTd><span className="text-slate-400 text-xs">{formatBytes(doc.sizeBytes)}</span></DarkTd>
+                <DarkTd><span className="text-slate-500 text-xs">{new Date(doc.createdAt).toLocaleString("vi-VN")}</span></DarkTd>
+                <DarkTd>
+                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                    {doc.status === "failed" && (
+                      <DarkButton variant="warn" size="sm" onClick={() => handleReingest(doc.id)} disabled={actioning === doc.id}>
+                        {actioning === doc.id ? "..." : "🔄"}
+                      </DarkButton>
+                    )}
+                    <DarkButton variant="danger" size="sm" onClick={() => handleDelete(doc.id)} disabled={actioning === doc.id}>
+                      🗑️
+                    </DarkButton>
+                  </div>
+                </DarkTd>
+              </DarkTr>
+            ))}
+          </tbody>
+        </DarkTable>
       )}
 
-      {/* ── Detail Panel ───────────────────────────────────────── */}
-      {selectedDoc && (
-        <div className="p-4 bg-white border rounded-lg space-y-4">
-          <div className="flex justify-between items-center">
-            <h2 className="font-semibold">📋 Document Detail</h2>
-            <div className="flex gap-2">
-              <button
-                onClick={() => handleReingest(selectedDoc)}
-                disabled={actioning === selectedDoc}
-                className="px-3 py-1 text-sm bg-amber-100 text-amber-700 rounded hover:bg-amber-200 disabled:opacity-50"
-              >
-                {actioning === selectedDoc ? "..." : "🔄 Re-ingest"}
-              </button>
-              <button
-                onClick={() => handleDelete(selectedDoc)}
-                disabled={actioning === selectedDoc}
-                className="px-3 py-1 text-sm bg-red-50 text-red-600 rounded hover:bg-red-100 disabled:opacity-50"
-              >
-                🗑️ Delete
-              </button>
-            </div>
-          </div>
-
-          {/* Error info for failed docs */}
-          {(() => {
-            const selected = docs.find(d => d.id === selectedDoc);
-            if (!selected || selected.status !== "failed") return null;
-            const cls = classifyError(selected.errorCode);
-            return (
-              <div className={`p-3 rounded border text-sm ${cls.level === "critical" ? "bg-red-50 border-red-300 text-red-800" : "bg-orange-50 border-orange-300 text-orange-800"}`}>
-                <div className="font-medium">{cls.label}</div>
-                {selected.errorCode && <code className="text-xs block mt-1">{selected.errorCode}</code>}
-                {selected.errorMessage && <div className="text-xs mt-1 opacity-80">{selected.errorMessage}</div>}
-              </div>
-            );
-          })()}
-
-          {/* File info */}
-          {(() => {
-            const selected = docs.find(d => d.id === selectedDoc);
-            if (!selected) return null;
-            return (
-              <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
-                <div><span className="font-medium">File:</span> {fileIcon(selected.extension)} {selected.fileName}</div>
-                <div><span className="font-medium">Size:</span> {formatBytes(selected.sizeBytes)}</div>
-                <div><span className="font-medium">Type:</span> {selected.mimeType ?? "." + selected.extension}</div>
-                <div><span className="font-medium">Provider:</span> {selected.provider}</div>
-                <div><span className="font-medium">Source:</span> {selected.source ?? "manual"}</div>
-                <div><span className="font-medium">Created:</span> {new Date(selected.createdAt).toLocaleString("vi-VN")}</div>
-              </div>
-            );
-          })()}
-
-          {/* Ingestion Jobs */}
-          {jobs.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">🔄 Ingestion Jobs ({jobs.length})</h3>
-              <div className="space-y-1">
-                {jobs.map((j) => (
-                  <div key={j.id} className="flex items-center gap-2 text-xs">
-                    <span className={`px-1.5 py-0.5 rounded font-medium ${statusColor(j.status)}`}>{j.status}</span>
-                    <code className="text-gray-400">{j.id.slice(0, 12)}...</code>
-                    {j.errorCode && <span className="text-red-500">{j.errorCode}</span>}
-                  </div>
-                ))}
+      {/* Detail Panel */}
+      {selectedDoc && (() => {
+        const sel = docs.find(d => d.id === selectedDoc);
+        return (
+          <Card>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="font-semibold text-slate-100">📋 Document Detail</h2>
+              <div className="flex gap-2">
+                <DarkButton variant="warn" size="sm" onClick={() => handleReingest(selectedDoc)} disabled={actioning === selectedDoc}>
+                  {actioning === selectedDoc ? "..." : "🔄 Re-ingest"}
+                </DarkButton>
+                <DarkButton variant="danger" size="sm" onClick={() => handleDelete(selectedDoc)} disabled={actioning === selectedDoc}>
+                  🗑️ Delete
+                </DarkButton>
               </div>
             </div>
-          )}
 
-          {/* Ask panel */}
-          <div className="p-3 bg-yellow-50 border border-yellow-200 rounded">
-            <h3 className="text-sm font-medium mb-2">💬 Ask Document</h3>
-            <div className="flex gap-2 mb-2">
-              <input
-                className="flex-1 border rounded px-3 py-2 text-sm"
-                placeholder="Hỏi về nội dung tài liệu..."
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleAsk()}
-              />
-              <button
-                onClick={handleAsk}
-                disabled={asking || !question.trim()}
-                className="px-4 py-2 bg-emerald-600 text-white rounded text-sm font-medium disabled:opacity-50"
-              >
-                {asking ? "..." : "Ask"}
-              </button>
-            </div>
-            {askResult && (
-              <div className="p-2 bg-white rounded border text-sm">
-                <div className="text-xs text-gray-500 mb-1">
-                  Dùng {askResult.chunksUsed} chunks · {askResult.provider}
+            {sel?.status === "failed" && (() => {
+              const cls = classifyError(sel.errorCode ?? null);
+              return (
+                <div className={`p-3 rounded-lg border text-sm mb-4 ${cls.level === "critical" ? "bg-red-900/20 border-red-700/50 text-red-300" : "bg-orange-900/20 border-orange-700/50 text-orange-300"}`}>
+                  <div className="font-medium">{cls.label}</div>
+                  {sel.errorCode && <code className="text-xs block mt-1 opacity-75">{sel.errorCode}</code>}
                 </div>
-                <div className="whitespace-pre-wrap">{askResult.answer}</div>
+              );
+            })()}
+
+            {sel && (
+              <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 mb-4">
+                <Kv label="File" value={`${fileIcon(sel.extension)} ${sel.fileName}`} />
+                <Kv label="Size" value={formatBytes(sel.sizeBytes)} />
+                <Kv label="Type" value={sel.mimeType ?? "." + sel.extension} />
+                <Kv label="Provider" value={sel.provider} />
+                <Kv label="Source" value={sel.source ?? "manual"} />
+                <Kv label="Created" value={new Date(sel.createdAt).toLocaleString("vi-VN")} />
               </div>
             )}
-          </div>
 
-          {/* Chunks count */}
-          <div className="text-sm text-gray-600">
-            {chunks.length} chunks · {markdown ? `${markdown.length} chars` : "no markdown"}
-          </div>
-
-          {/* Markdown preview */}
-          {markdown && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Markdown Preview</h3>
-              <pre className="max-h-60 overflow-y-auto p-3 bg-gray-50 rounded border text-xs whitespace-pre-wrap">
-                {markdown.slice(0, 2000)}
-                {markdown.length > 2000 && "\n... (truncated)"}
-              </pre>
-            </div>
-          )}
-
-          {/* Chunks list */}
-          {chunks.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Chunks ({chunks.length})</h3>
-              <div className="max-h-40 overflow-y-auto space-y-1">
-                {chunks.slice(0, 10).map((c) => (
-                  <div key={c.id} className="p-2 bg-gray-50 rounded border text-xs">
-                    <span className="font-mono text-gray-400">#{c.chunkIndex}</span>
-                    {c.heading && <span className="font-medium ml-2">{c.heading}</span>}
-                    <span className="text-gray-500 ml-2">({c.tokenEstimate ?? "?"} tokens)</span>
-                    <div className="text-gray-600 mt-1">{c.text.slice(0, 150)}...</div>
-                  </div>
-                ))}
+            {jobs.length > 0 && (
+              <div className="mb-4">
+                <SectionLabel>Ingestion Jobs ({jobs.length})</SectionLabel>
+                <div className="space-y-1">
+                  {jobs.map((j) => (
+                    <div key={j.id} className="flex items-center gap-2 text-xs">
+                      <StatusPill variant={docStatusVariant(j.status) as "ready" | "info" | "failed" | "warn" | "inactive"}>{j.status}</StatusPill>
+                      <code className="text-slate-500">{j.id.slice(0, 12)}...</code>
+                      {j.errorCode && <span className="text-red-400">{j.errorCode}</span>}
+                    </div>
+                  ))}
+                </div>
               </div>
+            )}
+
+            {/* Ask panel */}
+            <div className="rounded-lg border border-blue-700/40 bg-blue-900/10 p-4 mb-4">
+              <SectionLabel>💬 Ask Document</SectionLabel>
+              <div className="flex gap-2 mb-2">
+                <DarkInput
+                  className="flex-1"
+                  placeholder="Hỏi về nội dung tài liệu..."
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAsk()}
+                />
+                <DarkButton variant="success" size="md" onClick={handleAsk} disabled={asking || !question.trim()}>
+                  {asking ? "..." : "Ask"}
+                </DarkButton>
+              </div>
+              {askResult && (
+                <div className="rounded-lg bg-slate-900 border border-slate-700 p-3 text-sm">
+                  <div className="text-xs text-slate-500 mb-1">Dùng {askResult.chunksUsed} chunks · {askResult.provider}</div>
+                  <div className="text-slate-200 whitespace-pre-wrap">{askResult.answer}</div>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
+
+            <p className="text-xs text-slate-500 mb-2">{chunks.length} chunks · {markdown ? `${markdown.length} chars` : "no markdown"}</p>
+
+            {markdown && (
+              <div className="mb-4">
+                <SectionLabel>Markdown Preview</SectionLabel>
+                <CodeBlock>
+                  {markdown.slice(0, 2000)}
+                  {markdown.length > 2000 ? "\n... (truncated)" : ""}
+                </CodeBlock>
+              </div>
+            )}
+
+            {chunks.length > 0 && (
+              <div>
+                <SectionLabel>Chunks ({chunks.length})</SectionLabel>
+                <div className="max-h-40 overflow-y-auto space-y-1">
+                  {chunks.slice(0, 10).map((c) => (
+                    <div key={c.id} className="rounded-lg border border-slate-700 bg-slate-800/60 p-2 text-xs">
+                      <span className="font-mono text-slate-500">#{c.chunkIndex}</span>
+                      {c.heading && <span className="font-medium text-slate-300 ml-2">{c.heading}</span>}
+                      <span className="text-slate-500 ml-2">({c.tokenEstimate ?? "?"} tokens)</span>
+                      <div className="text-slate-400 mt-1">{c.text.slice(0, 150)}...</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Card>
+        );
+      })()}
     </div>
   );
 }
