@@ -178,11 +178,12 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
   const gw = getZaloGateway();
   const gwStatus = gw.getStatus();
 
-  // Update heartbeats when Zalo is connected (prevents stale)
+  // Refresh heartbeats when connected; when disconnected let them go stale/down naturally
   if (gwStatus.connected) {
     heartbeatOk("zaloConnection", { connected: true, via: "ops/status" }).catch(() => {});
   }
-  if ((gw as any).listenerActive ?? gwStatus.connected) {
+  const listenerIsActive: boolean = (gw as any).listenerActive === true;
+  if (gwStatus.connected && listenerIsActive) {
     heartbeatOk("zaloListener", { via: "ops/status" }).catch(() => {});
   }
 
@@ -222,7 +223,7 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
     lastConnectedAt: gwStatus.lastConnectedAt,
     lastError: gwStatus.lastError,
     lastMessageAt: lastMessage?.receivedAt?.toISOString() ?? null,
-    listenerActive: (gw as any).listenerActive ?? gwStatus.connected,
+    listenerActive: (gw as any).listenerActive === true,
     dryRun: getCurrentEffectiveDryRun(),
     dryRunSource,
     allowedThreads,
@@ -231,12 +232,17 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
     session: getSessionInfo(),
 
     heartbeats: {
-      zaloConnection: hbSummary.zaloConnection
-        ? { status: hbSummary.zaloConnection.status, lastBeatAt: hbSummary.zaloConnection.lastBeatAt, ageSeconds: hbSummary.zaloConnection.ageSeconds }
-        : { status: "down", lastBeatAt: null, ageSeconds: null },
-      zaloListener: hbSummary.zaloListener
-        ? { status: hbSummary.zaloListener.status, lastBeatAt: hbSummary.zaloListener.lastBeatAt, ageSeconds: hbSummary.zaloListener.ageSeconds }
-        : { status: "down", lastBeatAt: null, ageSeconds: null },
+      // When disconnected, connection/listener heartbeats are always "down" regardless of DB cache
+      zaloConnection: gwStatus.connected
+        ? (hbSummary.zaloConnection
+            ? { status: hbSummary.zaloConnection.status, lastBeatAt: hbSummary.zaloConnection.lastBeatAt, ageSeconds: hbSummary.zaloConnection.ageSeconds }
+            : { status: "down", lastBeatAt: null, ageSeconds: null })
+        : { status: "down", lastBeatAt: hbSummary.zaloConnection?.lastBeatAt ?? null, ageSeconds: hbSummary.zaloConnection?.ageSeconds ?? null },
+      zaloListener: (gwStatus.connected && listenerIsActive)
+        ? (hbSummary.zaloListener
+            ? { status: hbSummary.zaloListener.status, lastBeatAt: hbSummary.zaloListener.lastBeatAt, ageSeconds: hbSummary.zaloListener.ageSeconds }
+            : { status: "down", lastBeatAt: null, ageSeconds: null })
+        : { status: "down", lastBeatAt: hbSummary.zaloListener?.lastBeatAt ?? null, ageSeconds: hbSummary.zaloListener?.ageSeconds ?? null },
       messagePipeline: hbSummary.messagePipeline
         ? { status: hbSummary.messagePipeline.status, lastBeatAt: hbSummary.messagePipeline.lastBeatAt, ageSeconds: hbSummary.messagePipeline.ageSeconds }
         : { status: "down", lastBeatAt: null, ageSeconds: null },

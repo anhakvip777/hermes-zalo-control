@@ -118,7 +118,13 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
     setErrMsg(null);
     setQrDataURL(null);
     try {
-      const r = await startZaloLogin();
+      let r = await startZaloLogin();
+      // If a previous login is still pending, cancel it first then retry
+      if (r.data.status === "already_in_progress") {
+        await cancelZaloLogin().catch(() => {});
+        await new Promise((res) => setTimeout(res, 500));
+        r = await startZaloLogin();
+      }
       if (r.data.status === "already_connected") {
         const s = await getZaloLoginStatus();
         setStatus(s);
@@ -127,7 +133,7 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
       }
       setPhase("pending");
       startPolling();
-      // QR có thể cần vài giây mới sinh — thử ngay + poll tự retry
+      // QR may take a few seconds to generate — try now; poll will retry if not ready
       await loadQR();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Không thể tạo QR — kiểm tra kết nối backend.";

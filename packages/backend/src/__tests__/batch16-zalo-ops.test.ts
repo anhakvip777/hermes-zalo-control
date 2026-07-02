@@ -83,6 +83,8 @@ const mockGateway = vi.hoisted(() => ({
   startLogin: vi.fn(async () => ({ status: "connected" })),
   logout: vi.fn(async () => {}),
   getApi: vi.fn(() => null),
+  // listenerActive must be true when connected=true for heartbeat to show "ok"
+  listenerActive: true,
 }));
 
 vi.mock("../services/zalo-gateway.service.js", () => ({

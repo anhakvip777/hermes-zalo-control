@@ -82,8 +82,9 @@ export async function zaloRoutes(app: FastifyInstance) {
   // GET /api/zalo/login/status
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/status", async () => {
-    // gateway.getStatus() already checks qr-current.png path correctly
-    return getZaloGateway().getStatus();
+    // Merge runtime dryRun (may differ from static config.zalo.dryRun)
+    const status = getZaloGateway().getStatus();
+    return { ...status, dryRun: getCurrentEffectiveDryRun() };
   });
 
   // ═════════════════════════════════════════════════════════════════

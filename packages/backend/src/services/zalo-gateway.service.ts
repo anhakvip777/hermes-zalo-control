@@ -145,7 +145,8 @@ export class ZaloGatewayService extends EventEmitter {
     const qrPath = resolve(this.sessionDir, "qr-current.png");
     let qrAvailable = false;
     try {
-      const st = require("fs").statSync(qrPath);
+      // Use imported statSync — require("fs") fails silently in ESM modules
+      const st = statSync(qrPath);
       qrAvailable = st.size > 500;
     } catch { /* file doesn't exist yet */ }
     return { ...this.status, qrAvailable, qrUpdatedAt: this.qrUpdatedAt };
