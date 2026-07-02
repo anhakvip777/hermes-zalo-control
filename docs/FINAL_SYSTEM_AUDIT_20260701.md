@@ -204,18 +204,36 @@ Zalo IS connected and listener IS active. These issues gate global production, n
 
 | Verdict | Detail |
 |---------|--------|
-| **Ready for controlled DM handoff** | ✅ YES — 7 real sends across 3 DMs, zero errors |
+| **Ready for controlled DM handoff** | ✅ YES — SCHED1-LIVE PASS (2026-07-02) |
 | **Not ready for global live** | ❌ Group mention-only pilot not done, AI scoring not built |
 | **Not ready for group rollout** | ❌ No group live test, session persistence needs hardening |
 
 ---
 
-## Commit Recommendation
+## SCHED1-LIVE Execution Proof (2026-07-02)
+
+**✅ PASS — Schedule executed live, 1 DM sent, no errors**
+
+| Field | Value |
+|---|---|
+| Schedule ID | `cmr2xjj7u001hhmlskhutf10c` |
+| dueAt | `2026-07-02T03:14:54Z` |
+| ScheduleJob completed | `03:15:00Z` |
+| dryRun (exec) | `0` (controlled live) |
+| sentMessageId | `sent-1782962100086` |
+| content | `"họp"` |
+| duplicate | none |
+| maxMessages | 1 |
+| live auto-stopped | ✅ |
+| final live active | `false` |
+| final global dryRun | `true` |
+| group | false |
+
+---
+
+## Commit
 
 ```
-git add DESIGN.md \
-        packages/frontend/src \
-        docs/FINAL_SYSTEM_AUDIT_20260701.md \
-        docs/CUSTOMER_HANDOFF_20260701.md
-git commit -m "chore(handoff): polish admin UI and finalize customer handoff"
+git add docs/
+git commit -m "docs: record schedule live execution handoff proof"
 ```

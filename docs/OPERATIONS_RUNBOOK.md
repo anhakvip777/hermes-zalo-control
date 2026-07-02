@@ -230,3 +230,31 @@ pm2 logs hermes-worker --lines 100 --nostream
 tail -100 ~/hermes-zalo-control/logs/backend-error.log
 tail -100 ~/hermes-zalo-control/logs/worker-error.log
 ```
+
+---
+
+## Schedule Execution (SCHED1)
+
+**Feature:** Scheduled DM reminders via zaloAdminCenter scheduleJob worker.
+
+**Live Proof:** 2026-07-02 — SCHED1-LIVE PASS
+
+| Field | Value |
+|---|---|
+| Schedule ID | `cmr2xjj7u001hhmlskhutf10c` |
+| Trigger time | `2026-07-02T03:14:54Z` |
+| Execution | `03:15:00Z` |
+| dryRun | `0` (controlled live) |
+| sentMessageId | `sent-1782962100086` |
+| content | `"họp"` |
+| maxMessages | 1 |
+| Result | ✅ PASS |
+| Post-state | live `active=false`, global `dryRun=true` |
+
+**Admin endpoint:** `GET /api/schedules` (admin auth required)
+
+**Notes:**
+- Schedule runs via `hermes-worker` PM2 process
+- After execution: live auto-stops, global dryRun reverts to `true`
+- Controlled DM handoff: READY
+- Group schedule: NOT READY (pending group rollout approval)

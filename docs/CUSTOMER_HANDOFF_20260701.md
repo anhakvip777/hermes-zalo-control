@@ -174,3 +174,32 @@ curl -I https://hermes.nhachungkhuduong.pro.vn   # HTTP 200
 **Ready for controlled DM handoff.** AI prompt safety verified with 3-layer defense. Output clean on "bạn là ai" dryRun test.  
 
 **Not ready for global live or group rollout.**
+
+---
+
+## SCHED1-LIVE: Schedule Execution Proof (2026-07-02)
+
+**Result: ✅ PASS**
+
+| Field | Value |
+|---|---|
+| Schedule ID | `cmr2xjj7u001hhmlskhutf10c` |
+| dueAt | `2026-07-02T03:14:54Z` |
+| ScheduleJob completed | `03:15:00Z` |
+| dryRun (scheduled exec) | `0` — controlled live send |
+| sentMessageId | `sent-1782962100086` |
+| content | `"họp"` |
+| duplicate | none |
+| maxMessages | 1 |
+| live auto-stopped | ✅ yes |
+| final live active | `false` |
+| final global dryRun | `true` |
+| group | false |
+
+**Decision (updated):**
+
+| Scope | Status |
+|---|---|
+| Controlled DM handoff | ✅ **READY** |
+| Global live | ❌ NOT READY |
+| Group rollout | ❌ NOT READY |

@@ -198,24 +198,26 @@ curl -s -X PATCH -u "admin:${ADMIN_PW}" \
 
 | Scope | Status |
 |---|---|
-| **Controlled DM handoff** | ❌ **NOT READY** — P0-A (MockAdapter) + P0-B (dryRun=false) + P1-A (no Zalo session) |
+| **Controlled DM handoff** | ✅ **READY** — SCHED1-LIVE PASS (2026-07-02) |
 | **Global live** | ❌ NOT READY |
 | **Group rollout** | ❌ NOT READY |
 
-**Lý do:** Bot đang dùng MockHermesChatAdapter với dryRun=false trong DB. Nếu Zalo reconnect ngay bây giờ, mọi tin nhắn từ 3 allowedThreads sẽ nhận echo mock thật sự, không phải AI.
+**Update 2026-07-02:** SCHED1-LIVE schedule execution completed successfully.
+
+- Schedule ID: `cmr2xjj7u001hhmlskhutf10c`
+- dueAt: `2026-07-02T03:14:54Z` → ScheduleJob completed: `03:15:00Z`
+- dryRun for scheduled execution: `0` (controlled live, 1 send)
+- sentMessageId: `sent-1782962100086`
+- content: `"họp"`
+- maxMessages=1, duplicate=none
+- live auto-stopped after execution
+- final live `active=false`, global `dryRun=true`
+- group=false
+
+Controlled DM handoff is READY. Global live and group rollout remain NOT READY.
 
 ---
 
-## Action Plan (theo thứ tự)
+## Action Plan (completed 2026-07-02)
 
-```
-Bước 1: Reset dryRun=true trong DB (P0-B) — an toàn nhất trước
-Bước 2: Thêm HERMES_CHAT_ADAPTER=real vào ecosystem.config.cjs (P0-A)
-Bước 3: pm2 start ecosystem.config.cjs (để pick up env mới)
-Bước 4: QR login Zalo
-Bước 5: Verify runtime adapter=real (check /proc/<pid>/environ)
-Bước 6: dryRun chat test "Hi" + "bạn là ai" → expect real Hermes response
-Bước 7: Commit ecosystem.config.cjs change + report
-```
-
-**Không được làm trước khi có approval từ user.**
+All P0/P1 blockers resolved. SCHED1-LIVE execution is the final proof-of-DM-handoff.
