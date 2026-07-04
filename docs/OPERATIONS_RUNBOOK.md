@@ -258,3 +258,29 @@ tail -100 ~/hermes-zalo-control/logs/worker-error.log
 - After execution: live auto-stops, global dryRun reverts to `true`
 - Controlled DM handoff: READY
 - Group schedule: NOT READY (pending group rollout approval)
+
+---
+
+## Zalo Session Restore (ZR2)
+
+**Feature:** Auto-restore Zalo session from backup before requiring QR.
+**Commit:** `3c66b31` fix(zalo): restore session from backup before requiring QR
+**Full runbook:** [`docs/ZALO_QR_RESTORE_RUNBOOK.md`](./ZALO_QR_RESTORE_RUNBOOK.md)
+**Skill:** `zalo-session-restore`
+
+**TL;DR flow when Zalo disconnected / session missing / after restart:**
+
+1. Safety pre-check: `dryRun=true`, live `active=false`, group OFF.
+2. Check `GET /api/zalo/ops/status` → read `connectionDetail`.
+3. If `session_present` / `backup_available` → **try `POST /api/zalo/ops/reconnect` first** (restores from primary or backup, no QR).
+4. Only if `qr_required` / `restore_failed` → `/zalo-ops` → "Tạo QR đăng nhập Zalo" → scan.
+5. After connect: `POST /api/zalo/session/save` (writes primary + backup copy).
+6. Verify auto-restore: `pm2 restart hermes-backend --update-env`, wait 15s, expect `connected=true` + `listenerActive=true` (confirm via log `zca-js listener started successfully`, not stale flag) — no QR needed.
+
+**Backup mechanism:** every successful session save writes a copy to
+`packages/backend/backups/db/zalo-session-<timestamp>/zalo-session.json`.
+On boot, backend restores from primary; if missing, copies the newest backup then restores.
+
+**Never commit:** `backups/`, `zalo-session.json`, `qr-current.png`, `.env` (all gitignored — commit `fe1113e`).
+
+**Last verified:** 2026-07-04 — ZALO-RESTORE-AFTER-ZR2 PASS (connected=true, listenerActive=true, auto-restore after restart PASS, dryRun=true, live=false).
