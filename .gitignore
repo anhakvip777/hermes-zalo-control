@@ -30,7 +30,8 @@ packages/backend/dev.db
 *.sqlite
 *.sqlite3
 
-# DB Backups
+# DB Backups / runtime backups — NEVER commit (contain session creds + dev.db)
+backups/
 backup-*/
 packages/backend/backups/
 *.db.backup*
