@@ -63,6 +63,28 @@ function Hb({ label, status, ageSeconds }: { label: string; status: string; ageS
   );
 }
 
+/* ── ZR2: connectionDetail → operator-facing label + color ─────── */
+const CONNECTION_DETAIL_META: Record<string, { label: string; cls: string }> = {
+  connected: { label: "● Đã kết nối", cls: "bg-green-950 text-green-400 border-green-800" },
+  session_present: { label: "◐ Có session — bấm Reconnect", cls: "bg-blue-950 text-blue-400 border-blue-800" },
+  backup_available: { label: "⟲ Có backup — có thể khôi phục", cls: "bg-cyan-950 text-cyan-400 border-cyan-800" },
+  restored_from_backup: { label: "⟲ Đã khôi phục từ backup", cls: "bg-cyan-950 text-cyan-400 border-cyan-800" },
+  restore_failed: { label: "✕ Khôi phục thất bại — cần QR", cls: "bg-red-950 text-red-400 border-red-800" },
+  qr_required: { label: "▣ Cần đăng nhập QR", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" },
+  waiting_qr_scan: { label: "▣ Đang chờ quét QR", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" },
+  reconnect_in_progress: { label: "⏳ Đang kết nối lại…", cls: "bg-slate-800 text-slate-300 border-slate-600" },
+};
+
+function ConnectionDetailBadge({ detail }: { detail: string | undefined }) {
+  if (!detail) return <span className="text-slate-400 text-xs">—</span>;
+  const meta = CONNECTION_DETAIL_META[detail] ?? { label: detail, cls: "bg-slate-800 text-slate-300 border-slate-600" };
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${meta.cls}`}>
+      {meta.label}
+    </span>
+  );
+}
+
 /* ── Page ─────────────────────────────────────────────────────── */
 export default function ZaloOpsPage() {
   const [status, setStatus] = useState<ZaloOpsStatus | null>(null);
@@ -93,7 +115,14 @@ export default function ZaloOpsPage() {
   }, [fetchAll]);
 
   const doReconnect = async () => {
-    setAction({ type: "loading", message: "Đang kết nối lại Zalo…" });
+    // ZR2: guard against double-submit — refuse if a reconnect (or any action) is mid-flight.
+    if (action.type === "loading") return;
+    const detail = status?.connectionDetail;
+    const loadingMsg =
+      detail === "backup_available" ? "Đang khôi phục session từ backup…" :
+      detail === "qr_required" ? "Đang tạo QR đăng nhập Zalo…" :
+      "Đang kết nối lại Zalo…";
+    setAction({ type: "loading", message: loadingMsg });
     try {
       const r = await reconnectZalo();
       setAction(r.success ? { type: "ok", message: r.message } : { type: "err", message: r.message });
@@ -196,7 +225,7 @@ export default function ZaloOpsPage() {
 
       {/* Zalo Login Card — shown when disconnected */}
       {!status?.connected && (
-        <ZaloLoginCard onConnected={fetchAll} />
+        <ZaloLoginCard onConnected={fetchAll} backupAvailable={status?.session.backupAvailable ?? false} />
       )}
 
       {/* Connection */}
@@ -217,7 +246,7 @@ export default function ZaloOpsPage() {
               ? <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-amber-950 text-amber-400 border-amber-800">🛡 ON</span>
               : <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-red-950 text-red-400 border-red-800">⚡ OFF</span>
           } />
-          <Stat label="Connection Detail" value={<span className="text-slate-400 text-xs">{status?.connectionStatus ?? "—"}</span>} />
+          <Stat label="Connection Detail" value={<ConnectionDetailBadge detail={status?.connectionDetail} />} />
           <Stat label="Bot UID" value={<code className="font-mono text-[11px] text-blue-400">{status?.selfUserId ?? "—"}</code>} />
           <Stat label="Bot Name" value={status?.selfDisplayName ?? "—"} />
           <Stat label="Connected At" value={status?.lastConnectedAt ? formatVnTime(status.lastConnectedAt) : "—"} />
@@ -240,13 +269,30 @@ export default function ZaloOpsPage() {
           <Stat label="Age" value={status?.session.age ?? "—"} />
           <Stat label="QR Available" value={status?.session.qrAvailable ? <span className="text-yellow-400">⚠ Yes</span> : "No"} />
         </div>
+        {status?.session.backupAvailable && !status?.session.exists && (
+          <div className="rounded-md border border-cyan-800 bg-cyan-950/30 px-3 py-2 text-xs text-cyan-400 mb-3">
+            ⟲ Có backup session khả dụng — bấm <strong>Khôi phục từ backup</strong> để kết nối lại mà không cần quét QR.
+          </div>
+        )}
         {status?.session.warning && (
           <div className="rounded-md border border-yellow-800 bg-yellow-950/30 px-3 py-2 text-xs text-yellow-400 mb-3">
             ⚠ {status.session.warning}
           </div>
         )}
         <div className="flex flex-wrap gap-2">
-          <button onClick={doReconnect} className={btnPrimary}>🔄 Reconnect</button>
+          <button
+            onClick={doReconnect}
+            disabled={action.type === "loading" || status?.connectionDetail === "reconnect_in_progress"}
+            className={`${btnPrimary} disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            {status?.connectionDetail === "reconnect_in_progress"
+              ? "⏳ Đang kết nối lại…"
+              : status?.connectionDetail === "backup_available"
+                ? "⟲ Khôi phục từ backup"
+                : status?.connectionDetail === "qr_required" || status?.connectionDetail === "restore_failed"
+                  ? "▣ Tạo QR đăng nhập Zalo"
+                  : "🔄 Reconnect"}
+          </button>
           <button onClick={doDisconnect} className={btnDanger}>○ Disconnect</button>
           <button onClick={doCheckQR} className={btnSecondary}>📱 Check QR</button>
         </div>

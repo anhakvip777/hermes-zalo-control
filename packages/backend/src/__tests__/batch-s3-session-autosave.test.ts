@@ -72,6 +72,11 @@ const mockGateway = vi.hoisted(() => ({
       return false;
     }
   }),
+  // ZR2: reconnect mutex + backup-restore signaling
+  isReconnectInProgress: vi.fn(() => false),
+  beginReconnect: vi.fn(() => true),
+  endReconnect: vi.fn(() => {}),
+  getLastRestoreSource: vi.fn(() => "primary" as "primary" | "backup" | null),
 }));
 
 // ═════════════════════════════════════════════════════════
@@ -82,6 +87,7 @@ vi.mock("../config.js", () => ({ config: mockConfig }));
 vi.mock("../services/zalo-gateway.service.js", () => ({
   getZaloGateway: vi.fn(() => mockGateway),
   ZaloGatewayService: vi.fn(),
+  findLatestSessionBackup: vi.fn(() => null),
   quarantineSessionFile: vi.fn((path: string, reason: string) => {
     try {
       if (!existsSync(path)) return null;

@@ -85,10 +85,16 @@ const mockGateway = vi.hoisted(() => ({
   getApi: vi.fn(() => null),
   // listenerActive must be true when connected=true for heartbeat to show "ok"
   listenerActive: true,
+  // ZR2: reconnect mutex + backup-restore signaling
+  isReconnectInProgress: vi.fn(() => false),
+  beginReconnect: vi.fn(() => true),
+  endReconnect: vi.fn(() => {}),
+  getLastRestoreSource: vi.fn(() => "primary" as "primary" | "backup" | null),
 }));
 
 vi.mock("../services/zalo-gateway.service.js", () => ({
   getZaloGateway: vi.fn(() => mockGateway),
+  findLatestSessionBackup: vi.fn(() => null),
 }));
 
 // ═════════════════════════════════════════════════════════
@@ -178,8 +184,8 @@ describe("Batch 16 — Zalo Ops Dashboard", () => {
     expect(json).not.toContain("imei");
   });
 
-  // ── Test 2: reconnect without session returns needs_qr ──
-  it("2. reconnect without session returns needs_qr, no crash", async () => {
+  // ── Test 2: reconnect without session or backup returns qr_required (ZR2 rename of legacy needs_qr) ──
+  it("2. reconnect without session or backup returns qr_required, no crash", async () => {
     mockGateway.isConnected = vi.fn(() => false);
     mockGateway.restoreSession = vi.fn(async () => false);
     mockGateway.startLogin = vi.fn(async () => ({ status: "connecting" }));
@@ -188,7 +194,7 @@ describe("Batch 16 — Zalo Ops Dashboard", () => {
     const result = await reconnectZalo("admin");
 
     expect(result.success).toBe(true);
-    expect(result.status).toBe("needs_qr");
+    expect(result.status).toBe("qr_required");
   });
 
   // ── Test 3: reconnect with session starts listener ──

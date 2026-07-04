@@ -663,6 +663,10 @@ export function deleteDocument(id: string) {
 export interface ZaloOpsStatus {
   connected: boolean;
   connectionStatus: string;
+  /** ZR2: single source of truth for "what should the operator do next".
+   *  "connected" | "session_present" | "backup_available" | "restore_failed"
+   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress" */
+  connectionDetail: string;
   selfUserId: string | null;
   selfDisplayName: string | null;
   lastConnectedAt: string | null;
@@ -684,6 +688,8 @@ export interface ZaloOpsStatus {
     updatedAt: string | null;
     quarantinedFiles: string[];
     warning: string | null;
+    /** ZR2: true when primary session is missing but a restorable backup exists. */
+    backupAvailable: boolean;
   };
   heartbeats: {
     zaloConnection: { status: string; lastBeatAt: string | null; ageSeconds: number | null };

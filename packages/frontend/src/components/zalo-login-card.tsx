@@ -45,7 +45,7 @@ function Badge({ color, children }: { color: "green" | "yellow" | "red" | "blue"
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
-export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
+export function ZaloLoginCard({ onConnected, backupAvailable }: { onConnected?: () => void; backupAvailable?: boolean }) {
   const [phase, setPhase] = useState<LoginPhase>("idle");
   const [status, setStatus] = useState<LoginStatusOutput | null>(null);
   const [qrDataURL, setQrDataURL] = useState<string | null>(null);
@@ -326,9 +326,15 @@ export function ZaloLoginCard({ onConnected }: { onConnected?: () => void }) {
         </div>
       )}
 
-      {status && !status.connected && (
+      {status && !status.connected && !backupAvailable && (
         <div className="rounded-md border border-yellow-800/40 bg-yellow-950/10 px-3 py-2 text-xs text-yellow-500">
           ⚠ Session chưa có hoặc đã hết hạn. Quét QR để kết nối lại.
+        </div>
+      )}
+
+      {backupAvailable && (
+        <div className="rounded-md border border-cyan-800/50 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-400">
+          ⟲ <strong>Có backup session khả dụng.</strong> Bấm <strong>Reconnect</strong> ở mục Session để khôi phục mà không cần quét QR. Chỉ tạo QR mới nếu backup lỗi.
         </div>
       )}
 

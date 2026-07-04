@@ -6,7 +6,7 @@ import { existsSync, statSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
-import { getZaloGateway, type ZaloGatewayStatus } from "./zalo-gateway.service.js";
+import { getZaloGateway, findLatestSessionBackup, type ZaloGatewayStatus } from "./zalo-gateway.service.js";
 import { getCurrentEffectiveDryRun, getEffectiveCooldownSeconds, getAllRuntimeSettings } from "./runtime-config.service.js";
 import { getHeartbeatSummary, heartbeatOk } from "./heartbeat.service.js";
 // Session safety: info extracted below in getSessionInfo() — no external dep
@@ -42,7 +42,14 @@ export interface ZaloOpsStatus {
     quarantinedFiles: string[];
     /** S3: warning code if session integrity is at risk */
     warning: "NO_SESSION_FILE" | "SESSION_QUARANTINED" | "CONNECTED_BUT_SESSION_NOT_PERSISTED" | null;
+    /** ZR2: true if primary session missing but a backup exists under backups/db/ */
+    backupAvailable: boolean;
   };
+
+  /** ZR2: single enum summarizing exactly what reconnect will do next.
+   *  "connected" | "session_present" | "backup_available" | "restore_failed"
+   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress" */
+  connectionDetail: string;
 
   heartbeats: {
     zaloConnection: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
@@ -57,6 +64,8 @@ export interface ZaloOpsStatus {
 
 export interface ReconnectResult {
   success: boolean;
+  /** ZR2: "already_connected" | "reconnect_in_progress" | "restored" | "restored_from_backup"
+   *  | "qr_required" | "restore_failed" | "error" (legacy "needs_qr" kept as alias of qr_required) */
   status: string;
   message: string;
   auditId?: string;
@@ -158,6 +167,10 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
     warning = "SESSION_QUARANTINED";
   }
 
+  // ZR2: only relevant to check when primary is missing — avoids an extra fs scan
+  // on the common "connected, session present" path.
+  const backupAvailable = !exists && findLatestSessionBackup() !== null;
+
   return {
     exists,
     age,
@@ -169,6 +182,7 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
     updatedAt,
     quarantinedFiles,
     warning,
+    backupAvailable,
   };
 }
 
@@ -215,9 +229,30 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
     ? (() => { try { const v = JSON.parse(allowedThreadsSetting.value); return Array.isArray(v) ? v : []; } catch { return []; } })()
     : config.autoReply.allowedThreads;
 
+  const sessionInfo = getSessionInfo();
+
+  // ZR2: connectionDetail — single source of truth for "what should the operator do next"
+  let connectionDetail: string;
+  if (gw.isReconnectInProgress()) {
+    connectionDetail = "reconnect_in_progress";
+  } else if (gwStatus.connected) {
+    connectionDetail = "connected";
+  } else if (gwStatus.connectionStatus === "waiting_qr_scan" && gwStatus.qrAvailable) {
+    connectionDetail = "waiting_qr_scan";
+  } else if (sessionInfo.exists) {
+    connectionDetail = gwStatus.lastError === "RESTORE_FAILED" || gwStatus.lastError === "SESSION_QUARANTINED" || gwStatus.lastError === "ZALO_LOGIN_FAILED"
+      ? "restore_failed"
+      : "session_present"; // primary session file present but not yet reconnected — Reconnect button applies
+  } else if (sessionInfo.backupAvailable) {
+    connectionDetail = "backup_available";
+  } else {
+    connectionDetail = "qr_required";
+  }
+
   return {
     connected: gwStatus.connected,
     connectionStatus: gwStatus.connectionStatus,
+    connectionDetail,
     selfUserId: gwStatus.selfUserId,
     selfDisplayName: gwStatus.selfDisplayName,
     lastConnectedAt: gwStatus.lastConnectedAt,
@@ -269,9 +304,8 @@ async function getDryRunSource(): Promise<"env" | "runtime"> {
 
 export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
   const gw = getZaloGateway();
-  const sessionInfo = getSessionInfo();
 
-  // If already connected, no-op
+  // 1) Already connected — no-op, never touches the session file.
   if (gw.isConnected()) {
     return {
       success: true,
@@ -280,47 +314,75 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
     };
   }
 
-  // If session file exists, restore it
-  if (sessionInfo.exists) {
-    try {
-      const restored = await gw.restoreSession({ startListener: true });
-      if (restored) {
-        await createAudit("zalo.reconnect", "restored", userId);
-        return {
-          success: true,
-          status: "restored",
-          message: "Session restored from saved credentials. Listener started.",
-        };
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Session restore failed, fall through to QR
-      return {
-        success: false,
-        status: "restore_failed",
-        message: `Session restore failed: ${msg}. Manual QR login may be needed.`,
-      };
-    }
+  // 2) ZR2: reconnect mutex — refuse a second concurrent reconnect instead of racing
+  // two restore/login attempts against the same session file.
+  if (!gw.beginReconnect()) {
+    return {
+      success: false,
+      status: "reconnect_in_progress",
+      message: "A reconnect is already in progress. Please wait for it to finish.",
+    };
   }
 
-  // No session file — need QR login
   try {
-    const result = await gw.startLogin();
-    await createAudit("zalo.reconnect", result.status === "connected" ? "started_dry" : "started_login", userId);
+    const sessionInfo = getSessionInfo();
 
-    if (result.status === "connected") {
-      // dryRun mode
-      return { success: true, status: "connected", message: "Connected (dry-run mode)." };
+    // 3) Primary session file exists — restore from it (restoreSession() itself
+    // falls back to the most recent backup when the primary file goes missing
+    // mid-flight, so this single call covers both cases 3 and 4 of the plan).
+    if (sessionInfo.exists || sessionInfo.backupAvailable) {
+      try {
+        const restored = await gw.restoreSession({ startListener: true });
+        if (restored) {
+          const usedBackup = gw.getLastRestoreSource() === "backup";
+          await createAudit("zalo.reconnect", usedBackup ? "restored_from_backup" : "restored", userId);
+          return {
+            success: true,
+            status: usedBackup ? "restored_from_backup" : "restored",
+            message: usedBackup
+              ? "Primary session was missing — restored from the most recent backup. Listener started."
+              : "Session restored from saved credentials. Listener started.",
+          };
+        }
+        // restoreSession() returned false without throwing — no valid primary or backup credentials
+        await createAudit("zalo.reconnect", "restore_failed", userId);
+        return {
+          success: false,
+          status: "restore_failed",
+          message: "Session restore failed (invalid or expired credentials). QR login required.",
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await createAudit("zalo.reconnect", "restore_failed", userId);
+        return {
+          success: false,
+          status: "restore_failed",
+          message: `Session restore failed: ${msg}. Manual QR login may be needed.`,
+        };
+      }
     }
 
-    return {
-      success: true,
-      status: "needs_qr",
-      message: "No saved session found. QR login started — scan QR code to connect.",
-    };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, status: "error", message: msg };
+    // 5) No primary session and no backup — QR login is the only path left.
+    try {
+      const result = await gw.startLogin();
+      await createAudit("zalo.reconnect", result.status === "connected" ? "started_dry" : "started_login", userId);
+
+      if (result.status === "connected") {
+        // dryRun mode
+        return { success: true, status: "connected", message: "Connected (dry-run mode)." };
+      }
+
+      return {
+        success: true,
+        status: "qr_required",
+        message: "No saved session or backup found. QR login started — scan QR code to connect.",
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, status: "error", message: msg };
+    }
+  } finally {
+    gw.endReconnect();
   }
 }
 

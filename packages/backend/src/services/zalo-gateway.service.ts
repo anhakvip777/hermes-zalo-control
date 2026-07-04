@@ -3,7 +3,7 @@
 // =============================================================================
 
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync, readdirSync, copyFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { config } from "../config.js";
@@ -71,6 +71,46 @@ export function quarantineSessionFile(sessionPath: string, reason: string): stri
 // Minimal image dimension reader (no external deps)
 // ═══════════════════════════════════════════════════════════════════
 
+// ── Backup restore (ZR2 — restore session from backup before requiring QR) ──
+
+/**
+ * Locate the most recent session backup under backups/db/zalo-session-<timestamp>/ dir
+ * (each holding a zalo-session.json copy). Directory names embed a sortable timestamp
+ * (zalo-session-YYYYMMDDTHHMMSS...), so a reverse lexical sort gives the newest backup
+ * first. Returns null if no backup dir or no session file inside it exists.
+ */
+/**
+ * ZR2: Resolve the session-backup root regardless of process cwd.
+ * Backups live at packages/backend/backups/db/, i.e. a sibling of the
+ * zalo-session dir. PM2 runs with cwd=project-root, so anchoring on
+ * process.cwd() would point at the wrong (near-empty) root dir. Anchor
+ * on config.zalo.sessionDir instead, which is always packages/backend/zalo-session.
+ */
+function sessionBackupRoot(): string {
+  return resolve(config.zalo.sessionDir, "..", "backups", "db");
+}
+
+export function findLatestSessionBackup(): string | null {
+  try {
+    const backupRoot = sessionBackupRoot();
+    if (!existsSync(backupRoot)) return null;
+
+    const candidates = readdirSync(backupRoot)
+      .filter((name) => name.startsWith("zalo-session-"))
+      .sort()
+      .reverse(); // newest timestamp first
+
+    for (const dirName of candidates) {
+      const candidatePath = resolve(backupRoot, dirName, "zalo-session.json");
+      if (existsSync(candidatePath)) return candidatePath;
+    }
+    return null;
+  } catch (err: unknown) {
+    console.error(`[zalo-gateway] findLatestSessionBackup failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 function getImageDimensions(filePath: string): { width: number; height: number } | null {
   try {
     const buf = readFileSync(filePath);
@@ -122,6 +162,11 @@ export class ZaloGatewayService extends EventEmitter {
   private loginInProgress = false;
   private listenerActive = false;
   private qrUpdatedAt: string | null = null;
+  /** ZR2: guards against concurrent reconnect attempts (race condition safety) */
+  private reconnectInProgress = false;
+  /** ZR2: records whether the last successful restoreSession() used the primary
+   *  session file or a backup copy — read by reconnectZalo() for accurate messaging. */
+  private lastRestoreSource: "primary" | "backup" | null = null;
 
   constructor() {
     super();
@@ -166,6 +211,27 @@ export class ZaloGatewayService extends EventEmitter {
 
   isLoginInProgress(): boolean {
     return this.loginInProgress;
+  }
+
+  /** ZR2: true while a reconnect (restore-from-backup or session-restore) is in flight. */
+  isReconnectInProgress(): boolean {
+    return this.reconnectInProgress;
+  }
+
+  /**
+   * ZR2: atomically claim the reconnect lock. Returns false (does NOT set the flag)
+   * if a reconnect is already running — caller must treat that as "reconnect_in_progress"
+   * and must NOT start a second concurrent restore/login attempt.
+   */
+  beginReconnect(): boolean {
+    if (this.reconnectInProgress) return false;
+    this.reconnectInProgress = true;
+    return true;
+  }
+
+  /** ZR2: release the reconnect lock. Always call in a finally block after beginReconnect(). */
+  endReconnect(): void {
+    this.reconnectInProgress = false;
   }
 
   /** Cancel a pending QR login (no-op if not in progress or already connected). */
@@ -324,16 +390,36 @@ export class ZaloGatewayService extends EventEmitter {
       return true;
     }
 
+    this.lastRestoreSource = null;
     const sessionPath = resolve(this.sessionDir, SESSION_FILE);
+    let restoredFromBackup = false;
+
     if (!existsSync(sessionPath)) {
-      this.setStatus({ connectionStatus: "error", lastError: "NO_SESSION_FILE" });
-      // H1: Health degraded — session missing but dir exists (pre-created at startup)
-      // Guidance: restore from backup (backups/db/zalo-session-*/) or login via QR
-      console.log("Zalo auto-restore: NO_SESSION_FILE");
-      console.log("  → To restore: copy a session backup to " + sessionPath);
-      console.log("  → Or login fresh: POST /api/zalo/login (QR code)");
-      heartbeatOk("zaloSession", { file: "missing", path: sessionPath }).catch(() => {});
-      return false;
+      // ZR2: primary session file missing — before requiring QR, try the most
+      // recent backup under backups/db/zalo-session-*/zalo-session.json.
+      // We only COPY (never move/delete) the backup — the original stays intact
+      // in case this restore attempt fails and a human needs to inspect it.
+      const backupPath = findLatestSessionBackup();
+      if (backupPath) {
+        try {
+          mkdirSync(this.sessionDir, { recursive: true });
+          copyFileSync(backupPath, sessionPath);
+          restoredFromBackup = true;
+          console.log(`[zalo-gateway] ZR2: primary session missing, restored copy from backup: ${backupPath}`);
+        } catch (err: unknown) {
+          console.error(`[zalo-gateway] ZR2: backup copy failed: ${(err as Error).message}`);
+        }
+      }
+
+      if (!restoredFromBackup) {
+        this.setStatus({ connectionStatus: "error", lastError: "NO_SESSION_FILE" });
+        // H1: Health degraded — session missing but dir exists (pre-created at startup)
+        // Guidance: restore from backup (backups/db/zalo-session-*/) or login via QR
+        console.log("Zalo auto-restore: NO_SESSION_FILE");
+        console.log("  → No backup found either. Login fresh: POST /api/zalo/login (QR code)");
+        heartbeatOk("zaloSession", { file: "missing", path: sessionPath }).catch(() => {});
+        return false;
+      }
     }
 
     try {
@@ -355,7 +441,7 @@ export class ZaloGatewayService extends EventEmitter {
 
         this.setConnected({ selfUserId: selfId, selfDisplayName: selfName });
 
-        // Save refreshed credentials (S4: bypass dryRun)
+        // Save refreshed credentials to BOTH primary + backup (S4 + ZR2)
         await this.persistSession();
 
         // Start listener only if requested (API needs it, worker doesn't)
@@ -363,8 +449,9 @@ export class ZaloGatewayService extends EventEmitter {
           await this.startListener();
         }
 
+        this.lastRestoreSource = restoredFromBackup ? "backup" : "primary";
         this.emit("ready", this.api);
-        console.log("Zalo auto-restore: success, connected=true" + (startListener ? " listener=started" : ""));
+        console.log("Zalo auto-restore: success, connected=true" + (startListener ? " listener=started" : "") + (restoredFromBackup ? " source=backup" : ""));
         return true;
       }
 
@@ -378,6 +465,8 @@ export class ZaloGatewayService extends EventEmitter {
       // Classify error
       if (msg.includes("expired") || msg.includes("invalid") || msg.includes("SESSION")) {
         this.setStatus({ connectionStatus: "error", lastError: "SESSION_QUARANTINED" });
+        // Only quarantine the primary file — if this attempt used a copied backup,
+        // quarantining it just discards the copy; the original backup dir is untouched.
         quarantineSessionFile(sessionPath, msg);
       } else if (msg.includes("login") || msg.includes("Login")) {
         this.setStatus({ connectionStatus: "error", lastError: "ZALO_LOGIN_FAILED" });
@@ -388,7 +477,31 @@ export class ZaloGatewayService extends EventEmitter {
     }
   }
 
+  /** ZR2: which source the last successful restoreSession() used ("primary" | "backup" | null). */
+  getLastRestoreSource(): "primary" | "backup" | null {
+    return this.lastRestoreSource;
+  }
+
   /** S4: Persist current session credentials to disk (callable from admin endpoint). */
+  /**
+   * ZR2: Write a same-content backup copy to backups/db/zalo-session-<timestamp>/zalo-session.json
+   * right after a successful primary session save. Best-effort — failures are logged,
+   * never thrown, so a backup-write hiccup never blocks the primary session save path.
+   */
+  private writeSessionBackupCopy(sessionPath: string): void {
+    try {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}T${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const backupDir = resolve(sessionBackupRoot(), `zalo-session-${ts}`);
+      mkdirSync(backupDir, { recursive: true });
+      copyFileSync(sessionPath, resolve(backupDir, SESSION_FILE));
+      console.log(`[zalo-gateway] ZR2: session backup copy written: ${backupDir}/${SESSION_FILE}`);
+    } catch (err: unknown) {
+      console.error(`[zalo-gateway] ZR2: session backup copy failed (non-fatal): ${(err as Error).message}`);
+    }
+  }
+
   async persistSession(): Promise<{ ok: boolean; message: string; fileSize?: number }> {
     if (!this.status.connected) {
       return { ok: false, message: "Zalo not connected — cannot save session" };
@@ -410,6 +523,7 @@ export class ZaloGatewayService extends EventEmitter {
       }
       const st = statSync(sessionPath);
       console.log(`[zalo-gateway] Session persisted via admin: ${sessionPath} (${st.size} bytes)`);
+      this.writeSessionBackupCopy(sessionPath);
       return { ok: true, message: "Session saved", fileSize: st.size };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -451,6 +565,8 @@ export class ZaloGatewayService extends EventEmitter {
         return;
       }
       console.log(`[zalo-gateway] Session saved: ${sessionPath} (${st.size} bytes, selfUserId=${this.status.selfUserId})`);
+      // ZR2: mirror to backups/db/ so a future logout/quarantine has a recent fallback
+      this.writeSessionBackupCopy(sessionPath);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[zalo-gateway] Session save FAILED: ${msg}`);
