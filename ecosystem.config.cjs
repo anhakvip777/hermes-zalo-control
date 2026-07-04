@@ -39,6 +39,10 @@ module.exports = {
         HERMES_CHAT_TIMEOUT_MS: "30000",
         HERMES_CHAT_CLI_TIMEOUT_MS: "60000",
         HERMES_CHAT_MIN_CONFIDENCE: "0.5",
+        // ARCH1-C true Hermes Agent bridge foundation — default OFF until endpoint exists
+        HERMES_AGENT_BRIDGE_ENABLED: "false",
+        HERMES_AGENT_ENDPOINT: "",
+        HERMES_AGENT_PROTOCOL_VERSION: "2026-07-ARCH1",
       },
       autorestart: true,
       max_restarts: 5,

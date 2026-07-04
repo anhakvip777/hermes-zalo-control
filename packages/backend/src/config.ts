@@ -102,6 +102,13 @@ export const config = {
     minConfidence: Math.min(1, Math.max(0, parseFloat(process.env.HERMES_CHAT_MIN_CONFIDENCE ?? "0.5"))),
   } as const,
 
+  hermesAgentBridge: {
+    enabled: (process.env.HERMES_AGENT_BRIDGE_ENABLED ?? "false").toLowerCase() === "true",
+    endpoint: process.env.HERMES_AGENT_ENDPOINT ?? "",
+    protocolVersion: process.env.HERMES_AGENT_PROTOCOL_VERSION ?? "2026-07-ARCH1",
+    timeoutMs: Math.max(1, parseInt(process.env.HERMES_AGENT_TIMEOUT_MS ?? "30000", 10)),
+  } as const,
+
   security: {
     jwtSecret: requireSecret("JWT_SECRET"),
     cookieSecret: requireSecret("COOKIE_SECRET"),
