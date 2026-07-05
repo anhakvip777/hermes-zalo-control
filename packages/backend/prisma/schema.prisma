@@ -652,3 +652,88 @@ model ZaloPrincipalAudit {
   @@index([action])
   @@index([createdAt])
 }
+
+// =============================================================================
+// Tool Gateway (Phase 1) — evidence of agent tool invocations
+// =============================================================================
+// Additive only. SQLite has no native enum → enum-like fields are String with
+// TS union types validated at the app layer. JSON payloads are String (JSON.stringify),
+// matching the repo convention (AgentTask.input, Message.metadata). No FK/@relation —
+// linked by convention via string IDs.
+//
+// Two-field status model:
+//   executionStatus = requested | success | failed | unavailable | blocked
+//   deliveryStatus  = not_applicable | dry_run | live_sent | skipped | cooldown_blocked
+// =============================================================================
+
+model ToolCallRecord {
+  id                   String    @id @default(cuid())
+  agentName            String    @default("hermes")   // adapter id: hermes | claude | ...
+  toolName             String
+  kind                 String                          // read | write | outbound
+  threadId             String
+  threadType           String    @default("user")      // user | group
+  principalId          String?
+  role                 String                          // form_only | basic_chat | advanced | admin
+  executionStatus      String    @default("requested") // requested | success | failed | unavailable | blocked
+  deliveryStatus       String    @default("not_applicable") // not_applicable | dry_run | live_sent | skipped | cooldown_blocked
+  idempotencyKey       String?
+  idempotencyKeySource String?                          // agent | derived
+  argsRedacted         String?                          // JSON (redacted)
+  resultRedacted       String?                          // JSON (redacted)
+  errorCode            String?                          // blocked | unavailable | invalid_args | provider_error | timeout | dry_run
+  errorMessage         String?
+  evidence             String?                          // JSON (summary/pointers)
+  outboundRecordId     String?
+  zaloActionRecordId   String?
+  agentTaskId          String?
+  scheduleId           String?
+  relatedMessageId     String?
+  durationMs           Int?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime  @default(now())
+
+  @@unique([idempotencyKey])
+  @@index([threadId])
+  @@index([toolName])
+  @@index([executionStatus])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// Zalo Action Record (Phase 1) — evidence of non-message Zalo write actions
+// =============================================================================
+// Reaction / poll / future write ops (pin, rename, add_member, ...). Stands alone
+// because auto-react is triggered by the inbound reaction listener, not an agent tool.
+// Text/media/voice message sends keep using OutboundRecord (unchanged).
+// Runtime wiring of reaction/poll to this record is Phase 2 (with ZaloProvider).
+// =============================================================================
+
+model ZaloActionRecord {
+  id               String    @id @default(cuid())
+  actionType       String                          // reaction | poll | (future: pin | rename | add_member)
+  threadId         String
+  threadType       String    @default("user")      // user | group
+  principalId      String?                          // actor if agent-initiated; null for listener auto-react
+  trigger          String    @default("system")     // agent_tool | listener | manual | system
+  targetMsgId      String?                          // reaction target message id
+  payloadRedacted  String?                          // JSON: {icon} | {question, options}
+  dryRun           Boolean   @default(false)
+  decision         String    @default("allow")      // allow | skip | block
+  reason           String
+  executionStatus  String    @default("requested")  // requested | success | failed | unavailable | blocked
+  deliveryStatus   String    @default("not_applicable") // not_applicable | dry_run | live_sent | skipped | cooldown_blocked
+  providerResultId String?                          // poll_id / reaction ack
+  errorCode        String?
+  errorMessage     String?
+  idempotencyKey   String?                          // derived: actionType + threadId + targetMsgId + payloadRedacted
+  toolCallRecordId String?                          // link when invoked via a tool
+  createdBy        String?
+  createdAt        DateTime  @default(now())
+
+  @@unique([idempotencyKey])
+  @@index([threadId, createdAt])
+  @@index([actionType])
+  @@index([executionStatus])
+}
