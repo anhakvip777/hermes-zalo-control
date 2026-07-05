@@ -23,8 +23,10 @@ import {
   createAccessGetUserRoleTool,
   createSystemGetRuntimeStatusTool,
 } from "./access-system-tools.js";
+import { createRetrievalAnswerTool } from "./retrieval-tools.js";
 
 export type { MemoryDeps } from "./deps.js";
+export { createRetrievalAnswerTool } from "./retrieval-tools.js";
 
 /** Build all memory tool definitions (pure — no registration side-effect). */
 export function buildMemoryTools(deps: MemoryDeps = {}): ToolDefinition[] {
@@ -37,6 +39,8 @@ export function buildMemoryTools(deps: MemoryDeps = {}): ToolDefinition[] {
     createRulesExplainForMessageTool(deps),
     createAccessGetUserRoleTool(deps),
     createSystemGetRuntimeStatusTool(deps),
+    // Phase 3.5B-B: read-only retrieval-answer wrapper (uses real search by default).
+    createRetrievalAnswerTool(),
   ];
 }
 
