@@ -238,6 +238,28 @@ exhausted retries; no autoReply/live toggled by recovery.
 > **Deferred (Phase 3.5B and beyond):** retrieval-answer automation · original media resend ·
 > permanent media storage · historical media backfill · voice/video extraction.
 
+> **STATUS: Phase 3.5B-A DONE ✅ (commit `23ebc24`).** Retrieval-answer automation, **service-only**:
+> - Added `services/retrieval-answer.service.ts`.
+> - Added `parseRetrievalQuery(text)` — Vietnamese retrieval-intent parser for menu/search-style queries
+>   (`tìm`, `lục lại`, `gửi tôi`, `cho tôi xem`, `thực đơn`, `menu`, `cửa hàng`, `quán`, `group`, `ngày`);
+>   extracts keywords, an optional single-day date range, and an **advisory** group hint (never used for permission).
+> - Added `answerRetrieval(input, deps?)` — composes an **evidence-backed** answer from memory +
+>   attachment OCR search (reuses the Phase 3.5A `searchAttachments` + memory deps).
+> - Menu case works: *"gửi tôi thực đơn cửa hàng B trong group A"* → `found` answer carrying
+>   `messageId` / `attachmentId` evidence + the send date + a redacted OCR snippet.
+> - **Scope guard** via `resolveThreadScope` prevents cross-thread leak (group A data never leaks into group B).
+> - A **non-admin targeting another thread** returns `permission_denied` and **no search is executed**.
+> - **OCR unavailable/pending/failed** → honest *"chưa đọc được nội dung"*, **no hallucination** of a menu.
+> - Answer text + every snippet are **redacted again** (`redact()`) before return; service-generated dates
+>   are intentionally not re-redacted (avoids masking ISO dates as phone numbers).
+> - Status enum: `found | not_found | permission_denied | unavailable`; evidence capped to top 3
+>   (readable-attachment > unreadable-attachment > message, newest first).
+> - Tests: **83/83 passed** (incl. new `retrieval-answer.test.ts`, 14 cases: parser, scope/permission,
+>   menu case, group-B no-leak, date range, OCR-unavailable, secret redaction, top-3 ordering, infra→unavailable,
+>   no-live, DB-backed menu case); backend typecheck **0**.
+> - **Still service-only — deferred:** no tool wrapper yet · no autoReply integration · no `sendOutbound` ·
+>   no provider AI · no original-image resend · no live.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
