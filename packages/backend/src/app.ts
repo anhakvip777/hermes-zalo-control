@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import { config } from "./config.js";
 import { healthRoutes } from "./routes/health.js";
@@ -19,6 +19,31 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { adminAuth } from "./middleware/auth.js";
 import { strictRateLimit, agentRateLimit } from "./middleware/rate-limit.js";
 import { initializeDefaultSettings } from "./services/settings.service.js";
+
+// A route plugin as used across this app: an async function taking the instance.
+type RoutePlugin = (app: FastifyInstance) => Promise<void>;
+type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<unknown> | unknown;
+
+/**
+ * Register a protected route group behind adminAuth + a rate limiter.
+ *
+ * IMPORTANT: passing `preHandler` through `app.register(routes, { preHandler })`
+ * does NOT attach the hook to the plugin's routes in Fastify — it is silently
+ * ignored. Hooks must be added INSIDE the plugin's (encapsulated) scope. We
+ * create a child scope, add the preHandler hooks there, then register the routes
+ * within it so the hooks apply to every route the plugin defines.
+ */
+export async function registerProtected(
+  app: FastifyInstance,
+  routes: RoutePlugin,
+  rateLimit: PreHandler,
+): Promise<void> {
+  await app.register(async (scope) => {
+    scope.addHook("preHandler", adminAuth);
+    scope.addHook("preHandler", rateLimit);
+    await scope.register(routes as never, { prefix: "/api" });
+  });
+}
 
 export async function buildApp() {
   // Initialize default app settings on first run
@@ -43,28 +68,28 @@ export async function buildApp() {
   // Error handler
   app.setErrorHandler(errorHandler);
 
-  // Global admin auth middleware for protected route prefixes
-  const withAdminAuth = { preHandler: [adminAuth] } as const;
-
-  // Public routes
+  // ── Public routes (no admin auth) ────────────────────────────────
   await app.register(healthRoutes, { prefix: "/api" });
   // Public zalo ops status endpoints — no auth required (dashboard polling)
   await app.register(zaloPublicOpsRoutes, { prefix: "/api" });
-
-  // Protected routes (auth + rate limit)
-  await app.register(scheduleRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(executionRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(adminRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(zaloRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(agentRoutes, { prefix: "/api", preHandler: [adminAuth, agentRateLimit] });
-  await app.register(attendanceRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(threadSettingsRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
+  // System status — intentionally public (unchanged; never had admin auth)
   await app.register(systemRoutes, { prefix: "/api" });
-  await app.register(ruleRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(documentRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] });
-  await app.register(internalRoutes, { prefix: "/api" }); // Internal auth — localhost + token, no admin middleware
-  await app.register(accessRoutes, { prefix: "/api" }); // Access control — admin auth only
-  await app.register(traceRoutes, { prefix: "/api", preHandler: [adminAuth, strictRateLimit] }); // Decision trace — read-only
+  // Internal auth — localhost + token, guarded inside the plugin (no admin middleware)
+  await app.register(internalRoutes, { prefix: "/api" });
+  // Access control — adminAuth is enforced PER-ROUTE inside access.ts
+  await app.register(accessRoutes, { prefix: "/api" });
+
+  // ── Protected routes (adminAuth + rate limit via encapsulated scope) ──
+  await registerProtected(app, scheduleRoutes, strictRateLimit);
+  await registerProtected(app, executionRoutes, strictRateLimit);
+  await registerProtected(app, adminRoutes, strictRateLimit);
+  await registerProtected(app, zaloRoutes, strictRateLimit);
+  await registerProtected(app, agentRoutes, agentRateLimit);
+  await registerProtected(app, attendanceRoutes, strictRateLimit);
+  await registerProtected(app, threadSettingsRoutes, strictRateLimit);
+  await registerProtected(app, ruleRoutes, strictRateLimit);
+  await registerProtected(app, documentRoutes, strictRateLimit);
+  await registerProtected(app, traceRoutes, strictRateLimit); // Decision trace — read-only, admin only
 
   return app;
 }
