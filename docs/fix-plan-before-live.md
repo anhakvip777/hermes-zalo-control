@@ -218,6 +218,26 @@ exhausted retries; no autoReply/live toggled by recovery.
 ---
 
 ### PHASE 3.5 — Media / Attachment Memory Indexing (NEW)
+
+> **STATUS: Phase 3.5A DONE ✅ (commit `1b69d74`).** Indexing + search foundation:
+> - Added `Attachment` model + additive migration `20260706010000_add_attachment_index`
+>   (CREATE TABLE + indexes only; no destructive ops).
+> - Inbound image/file attachment metadata is now persisted and linked to its `Message`.
+> - OCR / `extractedText` / `description` are **redacted** (shared `redact()`) before persist;
+>   `redactionApplied=true`; source URL tokens redacted.
+> - Vision metadata is **merged** into `Message.metadata` (preserves Phase 2 `_identity`) instead of overwriting.
+> - `memory.searchMessages` supports `threadType`, `dateFrom`/`dateTo`, `includeAttachments`, and keyword
+>   search over `Message.content` + `Attachment.extractedText`/`description`, returning `attachmentId`
+>   evidence. Thread-scope guard preserved (no cross-thread leak; user/group same-id no collision).
+> - Menu case works: an image OCR'd in group A is findable later by group + keyword + date.
+> - Tests: **99/99 passed**; backend typecheck 0. Backend dev server restarted safely after `prisma generate`.
+> - **Correction (local DB state only):** dev.db initially missed the `Attachment` table because an earlier
+>   push ran with a lingering `DATABASE_URL=file:./test.db`; fixed by an explicit dev.db `db push`. No
+>   code/schema/migration/commit change, no data loss (test.db always had the table → tests were valid).
+>
+> **Deferred (Phase 3.5B and beyond):** retrieval-answer automation · original media resend ·
+> permanent media storage · historical media backfill · voice/video extraction.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
