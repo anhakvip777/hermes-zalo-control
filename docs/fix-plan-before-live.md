@@ -278,6 +278,20 @@ exhausted retries; no autoReply/live toggled by recovery.
 > - **Still deferred:** no autoReply integration · no `sendOutbound` · no provider AI · no bridge
 >   enablement · no original-image resend · no live.
 
+> **STATUS: Phase 3.5C DONE ✅ (commit `7f06b88`).** Admin/test HTTP route:
+> - Added an **admin-authenticated, read-only** route: `POST /api/agent/tools/retrieval-answer`
+>   (registered under `agentRoutes` → inherits `adminAuth` + rate limit).
+> - Added `RetrievalAnswerToolInput` Zod schema (`agent/tool-schemas.ts`).
+> - Handler calls **`answerRetrieval()` directly** — **no ToolGateway runtime wiring**, no `sendOutbound`,
+>   no provider AI, no bridge enablement, no Zalo send. Pure read.
+> - Supports optional **role simulation** for admin testing: `role` defaults to `admin`; an admin can pass
+>   `basic_chat` to verify `permission_denied` on a cross-thread request.
+> - Output returns verbatim from the service: `{ status, answerText, evidence[], confidence }`.
+> - Tests: first `fastify.inject` route harness — **auth required (401)**, menu retrieval with
+>   `attachmentId` evidence, `permission_denied` (role simulation), redaction preserved, and read-only
+>   (no `OutboundRecord` written). Full required set passed; backend typecheck **0**.
+> - **Still deferred:** no autoReply integration · no live · no original-image resend.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
