@@ -31,6 +31,8 @@ export interface MessageRow {
   messageType: string | null;
   role: string;
   relatedMessageId: string | null;
+  /** KI-H1: sanitized+redacted metadata JSON; may carry `_identity` confidence. */
+  metadata: string | null;
   receivedAt: Date;
   createdAt: Date;
 }
@@ -176,6 +178,8 @@ export interface TraceDetail {
     contentRedacted: string;
     receivedAt: string;
   };
+  /** KI-H1: how the inbound (threadId/threadType/senderId) triad was resolved. */
+  identityResolution: { confidence: string; source: string[] } | null;
   identity: { principalId: string; role: string; status: string; scope: "thread" | "global" } | null;
   gate:
     | {
@@ -435,6 +439,24 @@ export async function buildTrace(
 
   const threadId = message.threadId;
 
+  // KI-H1: identity resolution confidence, parsed from the message metadata
+  // (`_identity` block embedded at ingest by normalizeMessage). Best-effort.
+  let identityResolution: TraceDetail["identityResolution"] = null;
+  if (message.metadata) {
+    try {
+      const meta = JSON.parse(message.metadata) as Record<string, unknown>;
+      const id = meta._identity as Record<string, unknown> | undefined;
+      if (id && typeof id.confidence === "string") {
+        identityResolution = {
+          confidence: id.confidence,
+          source: Array.isArray(id.source) ? (id.source as string[]) : [],
+        };
+      }
+    } catch {
+      // metadata not JSON → leave null (never throw from the trace)
+    }
+  }
+
   // Identity / principal (thread-scoped preferred, else global).
   let identity: TraceDetail["identity"] = null;
   if (message.senderId) {
@@ -543,6 +565,7 @@ export async function buildTrace(
       contentRedacted: redactText(message.content),
       receivedAt: iso(message.receivedAt),
     },
+    identityResolution,
     identity,
     gate,
     rules,

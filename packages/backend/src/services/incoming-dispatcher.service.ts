@@ -819,6 +819,22 @@ export async function handleIncomingMessage(
   // ═══════════════════════════════════════════════════════════════════
   // P1.1 — Permission gate (after safetyCheck + groupGate, before dispatch)
   // ═══════════════════════════════════════════════════════════════════
+  // ── KI-H1: identity guard BEFORE principal resolution ────────────────
+  // If we cannot confidently identify the sender, never elevate. In particular a
+  // BLANK senderId in a GROUP must not fall back to the groupId as a principal id
+  // (resolvePrincipal would otherwise use threadId), which could inherit a role
+  // attached to that group. Force the lowest role and skip elevation entirely.
+  const cannotIdentifySender =
+    msg.identityConfidence === "unknown" ||
+    (!msg.senderId && msg.threadType === "group");
+  if (cannotIdentifySender) {
+    (msg as any).__principalRole = "form_only";
+    (msg as any).__principalStatus = "active";
+    console.log(
+      `[dispatcher] identity guard: form_only (thread=${msg.threadId} type=${msg.threadType} ` +
+      `conf=${msg.identityConfidence ?? "n/a"} hasSender=${!!msg.senderId})`,
+    );
+  } else {
   // Resolve the effective role for this sender.
   // Permission is matched by senderId — displayName NEVER used.
   try {
@@ -856,6 +872,7 @@ export async function handleIncomingMessage(
     console.error(`[dispatcher] principal lookup failed: ${msg2} — using form_only default`);
     (msg as any).__principalRole = "form_only";
   }
+  } // end identity guard (else)
 
   // Create agent task
   const task = await agentTaskService.createAgentTask({

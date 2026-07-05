@@ -7,6 +7,7 @@ import { prisma } from "../db.js";
 import { normalizeThreadId } from "./thread-id.js";
 import { upsertThreadProfileFromMessage, getThreadProfiles } from "./thread-profile.service.js";
 import { redact } from "./tool-gateway/redaction.js";
+import { normalizeInboundIdentity, type IdentityConfidence } from "./inbound-identity.js";
 import { createHash } from "node:crypto";
 
 export interface NormalizedMessage {
@@ -24,6 +25,10 @@ export interface NormalizedMessage {
   mentions?: string[];
   /** Whether the bot was mentioned (checked against selfUserId at dispatch time). */
   isMentioned?: boolean;
+  /** KI-H1: how confidently the (threadId, threadType, senderId) triad was resolved. */
+  identityConfidence?: IdentityConfidence;
+  /** KI-H1: raw fields the identity was derived from (for the trace). */
+  identitySource?: string[];
   rawMetadata: string; // JSON stringified raw message for debugging
   /** Image attachment info (set when messageType=image). */
   imageUrl?: string;
@@ -49,10 +54,18 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
   if (!raw || typeof raw !== "object") return null;
 
   const data = (raw.data ?? raw) as Record<string, unknown>;
-  const threadId = normalizeThreadId(raw.threadId ?? data.threadId);
+
+  // ── KI-H1: robust identity resolution (threadId/threadType/senderId) ──
+  // Replaces the previous "threadId = raw.threadId ?? data.threadId, else drop"
+  // logic, which silently dropped messages whose threadId arrived null but had a
+  // groupId/to/sender fallback. We now derive with fallbacks + a confidence label.
+  const identity = normalizeInboundIdentity(raw);
+  const threadId = identity.threadId ? normalizeThreadId(identity.threadId) : "";
+
   const rawContent = data.content ?? data.msg ?? "";
   const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
 
+  // Still drop only when NO threadId could be resolved even with fallbacks.
   if (!threadId) return null;
 
   const msgType = String(data.type ?? data.msgType ?? raw.messageType ?? "").toLowerCase();
@@ -134,19 +147,29 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
     displayContent = content;
   }
 
+  // Storage threadType stays "user" | "group" (downstream fns are typed that way).
+  // A genuinely "unknown" resolution is stored as "user" (lowest blast radius) but
+  // carries identityConfidence="unknown" so the dispatcher never elevates it.
+  const storedThreadType: "user" | "group" =
+    identity.threadType === "group" ? "group" : "user";
+
   return {
     zaloMessageId: String(data.messageId ?? data.msgId ?? raw.msgId ?? raw.messageId ?? ""),
     threadId,
-    threadType: resolveThreadType(raw.type ?? raw.threadType),
+    threadType: storedThreadType,
     threadName: (data.threadName ?? data.groupName ?? raw.threadName ?? raw.groupName) as string | undefined,
-    senderId: String(data.senderId ?? raw.senderId ?? data.fromId ?? raw.fromId ?? ""),
-    senderName: (data.senderName ?? raw.senderName ?? data.fromName ?? raw.fromName) as string | undefined,
+    // KI-H1: senderId never derived from displayName; blank stays "" (falsy) so
+    // the dispatcher's identity guard and principal fallback both handle it safely.
+    senderId: identity.senderId ?? "",
+    senderName: (identity.senderName ?? data.senderName ?? raw.senderName ?? data.fromName ?? raw.fromName) as string | undefined,
     content: displayContent,
     messageType: detectedType,
     isSelf: (raw.isSelf ?? data.isSelf) as boolean | undefined,
     isFromBot: (data.isFromBot ?? raw.isFromBot) as boolean | undefined,
     mentions: extractMentions(raw, data),
-    rawMetadata: sanitizeMetadata(raw),
+    identityConfidence: identity.identityConfidence,
+    identitySource: identity.identitySource,
+    rawMetadata: buildMetadataWithIdentity(raw, identity),
     imageUrl,
     imageThumbnailUrl,
     fileUrl,
@@ -154,6 +177,30 @@ export function normalizeMessage(raw: Record<string, unknown>): NormalizedMessag
     fileSize,
     fileExtension,
   };
+}
+
+/**
+ * KI-H1: embed the resolved identity confidence into the sanitized metadata JSON.
+ * Stored (and later redacted) with the Message so the Decision Trace can surface
+ * identityConfidence/identitySource without a DB schema change. The enum labels
+ * are non-secret and unaffected by redaction.
+ */
+function buildMetadataWithIdentity(
+  raw: Record<string, unknown>,
+  identity: ReturnType<typeof normalizeInboundIdentity>,
+): string {
+  try {
+    const obj = JSON.parse(sanitizeMetadata(raw)) as Record<string, unknown>;
+    obj._identity = {
+      confidence: identity.identityConfidence,
+      source: identity.identitySource,
+      threadType: identity.threadType,
+      hasSender: !!identity.senderId,
+    };
+    return JSON.stringify(obj);
+  } catch {
+    return sanitizeMetadata(raw);
+  }
 }
 
 // M10: Handle numeric ThreadType enum values from zca-js v2
