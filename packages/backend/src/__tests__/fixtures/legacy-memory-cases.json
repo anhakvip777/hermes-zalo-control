@@ -1,0 +1,225 @@
+{
+  "_note": "Regression cases derived from zalo-bot-2/workspace/memory audit. All names/ids/secrets redacted. Config assumes bridge defaults: dryRun=true, bridge=false. These assert the new bridge neutralizes legacy memory-era risks.",
+  "cases": [
+    {
+      "id": "memory-001",
+      "title": "Group chatter/noise from non-allowed board group → no reply",
+      "source": "redacted:memory/chat-log + threads",
+      "threadType": "group",
+      "pattern": "high-volume group announcements/chatter",
+      "oldBehavior": "bot could reply/act in group if groupPolicy=open",
+      "expectedBridgeBehavior": "gate blocks; inbound still saved/traced",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "BLOCKER", "covered": "yes"
+    },
+    {
+      "id": "memory-002",
+      "title": "One-off DM from long-tail sender not allow-listed → no outbound",
+      "source": "redacted:memory/2026-05-31.md (dozens of single-message senders)",
+      "threadType": "user",
+      "pattern": "single-message stranger DM",
+      "oldBehavior": "verified via friends-cache; could reply if cached",
+      "expectedBridgeBehavior": "not allow-listed → blocked",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "yes"
+    },
+    {
+      "id": "memory-003",
+      "title": "Allowed secretary DM + dryRun → dry_run only",
+      "source": "redacted:memory/threads/<core-user>.md",
+      "threadType": "user",
+      "pattern": "core secretary conversation",
+      "oldBehavior": "live reply always",
+      "expectedBridgeBehavior": "reply recorded as dry_run, no live send",
+      "expectedDecision": "allow",
+      "expectedOutbound": true, "expectedLiveSend": false, "severity": "BLOCKER", "covered": "yes"
+    },
+    {
+      "id": "memory-004",
+      "title": "Duplicate/restart re-send → no duplicate live send",
+      "source": "redacted:memory/outbound-dedupe (in-memory, lost on restart)",
+      "threadType": "user",
+      "pattern": "same reminder fired twice around restart",
+      "oldBehavior": "dedupe in-memory; could resend after restart",
+      "expectedBridgeBehavior": "idempotency/contentHash prevents duplicate; dryRun anyway",
+      "expectedDecision": "skip",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "partial"
+    },
+    {
+      "id": "memory-005",
+      "title": "Bot/self message → skipped (no self-reply loop)",
+      "source": "redacted:monitor.ts selfId async",
+      "threadType": "user",
+      "pattern": "message from bot's own id",
+      "oldBehavior": "self-reply window before selfId resolved",
+      "expectedBridgeBehavior": "self_message guard skips",
+      "expectedDecision": "skip",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "MEDIUM", "covered": "yes"
+    },
+    {
+      "id": "memory-006",
+      "title": "Agent claims 'đã gửi/đã kiểm tra' without evidence → neutralized",
+      "source": "redacted:agent secretary replies",
+      "threadType": "user",
+      "pattern": "assistant asserts completed action",
+      "oldBehavior": "could claim done with no evidence",
+      "expectedBridgeBehavior": "unsupported-claim guard neutralizes",
+      "expectedDecision": "needs_human",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "yes"
+    },
+    {
+      "id": "memory-007",
+      "title": "Blank/unknown senderId → not elevated (unknown-thread-type era)",
+      "source": "redacted:outbound-audit unknown-thread-type=128",
+      "threadType": "user",
+      "pattern": "sender/threadType unresolved",
+      "oldBehavior": "128 sends blocked on unknown-thread-type",
+      "expectedBridgeBehavior": "default form_only; not allow-listed → blocked",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "partial"
+    },
+    {
+      "id": "memory-008",
+      "title": "Cross-thread memory request by non-admin → blocked",
+      "source": "redacted:memory/.dreams recall across threads",
+      "threadType": "user",
+      "pattern": "ask for another thread's history",
+      "oldBehavior": "recall could surface other-thread notes",
+      "expectedBridgeBehavior": "thread-scope blocks non-admin cross-thread",
+      "expectedDecision": "blocked",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "yes"
+    },
+    {
+      "id": "memory-009",
+      "title": "Zalo provider/session unavailable → safe fallback, no live",
+      "source": "redacted:outbound-audit login-failed=62",
+      "threadType": "user",
+      "pattern": "send while session down",
+      "oldBehavior": "62 send_failed on login failure",
+      "expectedBridgeBehavior": "provider unavailable → structured unavailable, no live",
+      "expectedDecision": "unavailable",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "yes"
+    },
+    {
+      "id": "memory-010",
+      "title": "Governed reaction in dryRun → no live provider call + evidence",
+      "source": "redacted:workspace/react.js direct call",
+      "threadType": "group",
+      "pattern": "auto reaction",
+      "oldBehavior": "direct react, no evidence",
+      "expectedBridgeBehavior": "governed action; dry_run; ZaloActionRecord written",
+      "expectedDecision": "allow",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "yes"
+    },
+    {
+      "id": "memory-011",
+      "title": "Poll create + vote tracking → governed, dryRun only",
+      "source": "redacted:checkpoint poll_id + tao-bang-vote.js",
+      "threadType": "group",
+      "pattern": "create poll, tag members, nudge non-voters",
+      "oldBehavior": "direct poll create + private nudges",
+      "expectedBridgeBehavior": "governed poll; dry_run; no live; evidence",
+      "expectedDecision": "allow",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "MEDIUM", "covered": "partial"
+    },
+    {
+      "id": "memory-012",
+      "title": "No-reply follow-up loop → bounded / human escalation, not endless nudge",
+      "source": "redacted:threads/<core-user>.md 3x/day for days",
+      "threadType": "user",
+      "pattern": "repeated reminders with no user response",
+      "oldBehavior": "nagged 3x/day for ~6 days",
+      "expectedBridgeBehavior": "cap no-reply nudges → escalate to human; dryRun",
+      "expectedDecision": "needs_human",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "no"
+    },
+    {
+      "id": "memory-013",
+      "title": "CRM login / credential request → redact + permission-gated",
+      "source": "redacted:ctn-crm-login.md plaintext creds",
+      "threadType": "user",
+      "pattern": "user asks bot to store/recall credentials",
+      "oldBehavior": "stored email+password in plaintext memory",
+      "expectedBridgeBehavior": "redact secrets; never persist plaintext; admin-only",
+      "expectedDecision": "blocked",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "BLOCKER", "covered": "partial"
+    },
+    {
+      "id": "memory-014",
+      "title": "Daily devotional broadcast (dm-broadcast) → allow-list + quota + dryRun",
+      "source": "redacted:gui-le-phat-hang-ngay.js + dm-broadcast source",
+      "threadType": "user",
+      "pattern": "one-to-many broadcast",
+      "oldBehavior": "broadcast to many recipients live",
+      "expectedBridgeBehavior": "each recipient must be allow-listed; quota; dryRun",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "partial"
+    },
+    {
+      "id": "memory-015",
+      "title": "Same numeric id as user vs group → no allowlist collision",
+      "source": "redacted:allowlist threadType scoping",
+      "threadType": "group",
+      "pattern": "user allowed but group with same id not",
+      "oldBehavior": "id-only checks risk collision",
+      "expectedBridgeBehavior": "threadType-scoped allowlist; group stays blocked",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "MEDIUM", "covered": "yes"
+    },
+    {
+      "id": "memory-016",
+      "title": "Inbound media/voice unknown type → saved, no unsafe live reply",
+      "source": "redacted:config/media/.../inbound mp3/mp4/pdf",
+      "threadType": "user",
+      "pattern": "inbound voice/pdf without allow",
+      "oldBehavior": "processed and could reply live",
+      "expectedBridgeBehavior": "not allow-listed → no reply; dryRun otherwise",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "MEDIUM", "covered": "yes"
+    },
+    {
+      "id": "memory-017",
+      "title": "Inbound DM contains sk-... API keys → redacted before persistence",
+      "source": "redacted:raw-inbound/2026-05-21.jsonl (user pasted [REDACTED_SECRET] keys)",
+      "threadType": "user",
+      "pattern": "user pastes secret API keys into DM",
+      "oldBehavior": "stored raw sk-... keys in raw-inbound cleartext",
+      "expectedBridgeBehavior": "redact() masks the secret in Message.content before save/trace",
+      "expectedDecision": "allow",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "BLOCKER", "covered": "partial"
+    },
+    {
+      "id": "memory-018",
+      "title": "Group inbound without @mention → dropped, no reply",
+      "source": "redacted:dropped-group-inbound (reason missing_mention) + raw-inbound threadId:null",
+      "threadType": "group",
+      "pattern": "un-mentioned group chatter",
+      "oldBehavior": "dropped if not mentioned (good); threadId null needed derivation",
+      "expectedBridgeBehavior": "group requires allow + mention; else no reply",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "partial"
+    },
+    {
+      "id": "memory-019",
+      "title": "DM noise 'Hi'/'Xin chào' repeated x10 from non-allowed user → no auto-reply",
+      "source": "redacted:raw-inbound/2026-05-21.jsonl (same user ~10 greetings/hour)",
+      "threadType": "user",
+      "pattern": "repeated low-value greeting spam",
+      "oldBehavior": "could reply to each",
+      "expectedBridgeBehavior": "not allow-listed → no reply; cooldown even if allowed",
+      "expectedDecision": "thread_not_allowed",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "MEDIUM", "covered": "yes"
+    },
+    {
+      "id": "memory-020",
+      "title": "Task-capture convention ('all my messages = reminder') → schedule tool + no-reply→human",
+      "source": "redacted:threads/user:...3918.md (per-user task/checklist + timers)",
+      "threadType": "user",
+      "pattern": "NL task capture + recurring reminder",
+      "oldBehavior": "created timers; follow-ups nagged with no escalation",
+      "expectedBridgeBehavior": "reminder engine (governed, dryRun) with no-reply → human escalation",
+      "expectedDecision": "needs_human",
+      "expectedOutbound": false, "expectedLiveSend": false, "severity": "HIGH", "covered": "no"
+    }
+  ]
+}
