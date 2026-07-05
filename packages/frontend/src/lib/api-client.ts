@@ -994,3 +994,125 @@ export function getZaloLoginQR() {
 export function cancelZaloLogin() {
   return apiFetch<{ data: LoginCancelResult }>("/api/zalo/login/cancel", { method: "POST" });
 }
+
+// =============================================================================
+// Decision Trace (Phase 7) — read-only
+// =============================================================================
+
+export interface TraceSummary {
+  messageId: string;
+  threadId: string;
+  threadType: string;
+  senderName: string | null;
+  role: string;
+  contentPreviewRedacted: string;
+  receivedAt: string;
+  ruleMatched: boolean;
+  agentTaskCount: number;
+  toolCallCount: number;
+  zaloActionCount: number;
+  outboundDecision: string | null;
+  outboundDryRun: boolean | null;
+  sentMessageId: string | null;
+}
+
+export interface TraceListResponse {
+  data: TraceSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface TraceDetail {
+  message: {
+    id: string;
+    threadId: string;
+    threadType: string;
+    senderId: string | null;
+    senderName: string | null;
+    role: string;
+    messageType: string | null;
+    contentRedacted: string;
+    receivedAt: string;
+  };
+  identity: { principalId: string; role: string; status: string; scope: "thread" | "global" } | null;
+  gate: {
+    autoReplyEnabled: boolean;
+    groupMentionRequired: boolean;
+    groupReplyWindowSeconds: number;
+    allowCreateReminder: boolean;
+    allowMedia: boolean;
+    allowImageUnderstanding: boolean;
+    allowDocumentUnderstanding: boolean;
+  } | null;
+  rules: Array<{
+    id: string;
+    ruleId: string | null;
+    ruleName: string | null;
+    matched: boolean;
+    actionTaken: string | null;
+    resultRedacted: unknown;
+    errorCode: string | null;
+    createdAt: string;
+  }>;
+  agentTasks: Array<{
+    id: string;
+    agentName: string;
+    taskType: string;
+    status: string;
+    errorMessage: string | null;
+    createdAt: string;
+  }>;
+  toolCalls: Array<{
+    id: string;
+    agentName: string;
+    toolName: string;
+    kind: string;
+    executionStatus: string;
+    deliveryStatus: string;
+    argsRedacted: unknown;
+    resultRedacted: unknown;
+    errorCode: string | null;
+    evidence: unknown;
+    durationMs: number | null;
+    createdAt: string;
+  }>;
+  zaloActions: Array<{
+    id: string;
+    actionType: string;
+    trigger: string;
+    decision: string;
+    reason: string;
+    dryRun: boolean;
+    executionStatus: string;
+    deliveryStatus: string;
+    targetMsgId: string | null;
+    payloadRedacted: unknown;
+    providerResultId: string | null;
+    errorCode: string | null;
+    createdAt: string;
+  }>;
+  outbound: {
+    linkConfidence: "exact" | "best_effort" | "none";
+    reply: { id: string; contentRedacted: string; zaloMessageId: string | null; receivedAt: string } | null;
+    record: {
+      decision: string;
+      reason: string;
+      dryRun: boolean;
+      source: string;
+      sentMessageId: string | null;
+      errorCode: string | null;
+      createdAt: string;
+    } | null;
+  };
+}
+
+export function listTraces(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch<TraceListResponse>(`/api/trace${qs ? `?${qs}` : ""}`);
+}
+
+export function getTrace(messageId: string) {
+  return apiFetch<{ data: TraceDetail }>(`/api/trace/${encodeURIComponent(messageId)}`);
+}
