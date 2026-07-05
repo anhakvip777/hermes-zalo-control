@@ -260,6 +260,24 @@ exhausted retries; no autoReply/live toggled by recovery.
 > - **Still service-only — deferred:** no tool wrapper yet · no autoReply integration · no `sendOutbound` ·
 >   no provider AI · no original-image resend · no live.
 
+> **STATUS: Phase 3.5B-B DONE ✅ (commit `dc5255b`).** Read-only tool wrapper:
+> - Added `memory.retrievalAnswer` (in `tools/memory/retrieval-tools.ts`) — a thin ToolGateway wrapper
+>   that **delegates to `answerRetrieval()`** (3.5B-A).
+> - Tool metadata: `kind=read`, `minRole=basic_chat`, `dataScope=own_thread` (mirrors `memory.searchMessages`).
+> - Input: `query`, `targetThreadId?`, `targetThreadType?`, `dateFrom?`, `dateTo?`, `includeAttachments?`.
+> - Output: `{ status, answerText, evidence[], confidence }` (validated by the tool `resultSchema`).
+> - Preserves the 3.5B-A guarantees inherited from the service: **own-thread scope guard**
+>   (non-admin cross-thread → `permission_denied`, no search runs), role checks, **redaction**, and
+>   **no hallucination** on unreadable OCR. Pure `read` — never throws for expected outcomes.
+> - **Registered in `buildMemoryTools()`** with the real search by default, but **does not auto-run at
+>   runtime** (the registry is not wired into app startup; runtime dispatch is a later phase). A test
+>   asserts registration invokes nothing.
+> - Tests: **91 passed** (incl. new `retrieval-answer-tool.test.ts`, 8 cases: metadata, inclusion in
+>   `buildMemoryTools`, registration-does-not-auto-run, menu case, cross-thread permission_denied,
+>   OCR-unavailable, redaction, resultSchema validation); backend typecheck **0**.
+> - **Still deferred:** no autoReply integration · no `sendOutbound` · no provider AI · no bridge
+>   enablement · no original-image resend · no live.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
