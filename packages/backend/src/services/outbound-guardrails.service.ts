@@ -201,7 +201,20 @@ export interface OutboundRecord {
   errorCode?: string;
   decision: "allow" | "skip" | "block";
   reason: string;
+  /** Phase 4A: persistent idempotency key (nullable). */
+  idempotencyKey?: string | null;
+  /** Phase 4A: inbound Message reference for exact linking/debug. */
+  inboundMessageId?: string | null;
   createdAt: Date;
+}
+
+function sanitizeRecordContent(content: string): string {
+  // Strip C0 control chars (except \t \n \r) that break Prisma SQLite.
+  return (content || "").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").slice(0, 4000);
+}
+
+function outboundContentHash(threadId: string, content: string): string {
+  return createHash("sha256").update(`${threadId}:${content}`).digest("hex");
 }
 
 /**
@@ -213,30 +226,118 @@ export async function saveOutboundRecord(
 ): Promise<void> {
   try {
     const { prisma } = await import("../db.js");
-    // Sanitize content: strip non-printable/control chars that break Prisma SQLite
-    const safeContent = (record.content || "")
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // strip C0 control chars (except \t \n \r)
-      .slice(0, 4000);
     await prisma.outboundRecord.create({
       data: {
         threadId: record.threadId,
         threadType: record.threadType,
-        content: safeContent,
-        contentHash: createHash("sha256")
-          .update(`${record.threadId}:${record.content}`)
-          .digest("hex"),
+        content: sanitizeRecordContent(record.content),
+        contentHash: outboundContentHash(record.threadId, record.content),
         sentMessageId: record.sentMessageId,
         source: record.source,
         dryRun: record.dryRun,
         errorCode: record.errorCode ?? null,
         decision: record.decision,
         reason: record.reason,
+        idempotencyKey: record.idempotencyKey ?? null,
+        inboundMessageId: record.inboundMessageId ?? null,
       },
     });
   } catch (err: unknown) {
     // Non-fatal — DB may be unavailable, dedup continues in-memory
     console.error(`[outbound] Failed to save OutboundRecord to DB: ${(err as Error).message}`);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 4A — persistent outbound idempotency (restart/retry-safe)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface OutboundIdempotencyRow {
+  id: string;
+  decision: string;
+  dryRun: boolean;
+  sentMessageId: string | null;
+  reason: string;
+}
+
+/** Look up an existing OutboundRecord by its idempotency key. */
+export async function findOutboundByIdempotencyKey(
+  idempotencyKey: string,
+): Promise<OutboundIdempotencyRow | null> {
+  try {
+    const { prisma } = await import("../db.js");
+    const row = await prisma.outboundRecord.findUnique({
+      where: { idempotencyKey },
+      select: { id: true, decision: true, dryRun: true, sentMessageId: true, reason: true },
+    });
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ReserveOutboundInput {
+  idempotencyKey: string;
+  inboundMessageId: string | null;
+  threadId: string;
+  threadType: "user" | "group";
+  content: string;
+  source: OutboundRecord["source"];
+  dryRun: boolean;
+}
+
+/**
+ * Write-ahead reservation: create the OutboundRecord with the idempotency key
+ * BEFORE the provider send, so a crash/retry cannot double-send. Relies on the
+ * `@unique` constraint — a concurrent second reservation throws (caught by caller
+ * and treated as a duplicate). Returns the new record id.
+ * Throws on unique violation (P2002) — caller must handle.
+ */
+export async function reserveOutboundRecord(input: ReserveOutboundInput): Promise<string> {
+  const { prisma } = await import("../db.js");
+  const row = await prisma.outboundRecord.create({
+    data: {
+      threadId: input.threadId,
+      threadType: input.threadType,
+      content: sanitizeRecordContent(input.content),
+      contentHash: outboundContentHash(input.threadId, input.content),
+      sentMessageId: "",
+      source: input.source,
+      dryRun: input.dryRun,
+      decision: "allow",
+      reason: "reserved",
+      idempotencyKey: input.idempotencyKey,
+      inboundMessageId: input.inboundMessageId,
+    },
+    select: { id: true },
+  });
+  return row.id;
+}
+
+/** Update a reserved OutboundRecord after the send resolves. Non-fatal on error. */
+export async function updateOutboundRecordById(
+  id: string,
+  patch: { sentMessageId?: string; decision?: "allow" | "skip" | "block"; reason?: string; errorCode?: string | null },
+): Promise<void> {
+  try {
+    const { prisma } = await import("../db.js");
+    await prisma.outboundRecord.update({
+      where: { id },
+      data: {
+        ...(patch.sentMessageId !== undefined ? { sentMessageId: patch.sentMessageId } : {}),
+        ...(patch.decision !== undefined ? { decision: patch.decision } : {}),
+        ...(patch.reason !== undefined ? { reason: patch.reason } : {}),
+        ...(patch.errorCode !== undefined ? { errorCode: patch.errorCode } : {}),
+      },
+    });
+  } catch (err: unknown) {
+    console.error(`[outbound] Failed to update OutboundRecord ${id}: ${(err as Error).message}`);
+  }
+}
+
+/** True when a Prisma error is a unique-constraint violation (P2002). */
+export function isUniqueViolation(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { code?: string }).code === "P2002";
 }
 
 /**

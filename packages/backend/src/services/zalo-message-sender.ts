@@ -20,7 +20,12 @@ export class ZaloMessageSender implements MessageSender {
     threadId: string,
     threadType: "user" | "group",
     source: "auto_reply" | "agent_tool" | "schedule" | "media" | "manual" | "create_reminder" = "auto_reply",
+    opts?: { skipRecord?: boolean },
   ): Promise<SendResult> {
+    // Phase 4A: when the caller (OutboundDispatcher keyed path) owns a write-ahead
+    // reserved OutboundRecord, skip this sender's own record writes to avoid a
+    // duplicate row. Delivery + live-test accounting still happen normally.
+    const skipRecord = opts?.skipRecord === true;
     // ── Dry-run check with live test override ────────────────
     const liveTestCheck = await (async () => {
       try {
@@ -40,23 +45,27 @@ export class ZaloMessageSender implements MessageSender {
 
     if (effectiveDryRun) {
       const msgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      saveOutboundRecord({
-        threadId, threadType, content,
-        sentMessageId: msgId, source, dryRun: true,
-        decision: "allow", reason: liveTestCheck.reason ?? "dry_run",
-      }).catch(() => {});
+      if (!skipRecord) {
+        saveOutboundRecord({
+          threadId, threadType, content,
+          sentMessageId: msgId, source, dryRun: true,
+          decision: "allow", reason: liveTestCheck.reason ?? "dry_run",
+        }).catch(() => {});
+      }
       return { success: true, messageId: msgId };
     }
 
     // ── Group outbound gate: check reply window ──────────────────
     const gateResult = await checkGroupOutboundGate(threadId, threadType);
     if (gateResult) {
-      saveOutboundRecord({
-        threadId, threadType, content,
-        sentMessageId: "", source, dryRun: false,
-        decision: "block", reason: gateResult.errorCode ?? "group_reply_window_closed",
-        errorCode: gateResult.errorCode,
-      }).catch(() => {});
+      if (!skipRecord) {
+        saveOutboundRecord({
+          threadId, threadType, content,
+          sentMessageId: "", source, dryRun: false,
+          decision: "block", reason: gateResult.errorCode ?? "group_reply_window_closed",
+          errorCode: gateResult.errorCode,
+        }).catch(() => {});
+      }
       return gateResult;
     }
 
@@ -128,11 +137,13 @@ export class ZaloMessageSender implements MessageSender {
 
       // Record for dedup + sent-context
       recordOutboundDedup(threadId, content, finalMsgId);
-      saveOutboundRecord({
-        threadId, threadType, content,
-        sentMessageId: finalMsgId, source, dryRun: false,
-        decision: "allow", reason: parts.length > 1 ? "split_send" : "single_send",
-      }).catch(() => {});
+      if (!skipRecord) {
+        saveOutboundRecord({
+          threadId, threadType, content,
+          sentMessageId: finalMsgId, source, dryRun: false,
+          decision: "allow", reason: parts.length > 1 ? "split_send" : "single_send",
+        }).catch(() => {});
+      }
 
       // Record live test send if applicable
       if (liveTestCheck.live && liveTestCheck.sessionId) {

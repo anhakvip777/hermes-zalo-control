@@ -22,7 +22,14 @@ import { basename } from "node:path";
 import { prisma } from "../db.js";
 import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 import { ZaloMessageSender } from "./zalo-message-sender.js";
-import { saveOutboundRecord } from "./outbound-guardrails.service.js";
+import {
+  saveOutboundRecord,
+  findOutboundByIdempotencyKey,
+  reserveOutboundRecord,
+  updateOutboundRecordById,
+  isUniqueViolation,
+} from "./outbound-guardrails.service.js";
+import { createHash } from "node:crypto";
 import { heartbeatOk } from "./heartbeat.service.js";
 import { getEffectiveCooldownSeconds } from "./runtime-config.service.js";
 import { getThreadSettings } from "./thread-settings.service.js";
@@ -233,6 +240,55 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     } catch { /* non-fatal */ }
   }
 
+  // 4.5 ── Idempotency gate (Phase 4A) — text replies only ───────────
+  // Persistent, restart/retry-safe dedup: a given inbound (or identical content)
+  // can produce at most ONE outbound. Reserve the record BEFORE the provider send
+  // (write-ahead) so a crash/retry never double-sends.
+  const idempotencyKey = computeReplyIdempotencyKey(intent);
+  let reservedRecordId: string | null = null;
+  if (idempotencyKey) {
+    const existing = await findOutboundByIdempotencyKey(idempotencyKey);
+    if (existing && existing.decision !== "block" && existing.decision !== "skip") {
+      console.log(`[outbound] duplicate_idempotency skip: key=${idempotencyKey} existing=${existing.id}`);
+      return {
+        success: true,
+        dryRun: existing.dryRun,
+        decision: "skip",
+        reason: "duplicate_idempotency",
+        sentMessageId: existing.sentMessageId ?? undefined,
+        outboundRecordId: existing.id,
+      };
+    }
+    try {
+      reservedRecordId = await reserveOutboundRecord({
+        idempotencyKey,
+        inboundMessageId: relatedMessageId ?? null,
+        threadId,
+        threadType,
+        content: buildRecordContent(intent),
+        source: mapSource(source),
+        dryRun: effectiveDryRun,
+      });
+    } catch (err: unknown) {
+      if (isUniqueViolation(err)) {
+        // Concurrent reservation won the race → treat as duplicate, do NOT send.
+        const dup = await findOutboundByIdempotencyKey(idempotencyKey);
+        console.log(`[outbound] duplicate_idempotency (concurrent) skip: key=${idempotencyKey}`);
+        return {
+          success: true,
+          dryRun: dup?.dryRun ?? effectiveDryRun,
+          decision: "skip",
+          reason: "duplicate_idempotency",
+          sentMessageId: dup?.sentMessageId ?? undefined,
+          outboundRecordId: dup?.id,
+        };
+      }
+      // Other DB error → continue without a reservation (fail-open to not lose the reply).
+      console.error(`[outbound] reservation failed (continuing unkeyed): ${(err as Error).message}`);
+      reservedRecordId = null;
+    }
+  }
+
   // 5. ── Create Assistant Message (text only) ───────────────────────
   let assistantMessageId: string | undefined;
   if (kind === "text") {
@@ -272,22 +328,30 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
       fakeMsgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     }
 
-    const recordContent = buildRecordContent(intent);
-    saveOutboundRecord({
-      threadId, threadType, content: recordContent,
-      sentMessageId: fakeMsgId, source: mapSource(source), dryRun: true,
-      decision: "allow", reason: "dry_run",
-    }).catch(() => {});
+    if (reservedRecordId) {
+      // Update the write-ahead reservation (single record for the keyed path).
+      await updateOutboundRecordById(reservedRecordId, { sentMessageId: fakeMsgId, reason: "dry_run" });
+    } else {
+      const recordContent = buildRecordContent(intent);
+      saveOutboundRecord({
+        threadId, threadType, content: recordContent,
+        sentMessageId: fakeMsgId, source: mapSource(source), dryRun: true,
+        decision: "allow", reason: "dry_run",
+      }).catch(() => {});
+    }
 
     if (assistantMessageId) {
       updateMessageStatus(assistantMessageId, "dryRun", { sentMessageId: fakeMsgId });
     }
 
+    const dryRunResult: OutboundResult = { success: true, dryRun: true, decision: "allow", reason: "dry_run", sentMessageId: fakeMsgId, assistantMessageId };
+    if (reservedRecordId) dryRunResult.outboundRecordId = reservedRecordId;
+
     csSetCooldown(threadId).catch(() => {});
     const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
     heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 
-    return { success: true, dryRun: true, decision: "allow", reason: "dry_run", sentMessageId: fakeMsgId, assistantMessageId };
+    return dryRunResult;
   }
 
   // 7. ── Live send path ────────────────────────────────────────────
@@ -306,7 +370,10 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     sendResult = await sender.sendVoice(v.audioPath, threadId, threadType);
   } else {
     const t = intent as TextOutboundIntent;
-    sendResult = await sender.sendMessage(t.content, threadId, threadType, mapSource(source));
+    // Keyed path: dispatcher owns the reserved record → tell the sender to skip its own.
+    sendResult = await sender.sendMessage(t.content, threadId, threadType, mapSource(source), {
+      skipRecord: reservedRecordId != null,
+    });
   }
 
   // 8. ── Update Message status (text only) ─────────────────────────
@@ -315,6 +382,17 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
       sentMessageId: sendResult.messageId,
       errorCode: sendResult.errorCode,
       error: sendResult.error,
+    });
+  }
+
+  // 8.5 ── Update the write-ahead reservation with the live outcome ──
+  // On failure the reservation stays (key remains) so accidental retries do NOT
+  // double-send; an explicit retry policy is out of scope (Phase 4A).
+  if (reservedRecordId) {
+    await updateOutboundRecordById(reservedRecordId, {
+      sentMessageId: sendResult.messageId ?? "",
+      reason: sendResult.success ? (liveTestSessionId ? "live_test" : "single_send") : "send_failed",
+      errorCode: sendResult.errorCode ?? null,
     });
   }
 
@@ -328,10 +406,29 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     decision: "allow",
     reason: liveTestSessionId ? "live_test" : "single_send",
     sentMessageId: sendResult.messageId ?? undefined,
+    outboundRecordId: reservedRecordId ?? undefined,
     assistantMessageId,
     error: sendResult.error,
     errorCode: sendResult.errorCode,
   };
+}
+
+// ── Phase 4A: idempotency key for text replies ──────────────────────
+// Prefer the EXACT inbound linkage. When there is no inbound (e.g. a proactive
+// send), fall back to a content-scoped key so identical repeated content to the
+// same thread is de-duplicated persistently (a durable version of the in-memory
+// content dedup). Returns null for non-text or when no stable key can be formed.
+function computeReplyIdempotencyKey(intent: OutboundIntent): string | null {
+  const kind = (intent as any).kind || "text";
+  if (kind !== "text") return null;
+  const t = intent as TextOutboundIntent;
+  const tid = normalizeThreadId(intent.threadId);
+  const tt = intent.threadType;
+  if (intent.relatedMessageId) {
+    return `reply:${intent.relatedMessageId}:${tid}:${tt}`;
+  }
+  const hash = createHash("sha256").update(t.content ?? "").digest("hex").slice(0, 16);
+  return `reply:unknown:${tid}:${tt}:${hash}`;
 }
 
 // ── Helper: build safe content string for OutboundRecord ─────────────

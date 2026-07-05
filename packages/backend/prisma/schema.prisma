@@ -200,10 +200,15 @@ model OutboundRecord {
   errorCode      String?
   decision       String   @default("allow") // allow | skip | block
   reason         String
+  // Phase 4A: persistent outbound idempotency (restart/retry-safe dedup for text replies).
+  // Nullable + unique: existing rows (null) never collide; SQLite treats NULLs as distinct.
+  idempotencyKey String?  @unique
+  inboundMessageId String?
   createdAt      DateTime @default(now())
 
   @@index([threadId, createdAt])
   @@index([contentHash])
+  @@index([inboundMessageId])
 }
 
 // =============================================================================
