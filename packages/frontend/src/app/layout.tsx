@@ -20,6 +20,7 @@ const navGroups = [
     label: "Access",
     items: [
       { href: "/access-control", label: "Access Control", icon: "⊞" },
+      { href: "/allow-threads", label: "Allow Threads", icon: "⊠" },
       { href: "/thread-settings", label: "Thread Settings", icon: "⊟" },
       { href: "/thread-review", label: "Thread Review", icon: "⊕" },
     ],

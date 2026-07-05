@@ -283,4 +283,91 @@ export async function accessRoutes(app: FastifyInstance) {
       return reply.send(result);
     },
   );
+
+  // ═══════════════════════════════════════════════════════════════════
+  // AllowThreads — discover real Zalo friends/groups + manage allowlist
+  // ═══════════════════════════════════════════════════════════════════
+
+  // ── GET /api/access/threads/discover ───────────────────────────────
+  // Query: type=user|group|all, query=, limit=, cursor=
+  app.get(
+    "/access/threads/discover",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const q = req.query as Record<string, string | undefined>;
+      const type = (q.type ?? "all") as "user" | "group" | "all";
+      if (!["user", "group", "all"].includes(type)) {
+        return badRequest(reply, "type must be one of: user, group, all");
+      }
+      const limit = q.limit ? parseInt(q.limit, 10) : undefined;
+
+      const { getZaloProvider } = await import("../services/zalo-provider/zca-js-provider.js");
+      const { getAllowedThreads } = await import("../services/allowlist.service.js");
+      const { discoverThreads } = await import("../services/threads-access.service.js");
+
+      const allowedEntries = await getAllowedThreads();
+      const result = await discoverThreads(
+        { type, query: q.query, limit, cursor: q.cursor },
+        { provider: getZaloProvider(), allowedEntries },
+      );
+
+      if (!result.connected) {
+        return reply.status(503).send({
+          error: { code: result.errorCode ?? "ZALO_NOT_CONNECTED", message: result.error ?? "Zalo not connected" },
+          items: [],
+        });
+      }
+      return reply.send({
+        items: result.items,
+        nextCursor: result.nextCursor ?? null,
+        ...(result.errorCode ? { warning: { code: result.errorCode, message: result.error } } : {}),
+      });
+    },
+  );
+
+  // ── GET /api/access/threads/allowed ────────────────────────────────
+  // Current persistent allowlist (threadId + threadType).
+  app.get(
+    "/access/threads/allowed",
+    { preHandler: [adminAuth] },
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      const { getAllowedThreads } = await import("../services/allowlist.service.js");
+      const data = await getAllowedThreads();
+      return reply.send({ data, total: data.length });
+    },
+  );
+
+  // ── PATCH /api/access/threads/allow ────────────────────────────────
+  // Body: { changes: [{ threadId, threadType: "user"|"group", allowed: boolean }] }
+  app.patch(
+    "/access/threads/allow",
+    { preHandler: [adminAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = req.body as { changes?: unknown; reason?: string };
+      if (!Array.isArray(body?.changes) || body.changes.length === 0) {
+        return badRequest(reply, "changes must be a non-empty array");
+      }
+      const changes: Array<{ threadId: string; threadType: "user" | "group"; allowed: boolean }> = [];
+      for (const c of body.changes as Array<Record<string, unknown>>) {
+        if (typeof c?.threadId !== "string" || c.threadId.trim().length === 0) {
+          return badRequest(reply, "each change requires a non-empty threadId");
+        }
+        if (c.threadType !== "user" && c.threadType !== "group") {
+          return badRequest(reply, "each change requires threadType 'user' or 'group'");
+        }
+        if (typeof c.allowed !== "boolean") {
+          return badRequest(reply, "each change requires boolean 'allowed'");
+        }
+        changes.push({ threadId: c.threadId.trim(), threadType: c.threadType, allowed: c.allowed });
+      }
+
+      const { applyAllowChanges } = await import("../services/allowlist.service.js");
+      const data = await applyAllowChanges(
+        changes,
+        "admin",
+        typeof body.reason === "string" ? body.reason : undefined,
+      );
+      return reply.send({ data, total: data.length });
+    },
+  );
 }

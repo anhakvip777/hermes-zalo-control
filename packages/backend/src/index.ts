@@ -16,6 +16,9 @@ async function main() {
   // ── Init runtime config from DB ───────────────────────────────────
   await initRuntimeConfig();
   await initHotCache();
+  // ── Init AllowThreads allowlist cache from DB ─────────────────────
+  const { initAllowlist } = await import("./services/allowlist.service.js");
+  await initAllowlist();
 
   // ── Record backend heartbeat ──────────────────────────────────────
   const heartbeatInterval = setInterval(() => {

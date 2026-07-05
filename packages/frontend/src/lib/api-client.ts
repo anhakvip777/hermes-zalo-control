@@ -1116,3 +1116,56 @@ export function listTraces(params: Record<string, string> = {}) {
 export function getTrace(messageId: string) {
   return apiFetch<{ data: TraceDetail }>(`/api/trace/${encodeURIComponent(messageId)}`);
 }
+
+// =============================================================================
+// AllowThreads — discover friends/groups + manage allowlist
+// =============================================================================
+
+export interface DiscoverThreadItem {
+  threadId: string;
+  threadType: "user" | "group";
+  displayName: string;
+  avatarUrl?: string;
+  subtitle?: string;
+  memberCount?: number;
+  allowed: boolean;
+  source: "zalo";
+}
+
+export interface DiscoverThreadsResponse {
+  items: DiscoverThreadItem[];
+  nextCursor: string | null;
+  warning?: { code: string; message: string };
+}
+
+export interface AllowedThreadEntry {
+  threadId: string;
+  threadType: "user" | "group";
+}
+
+export interface AllowChange {
+  threadId: string;
+  threadType: "user" | "group";
+  allowed: boolean;
+}
+
+export function discoverThreads(params: { type?: "user" | "group" | "all"; query?: string; limit?: number; cursor?: string } = {}) {
+  const qs = new URLSearchParams();
+  if (params.type) qs.set("type", params.type);
+  if (params.query) qs.set("query", params.query);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const s = qs.toString();
+  return apiFetch<DiscoverThreadsResponse>(`/api/access/threads/discover${s ? `?${s}` : ""}`);
+}
+
+export function listAllowedThreads() {
+  return apiFetch<{ data: AllowedThreadEntry[]; total: number }>("/api/access/threads/allowed");
+}
+
+export function updateThreadAllow(changes: AllowChange[], reason?: string) {
+  return apiFetch<{ data: AllowedThreadEntry[]; total: number }>("/api/access/threads/allow", {
+    method: "PATCH",
+    body: JSON.stringify({ changes, reason }),
+  });
+}
