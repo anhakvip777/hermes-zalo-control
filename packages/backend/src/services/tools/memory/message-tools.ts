@@ -16,8 +16,18 @@ const messageSchema = z.object({
   content: z.string(),
   messageType: z.string().nullable(),
   createdAt: z.string(),
+  // Phase 3.5A evidence (present on attachment matches).
+  attachmentId: z.string().nullable().optional(),
+  extractionStatus: z.string().nullable().optional(),
+  source: z.string().optional(),
 });
 const messageListSchema = z.object({ messages: z.array(messageSchema), scope: z.enum(["thread", "global"]) });
+
+function parseDate(v: unknown): Date | undefined {
+  if (typeof v !== "string" || !v.trim()) return undefined;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? undefined : d;
+}
 
 export function createGetRecentMessagesTool(deps: MemoryDeps = {}): ToolDefinition {
   const d = resolveMemoryDeps(deps);
@@ -47,14 +57,38 @@ export function createSearchMessagesTool(deps: MemoryDeps = {}): ToolDefinition 
     argsSchema: z.object({
       query: z.string().min(1),
       threadId: z.string().optional(),
+      threadType: z.enum(["user", "group"]).optional(),
+      dateFrom: z.string().optional(),
+      dateTo: z.string().optional(),
+      includeAttachments: z.boolean().optional(),
       limit: z.number().optional(),
     }),
     resultSchema: messageListSchema,
     async execute({ args, ctx, role }) {
-      const a = args as { query: string; threadId?: string; limit?: number };
-      // Non-admin: forced to own thread. Admin: threadId or global.
+      const a = args as {
+        query: string; threadId?: string; threadType?: "user" | "group";
+        dateFrom?: string; dateTo?: string; includeAttachments?: boolean; limit?: number;
+      };
+      // Non-admin: forced to own thread. Admin: threadId or global. (No cross-thread leak.)
       const scope = resolveThreadScope(role, ctx.threadId, a.threadId);
-      const messages = await d.getMessages({ threadId: scope.threadId, search: a.query, limit: clampLimit(a.limit) });
+      const limit = clampLimit(a.limit);
+      const dateFrom = parseDate(a.dateFrom);
+      const dateTo = parseDate(a.dateTo);
+
+      const messages = await d.getMessages({
+        threadId: scope.threadId, threadType: a.threadType, search: a.query,
+        dateFrom, dateTo, limit,
+      });
+
+      // Phase 3.5A: also search indexed attachments (OCR/vision text) — same scope.
+      if (a.includeAttachments) {
+        const attach = await d.searchAttachments({
+          threadId: scope.threadId, threadType: a.threadType, query: a.query,
+          dateFrom, dateTo, limit,
+        });
+        messages.push(...attach);
+      }
+
       return { result: { messages, scope: scope.global ? "global" : "thread" } };
     },
   };

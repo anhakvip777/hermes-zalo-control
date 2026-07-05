@@ -1003,30 +1003,52 @@ export async function handleIncomingMessage(
 
       const visionResult = await analyzeImage(downloadResult.filePath!, prompt);
 
-      // ── Gap 1: Save OCR/vision to incoming Message metadata ──
-      // Update the original inbound message so conversation context
-      // can surface OCR text and description in subsequent turns.
+      // ── Save OCR/vision: MERGE into Message.metadata (preserve _identity)
+      //    + persist REDACTED extraction into the Attachment index (Phase 3.5A) ──
       try {
         if (msg.zaloMessageId) {
+          // Redact before persisting anywhere (screenshots may contain secrets).
+          const redactedOcr = visionResult.ocrText ? (redact(visionResult.ocrText) as string) : "";
+          const redactedDesc = visionResult.description ? (redact(visionResult.description) as string) : "";
+
           const visionMeta: Record<string, unknown> = {};
-          if (visionResult.description) visionMeta.description = visionResult.description;
-          if (visionResult.ocrText) visionMeta.ocrText = visionResult.ocrText;
+          if (redactedDesc) visionMeta.description = redactedDesc;
+          if (redactedOcr) visionMeta.ocrText = redactedOcr;
           if (visionResult.confidence !== undefined) visionMeta.confidence = visionResult.confidence;
-          if (visionResult.success) {
-            visionMeta.analyzed = true;
-          }
+          if (visionResult.success) visionMeta.analyzed = true;
+
           if (Object.keys(visionMeta).length > 0) {
+            // MERGE: read existing metadata and add `vision`, preserving _identity etc.
+            const existingRow = await prisma.message.findFirst({
+              where: { zaloMessageId: msg.zaloMessageId },
+              select: { id: true, metadata: true },
+            });
+            const { mergeVisionMetadata } = await import("./attachment.service.js");
+            const mergedJson = mergeVisionMetadata(existingRow?.metadata, visionMeta);
             await prisma.message.updateMany({
               where: { zaloMessageId: msg.zaloMessageId },
-              data: {
-                metadata: JSON.stringify({
-                  source: "zalo_receive",
-                  vision: visionMeta,
-                }),
-              },
+              data: { metadata: mergedJson },
             });
-            console.log(`[dispatcher] vision metadata saved to message ${msg.zaloMessageId.slice(0, 12)}...`);
+            console.log(`[dispatcher] vision metadata merged into message ${msg.zaloMessageId.slice(0, 12)}...`);
           }
+
+          // Attachment extraction index (redacted inside the service).
+          const status = !visionResult.success
+            ? "failed"
+            : (visionResult.provider === "none" || (!visionResult.ocrText && !visionResult.description))
+              ? "unavailable"
+              : "success";
+          const { updateExtractionByZaloMessageId } = await import("./attachment.service.js");
+          await updateExtractionByZaloMessageId(msg.zaloMessageId, "image", {
+            extractedText: visionResult.ocrText ?? null,
+            description: visionResult.description ?? null,
+            status,
+            provider: visionResult.provider ?? null,
+            model: visionResult.model ?? null,
+            confidence: visionResult.confidence ?? null,
+            sha256: downloadResult.hash ?? null,
+            mimeType: downloadResult.mimeType ?? null,
+          });
         }
       } catch (metaErr) {
         console.error(`[dispatcher] failed to save vision metadata: ${metaErr instanceof Error ? metaErr.message : String(metaErr)}`);

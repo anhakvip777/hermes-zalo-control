@@ -147,6 +147,44 @@ model Message {
 }
 
 // =============================================================================
+// Attachment — inbound media (image/file/voice/video) + extraction index
+// Phase 3.5A: additive, nullable. Enables thread/date/keyword retrieval of media
+// by its extracted (OCR/vision) text. extractedText/description are REDACTED
+// before persistence. storageKey stays null until permanent retention is added.
+// =============================================================================
+
+model Attachment {
+  id               String   @id @default(cuid())
+  messageId        String
+  zaloMessageId    String?
+  threadId         String
+  threadType       String   @default("user") // user | group
+  senderId         String?
+  kind             String   // image | file | voice | video
+  mimeType         String?
+  fileName         String?
+  sizeBytes        Int?
+  sha256           String?
+  sourceUrlRedacted String?
+  storageKey       String?
+  extractedText    String?  // REDACTED OCR/vision text
+  description      String?  // REDACTED vision description
+  extractionStatus String   @default("pending") // pending | success | failed | unavailable
+  redactionApplied Boolean  @default(false)
+  provider         String?
+  model            String?
+  confidence       Float?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([messageId])
+  @@index([threadId, createdAt])
+  @@index([sha256])
+  @@index([kind])
+  @@index([extractionStatus])
+}
+
+// =============================================================================
 // Zalo Threads — known groups/users
 // =============================================================================
 

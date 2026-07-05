@@ -340,7 +340,7 @@ export async function saveIncomingMessage(
   const safeMetadata =
     typeof msg.rawMetadata === "string" ? (redact(msg.rawMetadata) as string) : msg.rawMetadata;
 
-  await prisma.message.upsert({
+  const savedMessage = await prisma.message.upsert({
     where: messageIdForDb ? { zaloMessageId: messageIdForDb } : { id: `dedup-${key}` },
     update: {},
     create: {
@@ -356,7 +356,31 @@ export async function saveIncomingMessage(
       metadata: safeMetadata,
       receivedAt: new Date(),
     },
+    select: { id: true },
   });
+
+  // ── Phase 3.5A: index inbound media as an Attachment (pending extraction) ──
+  // Non-blocking: media indexing failure must never affect message processing.
+  try {
+    const { deriveAttachmentKind, saveInboundAttachment } = await import("./attachment.service.js");
+    const kind = deriveAttachmentKind(msg.messageType);
+    if (kind) {
+      const sourceUrl = kind === "image" ? (msg.imageUrl ?? null) : kind === "file" ? (msg.fileUrl ?? null) : null;
+      await saveInboundAttachment({
+        messageId: savedMessage.id,
+        zaloMessageId: messageIdForDb,
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        senderId: msg.senderId || null,
+        kind,
+        fileName: msg.fileName ?? null,
+        sizeBytes: typeof msg.fileSize === "number" ? msg.fileSize : null,
+        sourceUrl,
+      });
+    }
+  } catch (err: unknown) {
+    console.error(`[zalo-receive] attachment index failed: ${(err as Error).message}`);
+  }
 
   // Upsert ThreadProfile from inbound message (Batch T1)
   // Non-blocking: failure here must not affect message processing.

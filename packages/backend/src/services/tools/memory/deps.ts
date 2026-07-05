@@ -14,6 +14,21 @@ export interface MemoryMessage {
   content: string;
   messageType: string | null;
   createdAt: string;
+  /** Phase 3.5A: set when this result came from an indexed attachment. */
+  attachmentId?: string | null;
+  /** Phase 3.5A: attachment extraction status (image/file OCR/vision). */
+  extractionStatus?: string | null;
+  /** Phase 3.5A: "message" | "attachment". */
+  source?: string;
+}
+
+export interface AttachmentSearch {
+  threadId?: string;
+  threadType?: "user" | "group";
+  query?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  limit: number;
 }
 
 export interface MemoryOutbound {
@@ -62,12 +77,16 @@ export interface MemoryRuntimeStatus {
 
 export interface MessageQuery {
   threadId?: string; // undefined = global (admin only, enforced by caller)
+  threadType?: "user" | "group";
   search?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
   limit: number;
 }
 
 export interface MemoryDeps {
   getMessages?: (q: MessageQuery) => Promise<MemoryMessage[]>;
+  searchAttachments?: (q: AttachmentSearch) => Promise<MemoryMessage[]>;
   getOutboundRecords?: (q: { threadId?: string; limit: number }) => Promise<MemoryOutbound[]>;
   getAgentTasks?: (q: { limit: number; status?: string }) => Promise<MemoryAgentTask[]>;
   getRuleExecutions?: (q: { threadId?: string; messageId?: string; limit: number }) => Promise<MemoryRuleExecution[]>;
@@ -83,7 +102,14 @@ export async function defaultGetMessages(q: MessageQuery): Promise<MemoryMessage
   const { prisma } = await import("../../../db.js");
   const where: Record<string, unknown> = {};
   if (q.threadId) where.threadId = q.threadId;
+  if (q.threadType) where.threadType = q.threadType;
   if (q.search) where.content = { contains: q.search };
+  if (q.dateFrom || q.dateTo) {
+    where.createdAt = {
+      ...(q.dateFrom ? { gte: q.dateFrom } : {}),
+      ...(q.dateTo ? { lte: q.dateTo } : {}),
+    };
+  }
   const rows = await (prisma as any).message.findMany({
     where,
     orderBy: { createdAt: "desc" },
@@ -98,6 +124,32 @@ export async function defaultGetMessages(q: MessageQuery): Promise<MemoryMessage
     content: String(r.content ?? "").slice(0, 2000),
     messageType: r.messageType ?? null,
     createdAt: isoOrEmpty(r.createdAt),
+    source: "message",
+  }));
+}
+
+// Phase 3.5A: search indexed attachments by extracted (OCR/vision) text.
+export async function defaultSearchAttachments(q: AttachmentSearch): Promise<MemoryMessage[]> {
+  const { searchAttachments } = await import("../../attachment.service.js");
+  const rows = await searchAttachments({
+    threadId: q.threadId,
+    threadType: q.threadType,
+    query: q.query,
+    dateFrom: q.dateFrom,
+    dateTo: q.dateTo,
+    limit: q.limit,
+  });
+  return rows.map((r) => ({
+    id: r.messageId,
+    threadId: r.threadId,
+    role: "user",
+    senderId: null,
+    content: r.snippet,
+    messageType: r.kind,
+    createdAt: r.createdAt,
+    attachmentId: r.attachmentId,
+    extractionStatus: r.extractionStatus,
+    source: "attachment",
   }));
 }
 
@@ -203,6 +255,7 @@ export async function defaultGetRuntimeStatus(): Promise<MemoryRuntimeStatus> {
 export function resolveMemoryDeps(deps: MemoryDeps): Required<MemoryDeps> {
   return {
     getMessages: deps.getMessages ?? defaultGetMessages,
+    searchAttachments: deps.searchAttachments ?? defaultSearchAttachments,
     getOutboundRecords: deps.getOutboundRecords ?? defaultGetOutboundRecords,
     getAgentTasks: deps.getAgentTasks ?? defaultGetAgentTasks,
     getRuleExecutions: deps.getRuleExecutions ?? defaultGetRuleExecutions,
