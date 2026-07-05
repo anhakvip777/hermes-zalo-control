@@ -22,6 +22,7 @@ import type { NormalizedMessage } from "./zalo-receive.js";
 import type { ConversationState } from "./thread-conversation-state.service.js";
 import { saveOutboundRecord } from "./outbound-guardrails.service.js";
 import { sendOutbound } from "./outbound-dispatcher.service.js";
+import { hasUnsupportedSystemClaim, hasScheduleEvidence } from "./unsupported-claim-guard.service.js";
 import { clearAllCooldowns, getActiveCooldowns, clearCooldown } from "./cooldown.service.js";
 
 // ── Cooldown (R5): unified DB-backed store ───────────────────────────
@@ -625,63 +626,53 @@ async function fetchScheduleContext(threadId: string): Promise<ScheduleContext> 
 }
 
 // ── Unsupported system claim detection ──────────────────────────────
+// Extracted to unsupported-claim-guard.service.ts (shared with AgentBridge).
+// Imported below; call sites (hasUnsupportedSystemClaim / hasScheduleEvidence)
+// are unchanged.
 
-/** Keywords that signal a fabricated system claim when no DB evidence exists. */
-const UNSUPPORTED_CLAIM_PATTERNS = [
-  // Past-tense fabricated system claims
-  /đã gửi/i,
-  /đã nhắc/i,
-  /đã đặt lịch/i,
-  /bị lỗi gửi/i,
-  /không gửi được/i,
-  /lỗi hệ thống nhắc/i,
-  /đã lên lịch/i,
-  /đã thực hiện/i,
-  // Future-tense schedule creation claims (bot claims it will do something)
-  /đã ghi nhận/i,
-  /sẽ nhắc/i,
-  /sẽ gửi/i,
-  /đã tạo lịch/i,
-  /đã lên lịch/i,
-  /sẽ báo/i,
-];
-
-function hasUnsupportedSystemClaim(reply: string): boolean {
-  return UNSUPPORTED_CLAIM_PATTERNS.some((p) => p.test(reply));
-}
-
-/** Check if there is real DB evidence that a system action occurred for this thread. */
-async function hasScheduleEvidence(threadId: string): Promise<boolean> {
+// ── Phase 5: structured AgentBridge (flag-gated, default OFF) ────────
+/**
+ * Try the structured AgentBridge. Returns a {reply, confidence} on success, or
+ * null to signal the caller to fall back to the text-only HermesChatAdapter.
+ * Any error / safe-fallback → null (never throws), so the text-only path is
+ * never broken. Only invoked when config.hermesAgentBridge.enabled is true.
+ */
+async function tryAgentBridgeReply(
+  msg: NormalizedMessage,
+  content: string,
+  recentMessages: string[],
+  scheduleContext: string | undefined,
+): Promise<{ reply: string; confidence?: number } | null> {
   try {
-    // Check for successful executions in last 7 days
-    const recentExec = await prisma.scheduleExecution.findFirst({
-      where: {
-        targetId: threadId,
-        status: "success",
-        actualRunAt: {
-          gte: new Date(Date.now() - 7 * 24 * 3600_000),
-        },
-      },
-      select: { id: true },
+    const { getAgentBridge } = await import("./agent-bridge/index.js");
+    const role = ((msg as any).__principalRole ?? "form_only") as
+      | "form_only"
+      | "basic_chat"
+      | "advanced"
+      | "admin";
+    const result = await getAgentBridge().run({
+      threadId: msg.threadId,
+      threadType: msg.threadType,
+      senderId: msg.senderId,
+      senderName: msg.senderName,
+      role,
+      principalId: msg.senderId ?? null,
+      content,
+      recentMessages,
+      scheduleContext,
+      agentName: "hermes",
+      relatedMessageId: msg.zaloMessageId ?? undefined,
+      runtime: { dryRun: getCurrentEffectiveDryRun(), live: false },
     });
-    if (recentExec) return true;
-
-    // Check for recently created schedules/jobs (proves bot actually created something)
-    const recentSchedule = await prisma.schedule.findFirst({
-      where: {
-        targetId: threadId,
-        createdAt: {
-          gte: new Date(Date.now() - 60_000), // last 60 seconds
-        },
-      },
-      select: { id: true },
-    });
-    if (recentSchedule) return true;
-
-    return false;
-  } catch {
-    // DB unavailable → block claim (safe default)
-    return false;
+    // On any safe fallback (error/timeout/too-many-rounds/claim), defer to the
+    // proven text-only path rather than sending the bridge's canned fallback.
+    if (result.usedFallback) return null;
+    const text = (result.text ?? "").trim();
+    if (!text) return null;
+    return { reply: text, confidence: result.confidence };
+  } catch (err: unknown) {
+    console.error(`[dispatcher] AgentBridge error (fallback to text-only): ${(err as Error)?.message ?? "unknown"}`);
+    return null;
   }
 }
 
@@ -1600,17 +1591,26 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       scheduleContext = ctx.summary;
     }
 
-    // Generate reply via Hermes adapter
-    const adapter = getHermesChatAdapter();
-    const chatReply = await adapter.generateReply({
-      threadId: msg.threadId,
-      threadType: msg.threadType,
-      senderId: msg.senderId,
-      senderName: msg.senderName,
-      content: effectiveContent,
-      recentMessages: convContext.recentMessages.map(m => `${m.role}: ${m.content}`),
-      scheduleContext,
-    });
+    // Generate reply: structured AgentBridge (flag-gated, default OFF) → text-only fallback.
+    // With HERMES_AGENT_BRIDGE_ENABLED=false (default) this branch is skipped and
+    // behavior is identical to the text-only path.
+    const recentForReply = convContext.recentMessages.map((m) => `${m.role}: ${m.content}`);
+    let chatReply: { reply: string; confidence?: number } | null = null;
+    if (config.hermesAgentBridge.enabled) {
+      chatReply = await tryAgentBridgeReply(msg, effectiveContent, recentForReply, scheduleContext);
+    }
+    if (!chatReply) {
+      const adapter = getHermesChatAdapter();
+      chatReply = await adapter.generateReply({
+        threadId: msg.threadId,
+        threadType: msg.threadType,
+        senderId: msg.senderId,
+        senderName: msg.senderName,
+        content: effectiveContent,
+        recentMessages: recentForReply,
+        scheduleContext,
+      });
+    }
 
     // ── Safety: Empty reply ───────────────────────────────────────
     const replyText = (chatReply.reply ?? "").trim();
