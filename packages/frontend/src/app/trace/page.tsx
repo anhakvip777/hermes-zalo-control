@@ -425,16 +425,26 @@ function TraceDetailPanel({ messageId, onClose }: { messageId: string; onClose: 
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-slate-600 uppercase tracking-wider">Link</span>
                     <Pill
-                      label={trace.outbound.linkConfidence}
+                      label={trace.link?.linkMode ?? trace.outbound.linkConfidence}
                       cls={
-                        trace.outbound.linkConfidence === "exact"
+                        (trace.link?.linkMode ?? trace.outbound.linkConfidence) === "exact"
                           ? "bg-green-950 text-green-400 border-green-800"
-                          : trace.outbound.linkConfidence === "best_effort"
+                          : (trace.link?.linkMode ?? trace.outbound.linkConfidence) === "best_effort"
                             ? "bg-yellow-950 text-yellow-400 border-yellow-800"
                             : "bg-slate-900 text-slate-500 border-slate-700"
                       }
                     />
                   </div>
+                  {trace.link && (
+                    <div className="rounded bg-slate-950 border border-slate-800 p-2 text-[10px] font-mono text-slate-500 space-y-0.5">
+                      <div>inbound: <span className="text-slate-300">{trace.link.inboundMessageId}</span></div>
+                      <div>agentTask: <span className="text-slate-300">{trace.link.agentTaskId ?? "—"}</span></div>
+                      <div>outboundRecord: <span className="text-slate-300">{trace.link.outboundRecordId ?? "—"}</span></div>
+                      {trace.link.missingLinks.length > 0 && (
+                        <div className="text-amber-500">missing: {trace.link.missingLinks.join(", ")}</div>
+                      )}
+                    </div>
+                  )}
                   {trace.outbound.record ? (
                     <div className="grid grid-cols-2 gap-2">
                       <Field label="Decision" value={<Pill label={trace.outbound.record.decision.toUpperCase()} cls={decisionCls(trace.outbound.record.decision)} />} />

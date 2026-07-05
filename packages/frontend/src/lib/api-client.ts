@@ -1093,10 +1093,19 @@ export interface TraceDetail {
     errorCode: string | null;
     createdAt: string;
   }>;
+  link?: {
+    linkMode: "exact" | "best_effort" | "none";
+    inboundMessageId: string;
+    replyMessageId: string | null;
+    agentTaskId: string | null;
+    outboundRecordId: string | null;
+    missingLinks: string[];
+  };
   outbound: {
     linkConfidence: "exact" | "best_effort" | "none";
     reply: { id: string; contentRedacted: string; zaloMessageId: string | null; receivedAt: string } | null;
     record: {
+      outboundRecordId?: string;
       decision: string;
       reason: string;
       dryRun: boolean;

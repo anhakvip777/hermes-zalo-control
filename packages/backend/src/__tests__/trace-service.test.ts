@@ -335,27 +335,67 @@ describe("trace.service — buildTrace", () => {
     expect(trace!.zaloActions.every((a) => a.actionType === "poll" || a.actionType === "reaction")).toBe(true);
   });
 
-  it("links outbound with exact confidence via sentMessageId === reply.zaloMessageId", async () => {
+  it("links outbound with exact confidence via sentMessageId === reply.zaloMessageId (live)", async () => {
     const trace = await buildTrace("msg-in", new StubSource(baseStore()));
     expect(trace!.outbound.linkConfidence).toBe("exact");
     expect(trace!.outbound.record?.sentMessageId).toBe("z-sent-1");
+    expect(trace!.outbound.record?.outboundRecordId).toBe("ob-1");
     expect(trace!.outbound.reply?.id).toBe("msg-reply");
   });
 
-  it("falls back to best_effort when no sentMessageId match", async () => {
+  it("Phase 7: exact link via reply.metadata.sentMessageId when zaloMessageId is null (dry-run)", async () => {
     const store = baseStore();
-    // Break the exact link: reply has no zaloMessageId.
-    store.messages.find((m) => m.id === "msg-reply")!.zaloMessageId = null;
+    const reply = store.messages.find((m) => m.id === "msg-reply")!;
+    // Dry-run reality: assistant reply has NO zaloMessageId column; the sent id
+    // lives in metadata (as the dispatcher writes it), and the OutboundRecord
+    // shares the same id.
+    reply.zaloMessageId = null;
+    reply.metadata = JSON.stringify({ source: "outbound_hermes", dryRun: true, sentMessageId: "z-sent-1" });
     const trace = await buildTrace("msg-in", new StubSource(store));
-    expect(trace!.outbound.linkConfidence).toBe("best_effort");
+    expect(trace!.outbound.linkConfidence).toBe("exact");
+    expect(trace!.outbound.record?.outboundRecordId).toBe("ob-1");
   });
 
-  it("reports none when there is no outbound record", async () => {
+  it("Phase 7: exposes an explicit link object (inbound -> agentTask -> outbound)", async () => {
+    const trace = await buildTrace("msg-in", new StubSource(baseStore()));
+    expect(trace!.link.linkMode).toBe("exact");
+    expect(trace!.link.inboundMessageId).toBe("msg-in");
+    expect(trace!.link.replyMessageId).toBe("msg-reply");
+    expect(trace!.link.agentTaskId).toBe("task-1");
+    expect(trace!.link.outboundRecordId).toBe("ob-1");
+    expect(trace!.link.missingLinks).toEqual([]);
+  });
+
+  it("falls back to best_effort when no sent id matches", async () => {
     const store = baseStore();
+    // Break the exact link: reply has neither zaloMessageId nor metadata sent id.
+    const reply = store.messages.find((m) => m.id === "msg-reply")!;
+    reply.zaloMessageId = null;
+    reply.metadata = null;
+    const trace = await buildTrace("msg-in", new StubSource(store));
+    expect(trace!.outbound.linkConfidence).toBe("best_effort");
+    expect(trace!.link.linkMode).toBe("best_effort");
+  });
+
+  it("blocked thread: no outbound record -> linkMode none, missingLinks lists gaps", async () => {
+    const store = baseStore();
+    // Simulate thread_not_allowed: no reply, no agentTask, no outbound.
     store.outbound = [];
+    store.messages = store.messages.filter((m) => m.id !== "msg-reply");
+    store.agentTasks = [];
     const trace = await buildTrace("msg-in", new StubSource(store));
     expect(trace!.outbound.linkConfidence).toBe("none");
     expect(trace!.outbound.record).toBeNull();
+    expect(trace!.link.linkMode).toBe("none");
+    expect(trace!.link.missingLinks).toEqual(expect.arrayContaining(["agentTask", "reply", "outbound"]));
+  });
+
+  it("Phase 7: identityConfidence surfaced from inbound metadata _identity (Phase 2 preserved)", async () => {
+    const store = baseStore();
+    const inbound = store.messages.find((m) => m.id === "msg-in")!;
+    inbound.metadata = JSON.stringify({ _identity: { confidence: "derived", source: ["groupId", "senderId"] } });
+    const trace = await buildTrace("msg-in", new StubSource(store));
+    expect(trace!.identityResolution).toEqual({ confidence: "derived", source: ["groupId", "senderId"] });
   });
 
   it("returns null for a missing message", async () => {

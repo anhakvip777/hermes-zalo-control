@@ -180,6 +180,20 @@ export interface TraceDetail {
   };
   /** KI-H1: how the inbound (threadId/threadType/senderId) triad was resolved. */
   identityResolution: { confidence: string; source: string[] } | null;
+  /**
+   * Phase 7: explicit inbound -> agentTask -> outbound linkage.
+   * linkMode "exact" means the outbound was matched to THIS inbound via the
+   * deterministic sentMessageId shared by the assistant reply and the
+   * OutboundRecord (not thread+time proximity).
+   */
+  link: {
+    linkMode: "exact" | "best_effort" | "none";
+    inboundMessageId: string;
+    replyMessageId: string | null;
+    agentTaskId: string | null;
+    outboundRecordId: string | null;
+    missingLinks: string[];
+  };
   identity: { principalId: string; role: string; status: string; scope: "thread" | "global" } | null;
   gate:
     | {
@@ -244,6 +258,7 @@ export interface TraceDetail {
     reply: { id: string; contentRedacted: string; zaloMessageId: string | null; receivedAt: string } | null;
     record:
       | {
+          outboundRecordId: string;
           decision: string;
           reason: string;
           dryRun: boolean;
@@ -553,6 +568,19 @@ export async function buildTrace(
   const reply = await source.getAssistantReply(messageId);
   const outbound = await resolveOutbound(source, message, reply);
 
+  // Phase 7: explicit inbound -> agentTask -> outbound linkage (no thread+time guessing).
+  const link: TraceDetail["link"] = {
+    linkMode: outbound.linkConfidence,
+    inboundMessageId: message.id,
+    replyMessageId: reply?.id ?? null,
+    agentTaskId: agentTasks[0]?.id ?? null,
+    outboundRecordId: outbound.record?.outboundRecordId ?? null,
+    missingLinks: [],
+  };
+  if (!link.agentTaskId) link.missingLinks.push("agentTask");
+  if (!link.replyMessageId) link.missingLinks.push("reply");
+  if (!link.outboundRecordId) link.missingLinks.push("outbound");
+
   return {
     message: {
       id: message.id,
@@ -566,6 +594,7 @@ export async function buildTrace(
       receivedAt: iso(message.receivedAt),
     },
     identityResolution,
+    link,
     identity,
     gate,
     rules,
@@ -577,8 +606,30 @@ export async function buildTrace(
 }
 
 /**
+ * The deterministic id the dispatcher assigns to a single outbound send. It is
+ * written to BOTH the assistant reply Message (zaloMessageId column when live,
+ * or `metadata.sentMessageId` in dry-run) AND the OutboundRecord.sentMessageId.
+ * This is the 1:1 key used for exact linking (not thread+time proximity).
+ */
+function replySentId(reply: MessageRow | null): string | null {
+  if (!reply) return null;
+  if (reply.zaloMessageId) return reply.zaloMessageId;
+  if (reply.metadata) {
+    try {
+      const m = JSON.parse(reply.metadata) as { sentMessageId?: unknown };
+      if (typeof m?.sentMessageId === "string" && m.sentMessageId) return m.sentMessageId;
+    } catch {
+      /* not JSON — ignore */
+    }
+  }
+  return null;
+}
+
+/**
  * Link the assistant reply to an OutboundRecord with honest confidence:
- *   exact       — OutboundRecord.sentMessageId === reply.zaloMessageId
+ *   exact       — OutboundRecord.sentMessageId === the reply's deterministic
+ *                 sent id (zaloMessageId or metadata.sentMessageId). Works for
+ *                 dry-run and live because both sides share the same id.
  *   best_effort — same thread, created at/after inbound, nearest in time
  *   none        — no candidate found
  */
@@ -604,8 +655,9 @@ async function resolveOutbound(
   let matched: OutboundRecordRow | null = null;
   let confidence: "exact" | "best_effort" | "none" = "none";
 
-  if (reply?.zaloMessageId) {
-    matched = candidates.find((c) => c.sentMessageId && c.sentMessageId === reply.zaloMessageId) ?? null;
+  const sentId = replySentId(reply);
+  if (sentId) {
+    matched = candidates.find((c) => c.sentMessageId && c.sentMessageId === sentId) ?? null;
     if (matched) confidence = "exact";
   }
 
@@ -617,6 +669,7 @@ async function resolveOutbound(
 
   const record = matched
     ? {
+        outboundRecordId: matched.id,
         decision: matched.decision,
         reason: matched.reason,
         dryRun: matched.dryRun,
