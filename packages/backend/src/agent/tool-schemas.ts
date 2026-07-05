@@ -50,6 +50,24 @@ export const SearchMessagesToolInput = z.object({
 
 export type SearchMessagesToolInput = z.infer<typeof SearchMessagesToolInput>;
 
+// ─── retrieval-answer (Phase 3.5C: admin/test route) ─────────────────
+
+export const RetrievalAnswerToolInput = z.object({
+  query: z.string().min(1),
+  requesterThreadId: z.string().min(1),
+  requesterThreadType: z.enum(["user", "group"]),
+  targetThreadId: z.string().min(1).optional(),
+  targetThreadType: z.enum(["user", "group"]).optional(),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
+  includeAttachments: z.boolean().optional(),
+  // Admin-only route; default admin. Optional override lets an admin simulate a
+  // lower role (e.g. "basic_chat") to verify the scope guard / permission_denied.
+  role: z.enum(["form_only", "basic_chat", "advanced", "admin"]).optional(),
+});
+
+export type RetrievalAnswerToolInput = z.infer<typeof RetrievalAnswerToolInput>;
+
 // ─── parse-command ───────────────────────────────────────────────────
 
 export const ParseCommandInput = z.object({

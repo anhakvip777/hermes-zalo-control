@@ -8,7 +8,9 @@ import {
   CreateAttendanceToolInput,
   ParseAttendanceToolInput,
   CreateAgentTaskInput,
+  RetrievalAnswerToolInput,
 } from "../agent/tool-schemas.js";
+import { answerRetrieval } from "../services/retrieval-answer.service.js";
 import * as agentTaskService from "../services/agent-task.service.js";
 import * as scheduleService from "../services/schedule.service.js";
 import { listMessages } from "../services/zalo-receive.js";
@@ -135,6 +137,27 @@ export async function agentRoutes(app: FastifyInstance) {
     });
 
     return result;
+  });
+
+  // ─── POST /api/agent/tools/retrieval-answer ───────────────────
+  // Phase 3.5C: read-only admin/test route. Delegates to answerRetrieval()
+  // (scope guard + redaction + no-hallucination live in the service). Pure read:
+  // no withAgentTask, no sendOutbound, no provider AI, no Zalo send, no bridge.
+  // Admin-authed (registerProtected); optional `role` lets an admin simulate a
+  // lower role to verify permission_denied. Never toggles live/autoReply.
+  app.post("/agent/tools/retrieval-answer", async (request) => {
+    const input = RetrievalAnswerToolInput.parse(request.body);
+    return answerRetrieval({
+      query: input.query,
+      requesterThreadId: input.requesterThreadId,
+      requesterThreadType: input.requesterThreadType,
+      targetThreadId: input.targetThreadId,
+      targetThreadType: input.targetThreadType,
+      dateFrom: input.dateFrom,
+      dateTo: input.dateTo,
+      includeAttachments: input.includeAttachments,
+      role: input.role ?? "admin",
+    });
   });
 
   // ─── GET /api/agent/messages ────────────────────────────────────
