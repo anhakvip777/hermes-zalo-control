@@ -301,6 +301,29 @@ image/file/media by **thread / date / keyword**, safely and with evidence.
 ---
 
 ### PHASE 4 — KI-H3 persistent dedupe / idempotency (HIGH, gate for expanded live)
+
+> **STATUS: Phase 4A DONE ✅ (commit `8426a6a`).** The text reply path now has persistent,
+> restart/retry-safe idempotency:
+> - `OutboundRecord` gained `idempotencyKey String? @unique` + `inboundMessageId String?`
+>   (additive, nullable migration `20260706000000_add_outbound_idempotency`).
+> - Keyed text replies **write-ahead reserve** an `OutboundRecord` (reason `reserved`) **before** the
+>   provider send, then update the same row after send — one row per keyed send (sender `skipRecord`).
+> - A repeat of the same inbound (or identical content) — including after **restart/retry** or a
+>   **concurrent** duplicate (P2002 unique violation) — is **skipped** with `reason=duplicate_idempotency`
+>   and the provider is **not** called.
+> - Works identically for **dry-run** and **future live**.
+> - Key format: `reply:<inboundMessageId>:<threadId>:<threadType>`; fallback (no inbound id):
+>   `reply:unknown:<threadId>:<threadType>:<contentHash16>`. (Tools/reactions/polls already had
+>   `@unique` idempotency keys — unchanged.)
+> - Tests: **87/87 passed** (incl. new `outbound-idempotency.test.ts`, 6 cases); backend typecheck 0.
+>
+> **Deferred (not in 4A):**
+> - **Phase 4B** — reminder/schedule fire idempotency (`reminder:<scheduleId>:<fireAt>:<threadId>:<threadType>`).
+> - Persistent inbound fallback dedupe for messages with **no `zaloMessageId`** (currently in-memory only).
+> - Live-test quota **atomicity** (check→increment race on `LiveTestSession.sentCount`).
+> - **Explicit retry policy** for a failed live send (a failed reservation currently blocks accidental
+>   auto-retry by design — a deliberate retry needs an explicit mechanism).
+
 **Goal:** no duplicate send after a restart or cache reset.
 
 Evidence: legacy `outbound-dedupe/` (218 hits, in-memory/file, not restart-proof); bridge has
