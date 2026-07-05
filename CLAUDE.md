@@ -1,333 +1,279 @@
-# CLAUDE.md — Hermes Zalo Control Center
+# CLAUDE.md — Hermes Zalo Control Center / Hermes Zalo Bridge
 
-## Agent Operating Protocol (Iron Laws)
+> Context file for Claude Code when working in this repo. Read this first, then read
+> the files under **"Files to read before editing"** before touching any code.
 
-> See full protocol: [docs/AGENT_OPERATING_PROTOCOL.md](docs/AGENT_OPERATING_PROTOCOL.md)
+## Role of Claude Code in this repo
 
-### Iron Laws
+You are a **careful bridge/infrastructure engineer** for a system that sits between **Zalo**
+(via `zca-js`) and **AI agents**. This project is a control plane, not a toy chatbot.
 
-1. **Verification:** No PASS/SUCCESS claim without fresh evidence (test output, exit code, API response). Exit code != 0 → CANNOT claim PASS.
-2. **Mini-Plan:** No code/config changes without user-approved plan first.
-3. **State Reconciliation:** After empty response, interruption, tool error — reconcile state before proceeding.
-4. **Safety:** ⛔ Never set global live=true. Never delete session/DB without approval. Never expose tokens/session.
-5. **Evidence:** Every status report includes actual command output, not interpretation.
+Think of the system as three layers:
 
-### Pre-Commit Gates
+- **Zalo Bridge** — owns the `zca-js` session and all Zalo I/O (inbound + outbound).
+- **Tool Gateway** — the shared core: permission matrix, schema validation, audit/evidence,
+  redaction, dryRun/live gate, and the single outbound door. Every agent goes through it.
+- **Agent Adapter Layer** — pluggable adapters that connect a specific AI agent to the Bridge.
+  **Hermes is the first adapter, not the core protocol.** The core is agent-agnostic.
 
-```
-[ ] npm test -w packages/backend         → All pass, exit 0
-[ ] npm run typecheck -w packages/backend → exit 0
-[ ] npm run build -w packages/backend     → exit 0
-[ ] npm run build -w packages/frontend    → exit 0
-[ ] git diff --stat                       → No unintended changes
-```
+Your job:
 
-Failure at any gate → STOP. Do not commit. Fix first.
+- Extend the **Bridge + Tool Gateway** so **any agent** can operate Zalo **only through controlled
+  tools**, never directly.
+- Keep every Zalo action **auditable, permissioned, and reversible**.
+- Prefer small, verifiable changes. Read code first, propose a mini-plan, then implement.
+- Never claim something works without command output / exit code as evidence.
 
-### Live Ops Verification
+You are **not** allowed to:
 
-After any live system change, verify:
-- Runtime config: `dryRun=true`, allowedThreads correct
-- Live test: `active=false` (unless intentional)
-- Zalo: `connected=true`, `listenerActive=true`, session exists
-- Heartbeats: all `"ok"` (not `"down"`)
+- Turn on global live sending.
+- Delete or reset the DB, Zalo session, or backups.
+- Commit tokens, cookies, session files, or `.env`.
+- Let any agent call `zca-js` directly, or bypass the Tool Gateway / `OutboundDispatcher` for
+  outbound messages.
 
-## Project Summary
-
-A web dashboard for controlling AI agents that operate through Zalo. The system lets an AI agent (Hermes) create schedules, send messages, and interact with Zalo groups — but every action is transparent, auditable, and user-controllable via the web UI.
-
-**Core rule**: AI never touches zca-js directly. All Zalo actions go through backend services.
-
-## Architecture
+## Architecture summary (current, verified)
 
 ```
-User (Web Dashboard)
-    ↓
-Backend API (Fastify :3000)
-    ├── Schedule Service → Prisma → SQLite/PostgreSQL
-    ├── Queue Worker (BullMQ / node-cron) → Scheduler
-    ├── Zalo Gateway → zca-js → Zalo WebSocket
-    └── SSE → Frontend realtime updates
-
-Frontend (Next.js :3001)
-    └── Dashboard / Schedule Center / Attendance
-
-Hermes Agent (external)
-    └── Internal API → Backend (not zca-js directly)
+Zalo (WebSocket)
+   │  zca-js  (session owned ONLY by the Bridge)
+   ▼
+ZaloGatewayService            packages/backend/src/services/zalo-gateway.service.ts
+   │  normalizeMessage / saveIncomingMessage
+   ▼
+zalo-receive.ts               packages/backend/src/services/zalo-receive.ts
+   ▼
+IncomingMessageDispatcher     packages/backend/src/services/incoming-dispatcher.service.ts
+   │   safetyCheck (self-guard, allowlist, thread type)
+   │   groupGateCheck (autoReplyEnabled, mention gate, reply window)
+   │   principal permission gate  → roles: form_only | basic_chat | advanced | admin
+   │   reminder intent parse + schedule-context prefetch
+   │   HermesChatAdapter.generateReply()      ← TEXT-ONLY today (mock | http | cli)
+   │   Unsupported System Claim Guard (blocks fake "đã gửi/đã đặt lịch" w/o DB evidence)
+   ▼
+OutboundDispatcher.sendOutbound()   packages/backend/src/services/outbound-dispatcher.service.ts
+   │   SOLE outbound authority. No path may call sender.sendMessage() directly.
+   │   prompt-echo guard → cooldown → dryRun decision → live-test override
+   │   create Assistant Message (draft) + OutboundRecord → ZaloMessageSender (only if !dryRun)
+   ▼
+ZaloMessageSender             packages/backend/src/services/zalo-message-sender.ts → zca-js
 ```
 
-## Key Design Rules
+Supporting pieces that already exist and **do affect runtime**:
 
-1. **Worker always reloads schedule from DB** before executing — never trusts job payload
-2. **Every schedule has a version number** — incremented on every edit
-3. **Jobs carry scheduleId + scheduleVersion** — skipped if version outdated
-4. **All edits create revision log** + increment version + cancel old job + create new job
-5. **Global pause/emergency stop** — worker checks before any individual schedule
-6. **Dry-run mode** — runs all validation but doesn't actually send
-7. **Zalo session persists** — restore on restart, reconnect with backoff
-8. **Production secrets must be set** — server fails fast if default passwords in prod
+- **Runtime config** (`runtime-config.service.ts`): effective `dryRun`, cooldown, batching.
+- **Live test** (`live-test.service.ts`): one-shot quota + TTL bypass of dryRun for a single thread.
+- **Access control** (`principal.service.ts`, `ZaloPrincipal`): role per `senderId` (+ optional thread scope).
+- **Rules** (`rule-engine.service.ts`, `Rule`/`RuleVersion`/`RuleExecution`).
+- **Group safety** (`group-safety.service.ts`): mention gate + reply window.
+- **Evidence surfaces**: `OutboundRecord`, `Message`, `AgentTask`, `AuditLog`, `ScheduleExecution`.
 
-See `PLAN.md` for the full architecture and mandatory requirements.
+### What is NOT wired yet (do not overclaim)
 
-## Commands
+- `HermesAgentBridge` (`hermes-agent-bridge.service.ts`, `types/hermes-agent-protocol.ts`) is a
+  **Phase-1 stub**. It builds a structured envelope but `run()` always returns
+  `HERMES_AGENT_PROTOCOL_UNAVAILABLE`. **It is only referenced by tests, not by the live dispatcher.**
+  The live path uses the **text-only** `HermesChatAdapter`.
+- There is **no Tool Gateway**, no `ToolCall`/`ToolResult`/`ToolEvidence` model, and no way for an agent
+  to request a tool and get a structured result.
+- There are **no Zalo internal tools** (e.g. `zalo.listGroups`) exposed to any agent. `GET /api/zalo/groups`
+  exists as an admin HTTP route but is not an agent-callable tool.
+- There are **no memory tools** (`memory.searchMessages`, etc.) and **no web search gateway**.
+
+### Target architecture: agent-agnostic (direction for new code)
+
+The current `Hermes*`-named types are the **first adapter's** shape. As the Tool Gateway and structured
+protocol are built, the **core must use neutral, agent-agnostic names**:
+
+- Core protocol/services: `AgentBridge`, `AgentAdapter`, `AgentRequest`, `AgentResponse`,
+  `AgentToolCall`, `AgentToolResult`.
+- Concrete adapters plug into the core: `HermesAdapter` (first), then later `ClaudeAdapter`,
+  `OpenAIAdapter`, `GeminiAdapter`, `McpAgentAdapter`, `CliAgentAdapter`, `HttpAgentAdapter`.
+- The **Tool Gateway is the shared core for all agents**: every adapter goes through the same
+  permission matrix, schema validation, audit/evidence, redaction, dryRun/live gate, and
+  `OutboundDispatcher`. Adapters translate agent-specific I/O to/from the neutral protocol; they get
+  **no** special privileges and **no** direct `zca-js` access.
+
+> This is direction only — do not rename existing runtime code as part of docs work. New core code
+> should adopt the neutral names; `Hermes*` remains valid as the first adapter.
+
+## Mandatory safety laws (Iron Laws)
+
+1. **No global live.** Never set global `live=true` / disable global `dryRun`. Only `LiveTestSession`
+   may bypass dryRun, and only for one thread with quota + TTL.
+2. **No destructive ops.** Never delete/reset DB, `zalo-session/`, or `backups/`. Quarantine, don't delete.
+3. **No secret leakage.** Never commit or print tokens, cookies, session JSON, or `.env`. Reference
+   secrets by key name only.
+4. **Bridge owns zca-js.** No agent (Hermes or any future adapter) touches `zca-js`. Every Zalo action
+   goes through the Bridge + Tool Gateway.
+5. **One outbound door + governed write-actions.**
+   - `OutboundDispatcher.sendOutbound()` is the **sole door for every text/media/voice message**.
+   - **Any other Zalo write-action** (e.g. `addReaction`, `createPoll`, and future write ops) must go
+     through the **Tool Gateway**, or at minimum satisfy the same governance: **permission check +
+     dryRun/live gate + DB evidence**.
+   - **Known gap (Phase 0):** `zalo-reaction.service.ts` (`api.addReaction`) and
+     `zalo-poll.service.ts` (`api.createPoll`) are **dryRun-gated but bypass `sendOutbound` and write
+     no DB evidence** (console/return-value audit only). This must be closed — see `PLAN.md` Phase 2.
+6. **Evidence or it didn't happen.** Any important tool/action must write evidence to the DB
+   (`ToolCall`/`AgentTask`/`Schedule`/`OutboundRecord`/`AuditLog`). If the bot says "đã làm / đã kiểm tra /
+   đã tạo lịch / đã gửi", there must be a matching DB record.
+7. **No tool → say so.** If a capability has no tool, the bot must say plainly **"chưa được cấp tool"**.
+   It must not say "để mình kiểm tra" and then do nothing.
+
+## Rules before you code
+
+1. **Read first.** Read the relevant service(s) end-to-end before editing. Don't guess `zca-js` methods —
+   verify against the installed `zca-js@^2.1.2` (see "zca-js reality" below).
+2. **Mini-plan.** Write a short plan (files touched, DB changes, tests) and get approval before changing
+   code, config, or schema.
+3. **Don't touch live config without asking.** No changes to `dryRun`, `allowedThreads`, session, or
+   PM2/ecosystem behavior without explicit approval.
+4. **Additive & reversible.** Prefer new services/models over rewriting hot paths. New Prisma models via
+   migration, never `--force-reset`.
+
+## Verification rules
+
+- **No PASS without evidence.** Never report PASS/SUCCESS without fresh command output and exit code.
+  `exit != 0` → you cannot claim PASS.
+- Run these and paste real output before saying "done":
 
 ```bash
-npm run dev              # backend + frontend
-npm run dev:all          # backend + frontend + worker
-npm run typecheck        # tsc --noEmit all packages
-npm test                 # vitest all packages
-npm run test:e2e         # e2e tests only
-npm run lint             # eslint
-npm run format           # prettier
-npm run db:migrate       # prisma migrate dev
-npm run db:studio        # prisma studio
+npm run typecheck -w packages/backend    # tsc --noEmit, exit 0
+npm test -w packages/backend             # vitest via scripts/run-tests.mjs
+npm run build -w packages/backend        # tsc, exit 0
+git diff --stat                          # only intended files changed
 ```
 
-## Package tsconfig Rules
+- If a command **cannot run** (missing dependency, no `node_modules`, no DB), say so explicitly and
+  report what you could and could not verify. Do not pretend.
 
-- **shared**: `module: "ESNext"`, `moduleResolution: "bundler"`
-- **backend**: `module: "NodeNext"`, `moduleResolution: "NodeNext"`
-- **frontend**: `module: "ESNext"`, `moduleResolution: "bundler"`, `jsx: "preserve"`
-- **base**: No `module`/`moduleResolution` — each package overrides
+## Dev / test / build commands
 
-## Document Ingestion (Batch 12)
+Run from repo root unless noted. Node >= 22, npm >= 10. `shared` must be built before backend/frontend.
 
-**Status**: ✅ PRODUCTION READY (live-tested 2026-06-28)
+```bash
+npm install                              # install workspaces
+npm run build -w packages/shared         # build shared first (required by backend/frontend)
 
-### Supported Formats
+npm run dev                              # backend + frontend
+npm run dev:all                          # backend + frontend + worker
+npm run dev:backend                      # tsx watch src/index.ts
 
-| Format | Method | Status |
-|--------|--------|--------|
-| TXT, MD, CSV | Direct text ingestion | ✅ Stable |
-| PDF (text-based, small/medium) | Docling spawn with `--no-ocr` | ✅ Stable |
-| PDF (scanned/image-only) | Docling + OCR | ❌ Requires RapidOCR torch model |
+npm run typecheck                        # typecheck all packages
+npm test                                 # vitest run (all)
+npm test -w packages/backend             # backend tests (scripts/run-tests.mjs, guards test DB)
+npm run test:e2e                         # e2e subset
+npm run build                            # shared → backend → frontend
 
-### Architecture
-
-```
-POST /api/documents/ingest → 202 (queued) → Document Worker (separate process)
-  → TXT/MD/CSV: direct read + chunk (no spawn)
-  → PDF: spawn `docling --no-ocr` with 60s hard timeout + 5s kill grace
-  → Markdown → chunks → completed
-```
-
-### Error Codes
-
-**System errors (CRITICAL)** — backend/worker issue:
-- `DOCLING_TIMEOUT` — Docling process killed after timeout
-- `DOCLING_SPAWN_ERROR` — Failed to start docling process
-- `DOCLING_POSTPROCESS_FAILED` — Chunk/DB write failed after successful conversion
-- `DOCUMENT_NOT_FOUND` — Document record disappeared
-
-**Document errors (MEDIUM)** — document limitation, not system crash:
-- `DOCLING_FAILED` — Docling exit code != 0 (corrupted PDF, missing OCR model, etc.)
-- `DOCLING_NO_OUTPUT` — Docling ran successfully but no markdown (image-only PDF)
-- `PROCESSING_FAILED` — Catch-all for unclassified errors
-
-### Known Limitations
-
-1. **No OCR**: `--no-ocr` flag means scanned/image PDFs will fail with `DOCLING_NO_OUTPUT` or `DOCLING_FAILED`
-2. **No retry**: Failed jobs are final — no automatic retry
-3. **No parallel PDFs**: Worker processes 5 jobs max per poll cycle
-4. **Safe dir only**: Files must be under `DOCUMENT_ALLOWED_BASE_DIR`
-
-## Message Batching / Debounce (Batch 14 + 14.1)
-
-**Status**: ✅ PASS (live-tested 2026-06-28)
-
-### Overview
-
-When enabled, consecutive text DMs within a configurable window are combined into a single MessageBatch and processed once — reducing duplicate Hermes calls and enabling multi-line reminder parsing.
-
-### Config
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `MESSAGE_BATCHING_ENABLED` | `false` | Safe default — disabled |
-| `MESSAGE_BATCHING_WINDOW_MS` | `4000` | Debounce window (tested at 6000ms) |
-| `MESSAGE_BATCHING_MAX_MESSAGES` | `5` | Max messages per batch |
-| `MESSAGE_BATCHING_MAX_CHARS` | `3000` | Max chars per batch |
-| `MESSAGE_BATCHING_THREAD_TYPES` | `user` | DM only (no groups) |
-
-### Architecture
-
-```
-Zalo inbound → safety gates → Batching Interceptor
-  → addToBatch() → collecting / ready (limits hit)
-  → AgentTask skipped (reason: added_to_batch)
-  → Batch Worker (10s poll) → processBatchNow()
-  → Rules → Create-Reminder Parser → Hermes fallback
+npm run db:migrate                       # prisma migrate dev  (packages/backend)
+npm run db:generate                      # prisma generate
+npm run db:studio                        # prisma studio
+npm run db:guard                         # DB guard status (non-destructive)
+npm run backup:create                    # create a DB backup
+npm run secret:audit                     # scan for committed secrets
 ```
 
-### Key Behaviors
+> ⚠️ Long-running (`dev`, `dev:all`, `db:studio`, `test:watch`) block the terminal — run them in a
+> separate terminal, not inline.
 
-- **Cooldown skipped during collecting**: `safetyCheck()` bypasses cooldown for text DMs when batching is active — messages 2..N are NOT blocked
-- **Cooldown applied after batch**: Set when batch becomes `ready` (limits hit) or after processing
-- **Combined text stored as-is**: `combinedText` preserves original `\n` separators for audit
-- **Normalized for parsing**: `parseReminderFromMessage` normalizes `\n` → ` ` internally for pattern matching
-- **Non-text passthrough**: Images/files always go through individually, not batched
-- **Groups excluded**: Only DM text is batched; group messages follow normal pipeline
+## Files to read before editing
 
-### Reminder Parser (Batch 14.1)
+Read these before changing bridge/tool/outbound behavior:
 
-Added pattern: `nhắc [target]? <content> lúc <time>`
+- `README.md`, `AGENTS.md`, `DESIGN.md`, `PLAN.md`, `docs/AGENT_OPERATING_PROTOCOL.md`
+- `packages/backend/src/app.ts` — Fastify app + route registration
+- `packages/backend/src/config.ts` — env config (`autoReply`, `hermesChat`, `hermesAgentBridge`, `zalo`)
+- `packages/backend/src/services/zalo-gateway.service.ts` — zca-js lifecycle, session, listener (Bridge owns this)
+- `packages/backend/src/services/zalo-receive.ts` — inbound normalize + persist
+- `packages/backend/src/services/incoming-dispatcher.service.ts` — inbound pipeline + gates
+- `packages/backend/src/services/outbound-dispatcher.service.ts` — the ONLY outbound door
+- `packages/backend/src/services/hermes-chat-adapter.ts` — current text-only adapter (mock/http/cli)
+- `packages/backend/src/services/hermes-agent-bridge.service.ts` — Phase-1 protocol stub (not live)
+- `packages/backend/src/types/hermes-agent-protocol.ts` — structured request/response types
+- `packages/backend/src/services/principal.service.ts` — role/permission resolution
+- `packages/backend/src/services/zalo-message-sender.ts` — zca-js send calls
+- `packages/backend/prisma/schema.prisma` — data model (evidence surfaces)
 
-| Example | Content | Time |
-|---------|---------|------|
-| `Nhắc mình đi lễ Phật lúc 19h` | `đi lễ Phật` | `19h` |
-| `Nhắc mình\nĐi Lễ Phật\nLúc 19h` | `Đi Lễ Phật` | `19h` (batched) |
-| `nhắc đi chợ lúc 7h sáng` | `đi chợ` | `7h sáng` |
+## zca-js reality (do NOT guess — verify against installed v2.1.2)
 
-`parseLúcTime()` helper: 12h/24h notation, period detection (sáng/chiều/tối/trưa), auto-PM for hours 1-6.
+Methods **confirmed used in this codebase** (grep the source):
 
-### Safety
+- `getOwnId()`, `getOwnName()`, `loginQR(...)`, `login(credentials)`
+- `listener.on("message"|"reaction"|"disconnected"|"closed"|"error")`, `listener.start()`, `listener.stop()`
+- `getAllGroups()`, `getGroupInfo(groupIds)`  (see `routes/zalo.ts` `/zalo/groups`)
+- `sendMessage(...)`, `sendVoice(...)`, `uploadAttachment(...)`  (see `zalo-message-sender.ts`)
+- `addReaction(...)` (`zalo-reaction.service.ts`), `createPoll(...)` (`zalo-poll.service.ts`)
 
-- Disabled by default (`MESSAGE_BATCHING_ENABLED=false`)
-- DM only — groups still use normal pipeline
-- All safety gates run BEFORE batching (allowlist, self-guard)
-- Unsupported System Claim Guard still blocks Hermes fake "đã đặt lịch" claims
-- Dry-run always respected
+**Not verified in this repo** — before designing tools like `zalo.listFriends`, `zalo.getFriendInfo`,
+`zalo.getThreadInfo`, `zalo.sendImage`, `zalo.sendFile`, **check the installed `zca-js` types/exports first**
+(`node_modules/zca-js`). If a method does not exist, the tool must return a structured
+`unavailable` result — never fabricate.
 
-### DB Schema
+## Data model — evidence surfaces (current)
 
-`MessageBatch` model with lifecycle: `collecting` → `ready` → `processing` → `completed`/`cancelled`
+`Message` · `OutboundRecord` · `AgentTask` · `AuditLog` · `Schedule`/`ScheduleExecution`/`ScheduleJob` ·
+`Rule`/`RuleVersion`/`RuleExecution` · `ZaloPrincipal`/`ZaloPrincipalAudit` · `ThreadSetting` ·
+`RuntimeSetting`/`RuntimeConfigAudit` · `LiveTestSession` · `ThreadCooldown` · `MessageBatch` ·
+`SystemHeartbeat` · `Document`/`DocumentChunk`/`DocumentIngestionJob`.
 
-### Tests
+> There is **no** `ToolCall`/`ToolResult`/`ToolEvidence` model yet — see `PLAN.md` Phase 1.
 
-- `batch14-message-batching.test.ts`: 19 tests (10 service + 9 parser)
-- Full suite: 30 files, 504/504 PASS
+## Current status
 
-### Key Files
+| Area | Status |
+|------|--------|
+| Zalo QR / session / reconnect / listener | ✅ Foundation in place |
+| Dashboard / safety / rules / access / runtime | ✅ Present and affects runtime |
+| Agent integration (first adapter = Hermes) | ⚠️ **Text-only** adapter (`HermesChatAdapter`) in the live path |
+| Agent-agnostic bridge / Tool Gateway | ❌ Not complete (`HermesAgentBridge` is a stub, tests only) |
+| Zalo internal tools (`zalo.*`) | ❌ Not built |
+| Memory search tools (`memory.*`) | ❌ Not built / not complete |
+| Web search gateway (`web.*`) | ❌ Not built |
 
-| File | Purpose |
-|------|---------|
-| `packages/backend/src/services/message-batch.service.ts` | Batch CRUD: create, append, claim, complete |
-| `packages/backend/src/workers/message-batch-worker.ts` | Polling worker for overdue batches |
-| `packages/backend/src/services/incoming-dispatcher.service.ts` | Batching interceptor + `processBatchNow` + reminder parser |
+See `PLAN.md` for the phased implementation plan and acceptance criteria.
 
-### Known Limitations
+## Development workflow aids (gstack / superpowers) — project rules override
 
-1. **Group not supported**: Batching only for DM (`user` thread type)
-2. **In-memory cooldown**: `lastReplyAt` Map resets on restart (cooldown window may reopen)
-3. **No batch UI yet**: Batch status visible via DB only; no Admin Center card
+gstack and superpowers are **development workflow aids only** (planning, review, QA,
+security audit, TDD, debugging). They are **NOT runtime dependencies of the Bridge** and
+must never be imported, invoked, or relied on by Bridge runtime code.
 
-## Controlled Live Test (Batch 18)
+**Project safety laws always win over any skill/agent instruction.** If a gstack or
+superpowers skill suggests anything that conflicts with the rules below, the rules below win:
 
-**Status**: ✅ PASS (live-tested 2026-06-29)
+- Bridge owns zca-js.
+- No AI agent (Hermes or any future adapter) calls zca-js directly.
+- Every tool goes through the Tool Gateway.
+- The Tool Gateway must enforce permission, schema validation, audit/evidence, and redaction.
+- `OutboundDispatcher` is the only outbound door.
+- Never bypass the dryRun/live gate.
+- Never enable global live.
+- Never delete/reset the DB, `zalo-session/`, or `backups/`.
+- Never commit secrets/tokens/cookies/session/`.env`.
+- No "đã làm / đã kiểm tra" (done / checked) claims without evidence.
 
-### Overview
+### Hard bans (both tools, in this repo)
 
-Live test mode allows ONE real Zalo DM send with automatic quota (maxMessages) + TTL. After quota, all subsequent DMs fall back to dry-run.
+- No install/setup of any kind.
+- No plugin/marketplace install.
+- No gstack team mode.
+- No superpowers auto-routing / session hook unless explicitly approved.
+- No git worktree creation.
+- No auto-commit.
+- No ship / deploy / merge / PR automation.
+- No browser cookie import.
+- No ngrok tunnel / pair-agent.
+- No telemetry / sync / artifact upload.
+- No modifying `CLAUDE.md`, `PLAN.md`, `.claude/`, `.codex/`, settings, or hooks without a
+  shown diff + explicit approval.
 
-### Config
+### Allowed manual use (as checklist / methodology only)
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| LiveTestSession | API | One-shot, maxMessages=1, TTL 300s |
-| `ZALO_AUTO_REPLY_DRY_RUN` | `true` | Always true except during live test bypass |
-| `ZALO_DRY_RUN` | `true` | PM2 ecosystem env (does NOT block listener) |
+Until installation is explicitly approved, these may be used **only as manual
+checklists / methodology references** — not as installed, auto-routing tooling:
 
-### Architecture
+- **gstack:** `/cso`, `/review`, `/plan-eng-review`, `/qa-only`, `/investigate`, `/guard`.
+- **superpowers:** brainstorming, writing-plans, test-driven-development,
+  systematic-debugging, requesting-code-review, verification-before-completion.
 
-```
-POST /api/system/live-test/start → LiveTestSession (active, maxMessages, TTL)
-  → Incoming DM → dispatcher detects active session
-  → If sentCount < maxMessages: dryRun bypass → REAL send → sentCount++
-  → If sentCount >= maxMessages: session auto-completed → fallback to dryRun
-POST /api/system/live-test/stop → force-complete session
-```
-
-### Key Behaviors
-
-- **Listener always starts**: `config.autoReply.enabled` gates Zalo listener (was `config.zalo.dryRun` which blocked it in PM2)
-- **Post-quota safety**: After live test completes, all messages revert to `dryRun=true`
-- **No duplicate sends**: Each live test session tracks `sentCount` vs `maxMessages`
-- **Session auto-completes**: When sentCount reaches maxMessages, session status → `completed`
-
-### Zalo Process Conflict Fix
-
-- **Root cause**: Old PM2 `hermes-api` (npm run dev:backend) + manual `npx tsx` → 3 concurrent backends → Zalo "Another connection" error → listener dropped
-- **Fix**: Single PM2 `hermes-backend` via `ecosystem.config.cjs` + symlink `prisma → packages/backend/prisma` for dist build
-- **Code fix**: `src/index.ts` — Zalo auto-restore now gated on `config.autoReply.enabled` (not `config.zalo.dryRun`)
-
-### Known Backlog
-
-1. **messagePipeline heartbeat stale** after message received — heartbeat emission path needs audit (cosmetic)
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `packages/backend/src/services/live-test.service.ts` | Live test session CRUD + quota tracking |
-| `packages/backend/src/routes/system.ts` | `/api/system/live-test/*` endpoints |
-| `packages/backend/src/__tests__/batch18-live-test.test.ts` | 18 tests for live test flow |
-
-## Production Pilot Runbook (Batch 19)
-
-**Status**: ✅ READY (2026-06-29)
-
-### Overview
-
-Comprehensive runbook for safe production pilot deployment. Includes pre-live checklist, monitoring plan, rollback procedures, and PASS/FAIL criteria.
-
-### Pilot Phases
-
-| Phase | Scope | Method | Gate |
-|-------|-------|--------|------|
-| 1 | 1 DM test thread, 1-3 replies, 5min TTL | Controlled Live Test API | Batch 18 ✅ |
-| 2 | 1 trusted DM, 30-60min | LiveTestSession or thread-level dryRun=false | Phase 1 must PASS |
-| 3 | 1 small group, @mention only, 1-2hr | groupMentionRequired=true | Phase 2 must PASS |
-
-### Key Document
-
-`docs/PRODUCTION_PILOT_RUNBOOK.md` — full runbook with:
-- Pre-live checklist (22 items)
-- Monitoring checklist (dashboards + API + DB)
-- Rollback plan (6 steps, <30s to execute)
-- PASS/FAIL criteria
-- Pilot log template
-
-### Related UI
-
-- `/production-readiness` — runbook link in Production Pilot section
-- `/zalo-ops` — live test controls
-- `/safety-mode` — dryRun toggle, cooldown, batching
-
-
-## Key Files
-
-| File                                        | Purpose                                      |
-| ------------------------------------------- | -------------------------------------------- |
-| `packages/backend/src/services/document-ingestion.service.ts` | Docling spawn, chunking, ask document API  |
-| `packages/backend/src/workers/document-worker.ts` | Document worker (separate process, poll loop) |
-| `packages/backend/src/routes/documents.ts`  | Document REST API routes                     |
-| `packages/frontend/src/app/documents/page.tsx` | Document dashboard with error classification |
-| `PLAN.md`                                   | Full architecture, phases, database schema   |
-| `packages/backend/prisma/schema.prisma`     | Database schema                              |
-| `packages/shared/src/schemas/`              | Shared Zod validation                        |
-| `packages/backend/src/config.ts`            | Env config with production secret validation |
-| `packages/backend/src/workers/scheduler.ts` | Main worker logic                            |
-
-## Database Tables
-
-`schedules` → `schedule_executions` → `schedule_revisions` → `schedule_jobs` → `messages` → `zalo_threads` → `agent_tasks` → `audit_logs` → `attendance_sessions` → `attendance_records` → `app_settings` → `documents` → `document_ingestion_jobs` → `document_chunks`
-
-## Phases
-
-1. ✅ Project skeleton (current)
-2. Schedule Core — CRUD + revision log + version bump
-3. Queue Worker — BullMQ/node-cron + execution tracking
-4. Frontend Schedule Center — full UI
-5. Zalo Gateway — zca-js integration
-6. Hermes Integration — agent task API
-7. Attendance MVP
-8. Hardening — security, tests, docs
-
-## Development Notes
-
-- `ZALO_DRY_RUN=true` by default in dev — no real Zalo messages sent
-- Redis is optional for dev — node-cron used as fallback
-- SQLite database file is gitignored
-- Zalo session data must NEVER be committed
-- Backend is `"type": "module"` — use ESM imports with `.js` extensions in relative paths
-- Shared package must be built (`npm run build -w packages/shared`) before other packages can import it
+> Installation requires explicit approval and a separate audit of exact commands.
