@@ -19,7 +19,7 @@ export class ZaloMessageSender implements MessageSender {
     content: string,
     threadId: string,
     threadType: "user" | "group",
-    source: "auto_reply" | "schedule" | "media" | "manual" | "create_reminder" = "auto_reply",
+    source: "auto_reply" | "agent_tool" | "schedule" | "media" | "manual" | "create_reminder" = "auto_reply",
   ): Promise<SendResult> {
     // ── Dry-run check with live test override ────────────────
     const liveTestCheck = await (async () => {

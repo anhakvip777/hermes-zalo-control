@@ -33,6 +33,7 @@ import { acquireCooldown, setCooldown as csSetCooldown, clearAllCooldowns } from
 
 export type OutboundSource =
   | "hermes"
+  | "agent_tool"
   | "rule"
   | "reminder"
   | "batch"
@@ -106,9 +107,10 @@ export async function resetOutboundCooldowns(): Promise<void> {
 
 // ── Map source to OutboundRecord source ──────────────────────────────
 
-function mapSource(source: OutboundSource): "auto_reply" | "schedule" | "media" | "manual" | "create_reminder" {
+function mapSource(source: OutboundSource): "auto_reply" | "agent_tool" | "schedule" | "media" | "manual" | "create_reminder" {
   switch (source) {
     case "hermes": return "auto_reply";
+    case "agent_tool": return "agent_tool";
     case "rule": return "auto_reply";
     case "reminder": return "create_reminder";
     case "batch": return "auto_reply";

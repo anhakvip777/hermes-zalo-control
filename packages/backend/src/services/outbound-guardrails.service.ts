@@ -196,7 +196,7 @@ export interface OutboundRecord {
   content: string;
   contentHash: string;
   sentMessageId: string;
-  source: "auto_reply" | "schedule" | "media" | "manual" | "create_reminder";
+  source: "auto_reply" | "agent_tool" | "schedule" | "media" | "manual" | "create_reminder";
   dryRun: boolean;
   errorCode?: string;
   decision: "allow" | "skip" | "block";
@@ -281,7 +281,7 @@ export interface OutboundAudit {
   threadType: "user" | "group";
   contentHash: string;
   contentPreview?: string;
-  source: "auto_reply" | "schedule" | "media" | "manual" | "create_reminder";
+  source: "auto_reply" | "agent_tool" | "schedule" | "media" | "manual" | "create_reminder";
   dryRun: boolean;
   sentMessageId?: string;
   errorCode?: string;
