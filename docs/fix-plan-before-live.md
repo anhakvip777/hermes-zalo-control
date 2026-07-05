@@ -292,6 +292,20 @@ exhausted retries; no autoReply/live toggled by recovery.
 >   (no `OutboundRecord` written). Full required set passed; backend typecheck **0**.
 > - **Still deferred:** no autoReply integration · no live · no original-image resend.
 
+> **STATUS: Phase 3.5D DONE ✅ (commit `00565a2`).** Admin UI test panel:
+> - Added a **read-only admin UI page**: `/retrieval-test` (nav item "Retrieval Test" under **System**).
+> - Added api-client method `retrievalAnswer(input)` → `POST /api/agent/tools/retrieval-answer`
+>   (uses the shared `apiFetch`, same auth pattern as every other admin page — no explicit Basic added).
+> - UI form supports: `query`, `requesterThreadId`/`requesterThreadType`, `targetThreadId`/`targetThreadType`,
+>   `dateFrom`/`dateTo`, `includeAttachments`, and `role` simulation.
+> - UI displays: `status` pill, `confidence` pill, `answerText`, and an evidence table
+>   (messageId / attachmentId / source / threadId / threadType / createdAt / extractionStatus / snippet).
+> - Safety banner: *"Read-only test. Không gửi Zalo. Không bật autoReply. Không live."* Single read-only
+>   action — **no send button anywhere**.
+> - Checks: frontend typecheck **0**, backend typecheck **0**, `retrieval-answer-route` **6/6**.
+> - **Still deferred:** no `sendOutbound` · no provider AI · no bridge · no autoReply · no original-image
+>   resend · no live.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
