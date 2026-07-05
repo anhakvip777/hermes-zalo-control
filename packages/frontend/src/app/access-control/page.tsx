@@ -377,7 +377,8 @@ export default function AccessControlPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-100">🔑 Access Control</h1>
           <p className="text-sm text-slate-400 mt-1">
-            Quản lý quyền truy cập Zalo — không cần SQLite thủ công.
+            Phân quyền theo <strong>người gửi</strong> (principal / role). Khác với <em>Allow Threads</em> —
+            là nơi chọn <strong>thread</strong> nào bot được hoạt động.
           </p>
         </div>
         <div className="flex gap-2">

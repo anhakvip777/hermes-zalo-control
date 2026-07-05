@@ -157,7 +157,10 @@ export default function AllowThreadsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-100">Allow Threads</h1>
-          <p className="text-xs text-slate-500 mt-0.5">Cấp quyền auto-reply cho từng bạn bè / nhóm Zalo</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Chọn <strong>thread</strong> (bạn bè / nhóm) nào bot được hoạt động. Khác với <em>Access Control</em> —
+            là nơi phân <strong>vai trò</strong> cho người gửi.
+          </p>
         </div>
         <button onClick={refresh} disabled={st.loading} className="px-3 py-1.5 text-xs border border-slate-700 text-slate-400 rounded-md hover:bg-slate-800 transition-colors disabled:opacity-40">
           {st.loading ? "…" : "🔄 Refresh"}
