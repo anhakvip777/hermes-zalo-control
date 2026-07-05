@@ -150,57 +150,43 @@ export async function handleIncomingReaction(
   // Auto-react with ❤️
   const REACTION_ICON = "/-heart"; // Reactions.HEART from zca-js
 
-  if (dryRun) {
-    logReactionAudit({
-      decision: "auto_react",
-      reason: "dry_run",
+  // Phase 2: route through the governed action path (ZaloProvider + evidence).
+  // NO direct getApi()/api.addReaction here — the provider is the sole zca-js caller,
+  // dryRun/live is enforced centrally, and a ZaloActionRecord is always written.
+  try {
+    const { performGovernedZaloAction } = await import("./zalo-provider/governed-action.js");
+    const result = await performGovernedZaloAction({
+      actionType: "reaction",
       threadId: reaction.threadId,
       threadType,
-      uidFrom: reaction.uidFrom,
-      msgId: reaction.msgId,
-      reactionType: REACTION_ICON,
-      dryRun: true,
+      targetMsgId: reaction.msgId,
+      payload: { icon: REACTION_ICON },
+      trigger: "listener",
+      principalId: reaction.uidFrom || null,
+      perform: (provider) =>
+        provider.addReaction({
+          threadId: reaction.threadId,
+          threadType,
+          msgId: reaction.msgId,
+          cliMsgId: reaction.cliMsgId,
+          icon: "heart",
+        }),
     });
-    return;
-  }
 
-  // Real auto-react via zca-js API
-  try {
-    const gateway = (await import("./zalo-gateway.service.js")).getZaloGateway();
-    const api = gateway.getApi();
-    if (!api) {
-      logReactionAudit({
-        decision: "block",
-        reason: "ZALO_NOT_CONNECTED",
-        threadId: reaction.threadId,
-        threadType,
-        uidFrom: reaction.uidFrom,
-        msgId: reaction.msgId,
-        reactionType: REACTION_ICON,
-        dryRun,
-        errorCode: "ZALO_NOT_CONNECTED",
-      });
-      return;
+    if (result.sent) {
+      touchReactionCooldown(reaction.threadId);
     }
 
-    const { ThreadType, Reactions } = await import("zca-js") as any;
-    await api.addReaction(Reactions.HEART, {
-      data: { msgId: reaction.msgId, cliMsgId: reaction.cliMsgId },
-      threadId: reaction.threadId,
-      type: reaction.isGroup ? ThreadType.Group : ThreadType.User,
-    });
-
-    touchReactionCooldown(reaction.threadId);
-
     logReactionAudit({
-      decision: "auto_react",
-      reason: "success",
+      decision: result.executionStatus === "success" ? "auto_react" : "block",
+      reason: result.dryRun ? "dry_run" : result.sent ? "success" : result.error ?? result.errorCode ?? "send_failed",
       threadId: reaction.threadId,
       threadType,
       uidFrom: reaction.uidFrom,
       msgId: reaction.msgId,
       reactionType: REACTION_ICON,
-      dryRun: false,
+      dryRun: result.dryRun,
+      errorCode: result.errorCode,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -215,7 +201,7 @@ export async function handleIncomingReaction(
       dryRun,
       errorCode: "SEND_FAILED",
     });
-    console.error("[reaction] send failed: " + msg);
+    console.error("[reaction] governed action error: " + msg);
   }
 }
 
