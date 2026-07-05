@@ -146,6 +146,20 @@ export const config = {
     chunkOverlap: parseInt(process.env.DOCUMENT_CHUNK_OVERLAP ?? "150", 10),
   },
 
+  // Phase 6: Web search gateway (all default OFF / empty)
+  web: {
+    searchEnabled: process.env.WEB_SEARCH_ENABLED === "true",
+    searchProvider: (process.env.WEB_SEARCH_PROVIDER ?? "none") as "none" | "tavily" | "firecrawl" | "gemini",
+    // Secret — read internally by providers, NEVER returned in results/errors/evidence.
+    searchApiKey: process.env.WEB_SEARCH_API_KEY ?? "",
+    searchMaxResults: Math.min(10, Math.max(1, parseInt(process.env.WEB_SEARCH_MAX_RESULTS ?? "5", 10))),
+    fetchEnabled: process.env.WEB_FETCH_ENABLED === "true",
+    fetchTimeoutMs: Math.max(1, parseInt(process.env.WEB_FETCH_TIMEOUT_MS ?? "10000", 10)),
+    fetchMaxBytes: Math.max(1024, parseInt(process.env.WEB_FETCH_MAX_BYTES ?? "524288", 10)),
+    fetchMaxRedirects: Math.max(0, parseInt(process.env.WEB_FETCH_MAX_REDIRECTS ?? "3", 10)),
+    fetchMaxContentChars: Math.max(512, parseInt(process.env.WEB_FETCH_MAX_CONTENT_CHARS ?? "8192", 10)),
+  },
+
   // Batch 14: Message batching/debounce
   messageBatching: {
     enabled: process.env.MESSAGE_BATCHING_ENABLED === "true",
