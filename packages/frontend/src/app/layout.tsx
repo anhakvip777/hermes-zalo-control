@@ -39,6 +39,7 @@ const navGroups = [
     items: [
       { href: "/zalo-ops", label: "Zalo Ops", icon: "◬" },
       { href: "/trace", label: "Decision Trace", icon: "◈" },
+      { href: "/retrieval-test", label: "Retrieval Test", icon: "◔" },
       { href: "/production-readiness", label: "Readiness", icon: "◎" },
       { href: "/system-health", label: "System Health", icon: "◌" },
       { href: "/runtime-settings", label: "Runtime Config", icon: "⊡" },

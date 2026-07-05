@@ -1178,3 +1178,47 @@ export function updateThreadAllow(changes: AllowChange[], reason?: string) {
     body: JSON.stringify({ changes, reason }),
   });
 }
+
+// =============================================================================
+// Phase 3.5D — Retrieval Answer (admin/test, read-only)
+// =============================================================================
+
+export interface RetrievalAnswerEvidence {
+  messageId: string;
+  attachmentId?: string;
+  createdAt: string;
+  threadId: string;
+  threadType: string;
+  source: "message" | "attachment";
+  kind?: string;
+  extractionStatus?: string;
+  snippetRedacted?: string;
+  confidence?: number | string;
+}
+
+export interface RetrievalAnswerResult {
+  status: "found" | "not_found" | "permission_denied" | "unavailable";
+  answerText: string;
+  evidence: RetrievalAnswerEvidence[];
+  confidence: "high" | "medium" | "low";
+}
+
+export interface RetrievalAnswerInput {
+  query: string;
+  requesterThreadId: string;
+  requesterThreadType: "user" | "group";
+  targetThreadId?: string;
+  targetThreadType?: "user" | "group";
+  dateFrom?: string;
+  dateTo?: string;
+  includeAttachments?: boolean;
+  role?: "form_only" | "basic_chat" | "advanced" | "admin";
+}
+
+/** Read-only: calls the admin retrieval-answer route. Never sends Zalo / no live. */
+export function retrievalAnswer(input: RetrievalAnswerInput) {
+  return apiFetch<RetrievalAnswerResult>("/api/agent/tools/retrieval-answer", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
