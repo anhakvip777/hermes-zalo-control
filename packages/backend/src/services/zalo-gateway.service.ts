@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { config } from "../config.js";
 import { heartbeatOk } from "./heartbeat.service.js";
+import { computeBackoffDelay } from "./zalo-recovery.js";
 
 // Resolve zca-js from the project root node_modules.
 // We resolve from process.cwd() which is always the project root when running via npm/tsx.
@@ -158,6 +159,13 @@ export class ZaloGatewayService extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private readonly maxReconnectDelayMs = 60_000;
+  // ── KI-H2: recovery state (surfaced to status; never toggles autoReply/live) ──
+  private readonly maxReconnectAttempts = parseInt(process.env.ZALO_MAX_RECONNECT_ATTEMPTS ?? "10", 10);
+  private recoveryState: "idle" | "scheduled" | "reconnecting" | "error" = "idle";
+  private lastReconnectAt: string | null = null;
+  private lastReconnectError: string | null = null;
+  /** Last time we CONFIRMED listener liveness (start or inbound message). */
+  private lastListenerBeatAt: string | null = null;
   private readonly sessionDir: string;
   private loginInProgress = false;
   private listenerActive = false;
@@ -199,6 +207,57 @@ export class ZaloGatewayService extends EventEmitter {
 
   isConnected(): boolean {
     return this.status.connected;
+  }
+
+  isListenerActive(): boolean {
+    return this.listenerActive;
+  }
+
+  /**
+   * KI-H2: recovery/health snapshot for the watchdog + dashboard.
+   * `listenerHeartbeatAgeSeconds` is derived from the last confirmed liveness
+   * (listener start or inbound message) — it is informational; the watchdog's
+   * safe trigger is `connected && !listenerActive`.
+   */
+  getRecoveryStatus(): {
+    recoveryState: "idle" | "scheduled" | "reconnecting" | "error";
+    reconnectAttempts: number;
+    maxReconnectAttempts: number;
+    lastReconnectAt: string | null;
+    lastReconnectError: string | null;
+    listenerActive: boolean;
+    lastListenerBeatAt: string | null;
+    listenerHeartbeatAgeSeconds: number | null;
+  } {
+    const age = this.lastListenerBeatAt
+      ? Math.round((Date.now() - new Date(this.lastListenerBeatAt).getTime()) / 1000)
+      : null;
+    return {
+      recoveryState: this.recoveryState,
+      reconnectAttempts: this.reconnectAttempt,
+      maxReconnectAttempts: this.maxReconnectAttempts,
+      lastReconnectAt: this.lastReconnectAt,
+      lastReconnectError: this.lastReconnectError,
+      listenerActive: this.listenerActive,
+      lastListenerBeatAt: this.lastListenerBeatAt,
+      listenerHeartbeatAgeSeconds: age,
+    };
+  }
+
+  /**
+   * KI-H2: watchdog entry point. Trigger recovery for a listener that dropped
+   * while still "connected". Safe: only restores session/listener, NEVER enables
+   * autoReply/bridge or flips dryRun/live. No-op if already recovering or exhausted.
+   */
+  requestRecovery(reason: string): boolean {
+    if (this.reconnectTimer || this.reconnectInProgress) return false;
+    if (this.recoveryState === "error") return false; // exhausted → needs manual /ops/reconnect
+    console.warn(`[watchdog] recovery requested: ${reason} (attempt=${this.reconnectAttempt})`);
+    this.lastReconnectError = null;
+    this.listenerActive = false; // reflect the dead listener in status immediately
+    this.setStatus({ connectionStatus: "error", lastError: `RECOVERY:${reason}`.slice(0, 60) });
+    this.scheduleReconnect();
+    return true;
   }
 
   getApi(): any | null {
@@ -617,6 +676,8 @@ export class ZaloGatewayService extends EventEmitter {
     const { normalizeMessage, saveIncomingMessage } = await import("./zalo-receive.js");
 
     this.api.listener.on("message", async (raw: Record<string, unknown>) => {
+      // KI-H2: confirm listener liveness on every received event.
+      this.lastListenerBeatAt = new Date().toISOString();
       const msg = normalizeMessage(raw);
       if (!msg) {
         console.log("[listener] normalizeMessage returned null → dropped");
@@ -692,6 +753,10 @@ export class ZaloGatewayService extends EventEmitter {
     await this.api.listener.start();
     console.log("[listener] zca-js listener started successfully");
     this.listenerActive = true;
+    this.lastListenerBeatAt = new Date().toISOString();
+    // KI-H2: a fresh listener start clears any prior recovery error state.
+    this.recoveryState = "idle";
+    this.lastReconnectError = null;
     // ── Heartbeat: listener active ───────────────────────────────
     heartbeatOk("zaloListener", { listenerStarted: true, selfUserId: this.status.selfUserId }).catch(() => {});
   }
@@ -716,20 +781,44 @@ export class ZaloGatewayService extends EventEmitter {
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
 
-    const delay = Math.min(
-      1000 * Math.pow(2, this.reconnectAttempt),
-      this.maxReconnectDelayMs,
-    );
+    // KI-H2: bounded retries. On exhaustion → terminal error state + alert log,
+    // stop scheduling (operator must use /ops/reconnect). Never spams forever.
+    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
+      this.recoveryState = "error";
+      this.lastReconnectError = `max_attempts_exceeded:${this.reconnectAttempt}`;
+      console.error(
+        `[listener] ALERT: reconnect exhausted after ${this.reconnectAttempt} attempts — ` +
+        `recoveryState=error. Manual /ops/reconnect required. autoReply/live left OFF.`,
+      );
+      this.setStatus({ connectionStatus: "error", lastError: "RECONNECT_EXHAUSTED" });
+      return;
+    }
+
+    const delay = computeBackoffDelay(this.reconnectAttempt, this.maxReconnectDelayMs);
     this.reconnectAttempt++;
+    this.recoveryState = "scheduled";
+    this.lastReconnectAt = new Date().toISOString();
+    console.warn(
+      `[listener] reconnect scheduled in ${delay}ms (attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts})`,
+    );
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
+      this.recoveryState = "reconnecting";
       try {
         const restored = await this.restoreSession();
-        if (!restored) {
-          await this.startLogin();
+        if (restored) {
+          // Success: setConnected() resets recoveryState=idle + attempt=0.
+          return;
         }
-      } catch {
+        // Restore failed → attempt a (QR) login once.
+        await this.startLogin();
+        // Still not connected (e.g. awaiting QR scan) → retry with backoff (bounded).
+        if (!this.status.connected) {
+          this.scheduleReconnect();
+        }
+      } catch (err: unknown) {
+        this.lastReconnectError = (err instanceof Error ? err.message : String(err)).slice(0, 120);
         this.scheduleReconnect();
       }
     }, delay);
@@ -793,6 +882,9 @@ export class ZaloGatewayService extends EventEmitter {
       selfDisplayName: opts.selfDisplayName ?? this.status.selfDisplayName,
     });
     this.reconnectAttempt = 0;
+    // KI-H2: recovery succeeded → clear recovery state.
+    this.recoveryState = "idle";
+    this.lastReconnectError = null;
     // ── Heartbeat: Zalo connected ────────────────────────────────
     heartbeatOk("zaloConnection", { connected: true, selfUserId: this.status.selfUserId }).catch(() => {});
   }

@@ -57,6 +57,16 @@ export interface ZaloOpsStatus {
     messagePipeline: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
   };
 
+  /** KI-H2: listener/session auto-recovery state. */
+  recovery: {
+    recoveryState: "idle" | "scheduled" | "reconnecting" | "error";
+    reconnectAttempts: number;
+    maxReconnectAttempts: number;
+    lastReconnectAt: string | null;
+    lastReconnectError: string | null;
+    listenerHeartbeatAgeSeconds: number | null;
+  };
+
   inbound24h: number;
   outbound24h: number;
   failedTasks24h: number;
@@ -282,6 +292,18 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
         ? { status: hbSummary.messagePipeline.status, lastBeatAt: hbSummary.messagePipeline.lastBeatAt, ageSeconds: hbSummary.messagePipeline.ageSeconds }
         : { status: "down", lastBeatAt: null, ageSeconds: null },
     },
+
+    recovery: (() => {
+      const r = gw.getRecoveryStatus();
+      return {
+        recoveryState: r.recoveryState,
+        reconnectAttempts: r.reconnectAttempts,
+        maxReconnectAttempts: r.maxReconnectAttempts,
+        lastReconnectAt: r.lastReconnectAt,
+        lastReconnectError: r.lastReconnectError,
+        listenerHeartbeatAgeSeconds: r.listenerHeartbeatAgeSeconds,
+      };
+    })(),
 
     inbound24h,
     outbound24h,

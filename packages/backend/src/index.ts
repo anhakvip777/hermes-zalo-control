@@ -80,6 +80,16 @@ async function main() {
     }
   }
 
+  // ── KI-H2: start listener/session watchdog ────────────────────────
+  // Runs regardless of autoReply (no-ops while disconnected). Only restores a
+  // dropped listener/session — never enables autoReply/bridge or flips dryRun.
+  try {
+    const { startZaloWatchdog } = await import("./services/zalo-watchdog.service.js");
+    startZaloWatchdog();
+  } catch (err: unknown) {
+    console.error(`[watchdog] failed to start: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   try {
     await app.listen({ port: config.port, host: config.host });
     app.log.info(`🚀 Hermes Zalo Control backend running on http://${config.host}:${config.port}`);
