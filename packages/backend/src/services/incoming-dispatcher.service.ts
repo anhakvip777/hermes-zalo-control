@@ -4,6 +4,7 @@
 
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun, getEffectiveBatchingConfig, getEffectiveCooldownSeconds } from "./runtime-config.service.js";
+import { isThreadAllowedCached } from "./allowlist.service.js";
 import { prisma } from "../db.js";
 import { getHermesChatAdapter } from "./hermes-chat-adapter.js";
 import * as agentTaskService from "./agent-task.service.js";
@@ -24,6 +25,15 @@ import { saveOutboundRecord } from "./outbound-guardrails.service.js";
 import { sendOutbound } from "./outbound-dispatcher.service.js";
 import { hasUnsupportedSystemClaim, hasScheduleEvidence } from "./unsupported-claim-guard.service.js";
 import { clearAllCooldowns, getActiveCooldowns, clearCooldown } from "./cooldown.service.js";
+import { redact } from "./tool-gateway/redaction.js";
+
+// KI-B4: redact secrets from any user content BEFORE it is persisted (previews,
+// audit records). Redact the FULL content first, then slice — slicing first
+// could split a secret and leave a fragment un-masked.
+function redactPreview(content: string | undefined | null, max: number): string {
+  if (!content) return "";
+  return (redact(content) as string).slice(0, max);
+}
 
 // ── Cooldown (R5): unified DB-backed store ───────────────────────────
 // Replaced dual in-memory Maps with ThreadCooldown table.
@@ -63,7 +73,7 @@ function safetyCheck(msg: NormalizedMessage, selfUserId?: string | null): Safety
     return { allowed: false, reason: "no_threadId" };
   }
 
-  if (!cfg.allowedThreads.includes(msg.threadId)) {
+  if (!isThreadAllowedCached(msg.threadId, msg.threadType)) {
     return { allowed: false, reason: "thread_not_allowed" };
   }
 
@@ -775,7 +785,7 @@ export async function handleIncomingMessage(
       saveOutboundRecord({
         threadId: msg.threadId,
         threadType: (msg.threadType as "user" | "group") || "user",
-        content: msg.content?.slice(0, 500) ?? "",
+        content: redactPreview(msg.content, 500),
         sentMessageId: "",
         source: "auto_reply",
         dryRun: getCurrentEffectiveDryRun(),
@@ -856,7 +866,7 @@ export async function handleIncomingMessage(
       threadType: msg.threadType,
       senderId: msg.senderId,
       senderName: msg.senderName,
-      contentPreview: msg.content.slice(0, 200),
+      contentPreview: redactPreview(msg.content, 200),
       zaloMessageId: msg.zaloMessageId,
     },
     messageId: msg.zaloMessageId ?? undefined,

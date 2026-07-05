@@ -7,16 +7,32 @@
 //
 // Masks:
 //   - keys named like token/secret/cookie/session/password/authorization/apikey/imei
-//   - JWT-like and long hex/base64 blobs in string values
+//   - `sk-...` API keys (OpenAI-style, incl. sk-proj-/sk-ant-), alphanumeric bodies
+//   - `label: value` / `label=value` secret assignments (api key / token / secret / password)
+//   - JWT-like, `Bearer …`, long hex, and long high-entropy alphanumeric blobs in string values
 //   - phone numbers (unless the caller says the role may see them)
 // =============================================================================
 
 const SECRET_KEY_PATTERN =
   /(pass(word)?|secret|token|cookie|session|authorization|auth|api[-_]?key|bearer|imei|credential|private[-_]?key|jwt|jwe)/i;
 
+// `sk-` API keys (OpenAI/Anthropic style). Body is alphanumeric + _-, ≥16 chars,
+// so it catches keys that are NOT pure hex (which LONG_HEX_PATTERN would miss).
+// Covers sk-, sk-proj-, sk-ant-, sk-live-, sk-test- because `-` is in the class.
+const SK_KEY_PATTERN = /\bsk-[A-Za-z0-9_-]{16,}\b/g;
+
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g;
 const LONG_HEX_PATTERN = /\b[0-9a-fA-F]{32,}\b/g;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._-]{8,}\b/gi;
+// Inline secret assignment in free text: a secret-ish label followed by : or =
+// then the value. Keeps the label, masks the value. e.g. "api_key: abc123" →
+// "api_key: [REDACTED]". The `is`/`=`/`:` separators are common in pasted creds.
+const ASSIGNMENT_SECRET_PATTERN =
+  /\b(api[-_ ]?key|apikey|access[-_ ]?token|refresh[-_ ]?token|token|secret|password|passwd|pwd|credential)\b(\s*[:=]\s*)("?)([^\s"']{4,})\3/gi;
+// Long high-entropy alphanumeric/url-safe blob (base64/base64url/token-like) that
+// isn't caught by the more specific patterns. Threshold 40 avoids masking normal
+// words, short IDs, and typical Vietnamese text (which is spaced and short-token).
+const HIGH_ENTROPY_PATTERN = /\b[A-Za-z0-9_-]{40,}\b/g;
 // VN + generic phone: optional +, 8-15 digits, optional separators.
 const PHONE_PATTERN = /(?<!\d)(\+?\d[\d\s.-]{7,13}\d)(?!\d)/g;
 
@@ -30,10 +46,16 @@ export interface RedactionOptions {
 }
 
 function maskString(value: string, allowPhone: boolean): string {
+  // Order: specific → generic. Specific patterns collapse to the short [REDACTED]
+  // marker, which is neither long-hex nor 40+ chars, so later passes and re-runs
+  // (idempotency) leave it untouched.
   let out = value
+    .replace(SK_KEY_PATTERN, REDACTED)
     .replace(JWT_PATTERN, REDACTED)
     .replace(BEARER_PATTERN, REDACTED)
-    .replace(LONG_HEX_PATTERN, REDACTED);
+    .replace(ASSIGNMENT_SECRET_PATTERN, (_m, label, sep) => `${label}${sep}${REDACTED}`)
+    .replace(LONG_HEX_PATTERN, REDACTED)
+    .replace(HIGH_ENTROPY_PATTERN, REDACTED);
   if (!allowPhone) {
     out = out.replace(PHONE_PATTERN, (m) => maskPhone(m));
   }

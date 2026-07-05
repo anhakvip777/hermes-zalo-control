@@ -6,6 +6,7 @@
 import { prisma } from "../db.js";
 import { normalizeThreadId } from "./thread-id.js";
 import { upsertThreadProfileFromMessage, getThreadProfiles } from "./thread-profile.service.js";
+import { redact } from "./tool-gateway/redaction.js";
 import { createHash } from "node:crypto";
 
 export interface NormalizedMessage {
@@ -281,6 +282,17 @@ export async function saveIncomingMessage(
   // Save message
   const messageIdForDb = msg.zaloMessageId || null;
 
+  // ── KI-B4: redact secrets BEFORE persistence ──────────────────────
+  // Users demonstrably paste API keys / passwords into DMs (legacy raw-inbound
+  // captured sk-… keys in cleartext). Redact content + raw metadata so no
+  // user-sent secret is ever written to the DB / trace / memory. Runtime
+  // parsing still uses the in-memory `msg` (transient), so this does not affect
+  // reminder/mention detection. Redaction is idempotent and pure.
+  const safeContent =
+    typeof msg.content === "string" ? (redact(msg.content) as string) : msg.content;
+  const safeMetadata =
+    typeof msg.rawMetadata === "string" ? (redact(msg.rawMetadata) as string) : msg.rawMetadata;
+
   await prisma.message.upsert({
     where: messageIdForDb ? { zaloMessageId: messageIdForDb } : { id: `dedup-${key}` },
     update: {},
@@ -290,11 +302,11 @@ export async function saveIncomingMessage(
       threadType: msg.threadType,
       senderId: msg.senderId || null,
       senderName: msg.senderName || null,
-      content: msg.content,
+      content: safeContent,
       isFromBot: false,
       messageType: msg.messageType,
       role: "user",
-      metadata: msg.rawMetadata,
+      metadata: safeMetadata,
       receivedAt: new Date(),
     },
   });
