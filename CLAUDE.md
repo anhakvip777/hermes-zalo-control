@@ -277,3 +277,206 @@ checklists / methodology references** — not as installed, auto-routing tooling
   systematic-debugging, requesting-code-review, verification-before-completion.
 
 > Installation requires explicit approval and a separate audit of exact commands.
+
+---
+
+# SESSION HANDOFF — Retrieval Answer feature (3.5A → 3.5D) + Track 1 prep
+
+> Appended as a session handoff summary. Repo synced at `origin/master = bb794f8`.
+> Live NOT executed. All safety flags unchanged.
+
+## 1. Session summary
+
+### Track 1 — READY_FOR_LIMITED_LIVE_TEST_PREP
+Completed:
+- Phase 1: inbound secret redaction (content/rawMetadata/previews pre-persist).
+- Phase 2: identity / threadId / senderId normalization (never senderId from displayName; identityConfidence).
+- Phase 3: listener / session auto-recovery (watchdog + recovery status; recovery never toggles autoReply/live).
+- Phase 5: AllowThreads verification + Access-Control-vs-AllowThreads UI clarity.
+- Phase 7: trace exact inbound→outbound linking (shared sentMessageId).
+- Phase 9: limited-live runbook (PLAN ONLY — 1 DM, TTL 5m, quota 1).
+
+Status:
+- READY_FOR_LIMITED_LIVE_TEST_PREP achieved (preparation only).
+- Limited live has NOT been run. Running live requires separate explicit approval.
+
+### Phase 4A — Persistent outbound idempotency
+Completed:
+- `OutboundRecord.idempotencyKey @unique` + `inboundMessageId`.
+- Text reply path uses write-ahead reservation before provider send.
+- Duplicate same-inbound / retry / restart / concurrent → skipped `duplicate_idempotency`.
+- Works for dryRun and future live.
+
+Deferred:
+- Reminder/schedule idempotency.
+- Persistent inbound fallback dedupe for messages with no `zaloMessageId`.
+- Live-test quota atomicity.
+- Explicit retry policy for a failed live send.
+
+### Phase 3.5A — Media / Attachment Memory Indexing
+Completed:
+- `Attachment` model; additive migration `20260706010000_add_attachment_index`.
+- Inbound image/file attachment metadata linked to `Message`.
+- OCR / extractedText / description redacted before persist; sourceUrl token redacted.
+- Vision metadata MERGE preserves `_identity`.
+- `memory.searchMessages` supports `threadType`, `dateFrom`/`dateTo`, `includeAttachments`;
+  finds OCR text by group + keyword + date with `attachmentId` evidence.
+- No cross-thread leak; no user/group id collision.
+
+Important correction (local DB-state only):
+- dev.db initially missed the `Attachment` table because the shell had a lingering
+  `DATABASE_URL=file:./test.db`. Fixed by an explicit dev.db `db push`.
+- No code/schema/migration change, no data loss (test.db always had the table).
+
+Deferred: original media resend · permanent media storage · historical media backfill ·
+voice/video extraction. (Retrieval-answer automation was deferred here but later done in 3.5B.)
+
+### Phase 3.5B-A — Retrieval Answer service
+Completed:
+- Added `retrieval-answer.service.ts`; `parseRetrievalQuery(text)`; `answerRetrieval(input, deps?)`.
+- Composes evidence-backed answers from memory + attachment OCR search.
+- Menu case works: "gửi tôi thực đơn cửa hàng B trong group A" → found + messageId/attachmentId evidence.
+- Scope guard prevents cross-thread leak; non-admin cross-thread → `permission_denied` (no search runs).
+- OCR unavailable → honest "chưa đọc được nội dung", no hallucination.
+- Answer/snippets redacted again before return.
+- Service-only: no sendOutbound, no autoReply, no provider AI, no live.
+
+### Phase 3.5B-B — Read-only retrieval answer tool
+Completed:
+- `memory.retrievalAnswer` read-only tool wrapper; delegates to `answerRetrieval()`.
+- `kind=read`, `minRole=basic_chat`, `dataScope=own_thread`.
+- Input: query, targetThreadId?, targetThreadType?, dateFrom?, dateTo?, includeAttachments?.
+- Output: status, answerText, evidence[], confidence.
+- Preserves scope guard, role checks, redaction, no-hallucination.
+- Registered in `buildMemoryTools()` but does NOT auto-run (registry not wired at startup). Bridge stays OFF.
+
+### Phase 3.5C — Admin/test route
+Completed:
+- Admin-authenticated read-only route: `POST /api/agent/tools/retrieval-answer`.
+- `RetrievalAnswerToolInput` Zod schema.
+- Handler calls `answerRetrieval()` directly — no ToolGateway runtime wiring, no sendOutbound,
+  no provider AI, no bridge, no Zalo send.
+- Optional `role` simulation (default `admin`; can pass `basic_chat` to verify permission_denied).
+- Output: status, answerText, evidence[], confidence.
+
+### Phase 3.5D — Admin UI test panel
+Completed:
+- Read-only page `/retrieval-test`; api-client `retrievalAnswer(input)` → `POST /api/agent/tools/retrieval-answer`.
+- Nav item "Retrieval Test" under System.
+- Form: query, requesterThreadId/Type, targetThreadId/Type, dateFrom/dateTo, includeAttachments, role sim.
+- Displays: status, confidence, answerText, evidence table
+  (messageId/attachmentId/source/threadId/threadType/createdAt/extractionStatus/snippet).
+- Safety banner: "Read-only test. Không gửi Zalo. Không bật autoReply. Không live." No send button anywhere.
+- No sendOutbound, no provider AI, no bridge, no autoReply, no original-image resend, no live.
+
+## 2. Important commits
+
+- `417aa37` — Phase 1 inbound redaction
+- `f2f7f31` — AllowThreads discovery + allowlist UI
+- `e65ec87` — legacy memory harvest + pre-live fix plan docs
+- `f23ab34` — legacy regression fixtures
+- `042d57e` — identity normalization
+- `b68655a` — listener watchdog/recovery
+- `4bcd591` — UI clarity Access Control vs Allow Threads
+- `de638e4` — trace exact linking
+- `0903adf` — limited-live runbook
+- `8426a6a` — persistent outbound idempotency
+- `8d8263f` — docs Phase 4A done
+- `1b69d74` — Attachment/OCR searchable memory
+- `94f112a` — docs Phase 3.5A done
+- `23ebc24` — retrieval-answer service
+- `b393a87` — docs Phase 3.5B-A done
+- `dc5255b` — memory.retrievalAnswer read-only tool
+- `f9b60dc` — docs Phase 3.5B-B done
+- `7f06b88` — admin retrieval answer route
+- `f6955c3` — docs Phase 3.5C done
+- `00565a2` — retrieval test UI
+- `bb794f8` — docs Phase 3.5D done
+
+Latest pushed remote: **origin/master = bb794f8**
+
+## 3. Key decisions and reasons
+
+1. **No live this session.** User not ready; safety-first; need trace/idempotency/recovery/allowlist/runbook ready first.
+2. **Phase 4A used `OutboundRecord.idempotencyKey @unique`.** A DB unique constraint is the only
+   restart/retry/concurrency-safe dedupe; a findFirst pre-check races.
+3. **Phase 3.5A used a dedicated `Attachment` model, not temp metadata search.** metadata isn't
+   searchable well, had an overwrite-`_identity` bug history, and we need durable attachmentId +
+   extractionStatus evidence.
+4. **Phase 3.5B-A service-only first.** Isolate the retrieval "brain" from runtime autoReply — easy to
+   test, no Zalo send, no live.
+5. **Phase 3.5B-B added a read-only tool but kept bridge OFF.** Prepares for future agent/tool calling
+   while avoiding any auto-run.
+6. **Phase 3.5C calls `answerRetrieval()` directly, not via ToolGateway.** ToolGateway/registry isn't
+   wired to HTTP runtime; a direct read-only, admin-authed call is smaller and safer.
+7. **Phase 3.5C allows optional role simulation.** Route is admin-only but needs to simulate basic_chat
+   to test permission_denied — grants no privilege to normal users.
+8. **Phase 3.5D uses the existing frontend auth pattern (no client-side Basic header).** All admin pages
+   use the same `apiFetch`; avoids a broad auth change.
+
+## 4. Current state by area
+
+- Live: **NOT EXECUTED**
+- AutoReply: **OFF**
+- DryRun (autoReply): **ON**
+- Structured bridge: **OFF**
+- Zalo: **disconnected / local safe**
+- Backend/frontend: running local at last check
+- Repo: **clean + pushed to origin/master bb794f8**
+- AllowThreads: implemented and verified
+- Identity: implemented
+- Recovery: implemented
+- Trace exact linking: implemented
+- Outbound idempotency: implemented (text replies)
+- Attachment/OCR search: implemented
+- Retrieval answer service: implemented
+- Retrieval answer tool: implemented (not auto-run)
+- Admin HTTP retrieval route: implemented
+- Retrieval UI test panel: implemented
+- Original image resend: not implemented
+- Permanent media storage: not implemented
+- Historical media backfill: not implemented
+- Reminder/schedule idempotency: not implemented
+- Live quota atomicity: not implemented
+
+## 5. Known baseline issues
+
+- `incoming-dispatcher.test.ts` — baseline Prisma-mock failures.
+- `batch7` / `batch13` — Windows path-validation failures.
+- The above were verified earlier as baseline/unrelated; skip and note them, don't chase.
+- PSReadLine on Windows prints noisy `System.ArgumentOutOfRangeException` for long inline commands and
+  git progress on stderr — this is NOT command failure (check the actual exit code / ref-update line).
+- `run-verify.mjs` is a temp test runner — delete before commit; never commit it.
+
+## 6. Next recommended steps
+
+**Option A — Manual verify first (recommended):**
+1. Open `/retrieval-test` in browser. 2. Verify the warning banner. 3. Seed/use dev data with Attachment
+OCR. 4. Test found-menu / not_found / permission_denied (role basic_chat) / no raw secret in answer+evidence.
+5. Confirm the Network tab only calls `POST /api/agent/tools/retrieval-answer`. 6. Confirm no
+sendOutbound/Zalo/live endpoints are hit.
+
+**Option B — Phase 3.5E dry-run-only dispatcher integration (only AFTER manual UI pass):**
+Detect retrieval intent in an allowed dry-run thread → compose via `answerRetrieval` → send via
+`sendOutbound` **dryRun only**. No live, no bridge. Tests must prove dryRun-only.
+
+**Option C — Phase 4B reminder/schedule idempotency (if reminders are next):**
+Persistent idempotency for ScheduleExecution/fire events; prevent duplicate reminders after restart/retry.
+
+**Option D — Stop here.** Checkpoint is safe and pushed.
+
+Recommended: manual-verify `/retrieval-test` first; do NOT start live; do NOT start 3.5E until the UI
+route works manually.
+
+## 7. Strict safety rules for next session
+
+- Never enable live without explicit approval.
+- Never set `ZALO_AUTO_REPLY_ENABLED=true` without explicit approval.
+- Never set `ZALO_AUTO_REPLY_DRY_RUN=false` without explicit approval.
+- Never enable `HERMES_AGENT_BRIDGE_ENABLED` without explicit approval.
+- Never QR login / reconnect session unless approved.
+- Never push / deploy unless approved.
+- Never touch `.env` / session / token / cookie / `zalo-session` / backups / QR unless approved.
+- Delete generated temp scripts (e.g. `run-verify.mjs`) before commit.
+- Always stage explicit paths only; never `git add .`.
+- Always report `git status` before commit/push.
