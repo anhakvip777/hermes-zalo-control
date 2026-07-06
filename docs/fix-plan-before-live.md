@@ -327,6 +327,38 @@ exhausted retries; no autoReply/live toggled by recovery.
 >   memory + outbound + inbound regression green; backend typecheck 0.
 > - **To exercise locally:** set `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true` in a local/dev env with the
 >   thread allowlisted and `ZALO_AUTO_REPLY_DRY_RUN=true`. Still no live send possible.
+>
+> **STATUS: Phase 3.5E runtime dry-run synthetic verification DONE ✅.**
+> Conclusion: `PHASE_3.5E_RUNTIME_DRYRUN_VERIFIED`.
+> - Baseline before this docs checkpoint: HEAD `e52dea2`, `origin/master` `e52dea2`, git clean after temp
+>   harness cleanup.
+> - Verified with synthetic inbound + isolated `test.db` + per-command env overrides only; no `.env` edit.
+> - Flag OFF (`RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=false`) → retrieval branch did not run, no retrieval
+>   outbound, fell through to `auto_reply_disabled`.
+> - Flag ON + found (`gửi tôi thực đơn cửa hàng B`) → `OutboundRecord` created with `dryRun=true`,
+>   `sentMessageId` starts `dry-run-`, content includes cửa hàng B menu, fake secret redacted as `[REDACTED]`.
+> - Non-intent (`hi`) → no retrieval outbound.
+> - Not found (`gửi tôi xyz-khong-ton-tai-99999`) → dry-run truthful message
+>   `Mình chưa tìm thấy thông tin phù hợp trong phạm vi được phép.`, no hallucination.
+> - Safety proof: no Zalo send, no bridge/provider AI, no QR/reconnect, no live, no `.env`, session,
+>   token/cookie, `zalo-session/`, backups, or QR touched; temp harness deleted.
+>
+> **Next-step audit/plan (not started): limited local dry-run with real listener.**
+> - Analogy: synthetic inbound is like testing in a garage with a simulator; real listener dry-run is turning
+>   on the real engine in the garage so the Zalo listener receives real inbound, but outbound remains dry-run;
+>   live test is driving onto the road and is still forbidden until separately approved.
+> - Goal: validate real inbound listener path with `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true` while keeping
+>   outbound dry-run and bridge off.
+> - Requires separate explicit approval for any Zalo reconnect/QR/session/listener work.
+> - Risks: real inbound can contain secrets/PII, listener/session instability, wrong thread allowlist, operator
+>   confusion between dry-run listener and live send.
+> - Safety guards: `ZALO_AUTO_REPLY_DRY_RUN=true`, `HERMES_AGENT_BRIDGE_ENABLED=false`, no global live,
+>   one known allowed thread only, trace/outbound evidence required, abort on any live-test/session anomaly.
+> - Pass evidence: inbound `Message` persisted redacted, retrieval branch decision observed, `OutboundRecord`
+>   `dryRun=true` with `dry-run-*`, no real Zalo send, no bridge/provider call, trace links inbound→outbound.
+> - Rollback: stop listener/reconnect attempt, unset `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED`, remove any temporary
+>   allowlist/demo changes, confirm no live-test active and git status clean.
+> - This is still **not live** because outbound remains dry-run and no real Zalo send is permitted.
 
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.

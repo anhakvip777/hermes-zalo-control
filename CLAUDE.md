@@ -542,3 +542,36 @@ Zalo disconnected/local-safe. Flags: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO
 Safety at checkpoint: Live NOT executed · autoReply OFF · bridge OFF · dryRun ON · Zalo disconnected.
 Flags unchanged: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
 `HERMES_AGENT_BRIDGE_ENABLED=false`, `ZALO_DRY_RUN=false`.
+
+---
+
+# CHECKPOINT — Phase 3.5E runtime dry-run synthetic verification PASS
+
+> Doc-only status note. No runtime code changed. No live, no QR/reconnect, no Zalo send.
+
+**Phase 3.5E Manual Runtime Dry-Run Test — PASS.**
+
+Baseline before docs checkpoint:
+- HEAD before checkpoint: `e52dea2`.
+- `origin/master` before checkpoint: `e52dea2`.
+- Git working tree clean before docs checkpoint (after temp harness cleanup).
+- Safety flags preserved: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
+  `HERMES_AGENT_BRIDGE_ENABLED=false`, `ZALO_DRY_RUN=false`,
+  `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=false` by default.
+
+Verified with synthetic inbound against isolated `test.db` and per-command env overrides only (no `.env` edit):
+- **Flag OFF** (`RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=false`): retrieval branch did not run; no retrieval
+  outbound created; dispatcher fell through to `auto_reply_disabled`.
+- **Flag ON + found** (`RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true`), synthetic inbound
+  `gửi tôi thực đơn cửa hàng B`: created an `OutboundRecord` with `dryRun=true`, `sentMessageId` beginning
+  `dry-run-`, menu content for cửa hàng B, and secret redacted as `[REDACTED]` with no raw secret leak.
+- **Non-intent** (`hi`): no retrieval outbound created.
+- **Not found** (`gửi tôi xyz-khong-ton-tai-99999`): dry-run outbound content was exactly
+  `Mình chưa tìm thấy thông tin phù hợp trong phạm vi được phép.`; no hallucinated menu/details.
+- **Safety proof:** no Zalo send (`ZaloMessageSender` was not called), no bridge/provider AI, no QR/reconnect,
+  no live, no `.env`, session, token/cookie, `zalo-session/`, backups, or QR touched. Temporary harness deleted.
+
+**Project status: `PHASE_3.5E_RUNTIME_DRYRUN_VERIFIED`.**
+
+Next step is **audit/plan only** for `limited local dry-run with real listener`. That step is not started and
+requires separate explicit approval before any Zalo reconnect/QR/listener work.
