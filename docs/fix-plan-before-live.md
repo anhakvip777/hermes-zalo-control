@@ -343,22 +343,161 @@ exhausted retries; no autoReply/live toggled by recovery.
 > - Safety proof: no Zalo send, no bridge/provider AI, no QR/reconnect, no live, no `.env`, session,
 >   token/cookie, `zalo-session/`, backups, or QR touched; temp harness deleted.
 >
-> **Next-step audit/plan (not started): limited local dry-run with real listener.**
-> - Analogy: synthetic inbound is like testing in a garage with a simulator; real listener dry-run is turning
->   on the real engine in the garage so the Zalo listener receives real inbound, but outbound remains dry-run;
->   live test is driving onto the road and is still forbidden until separately approved.
-> - Goal: validate real inbound listener path with `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true` while keeping
->   outbound dry-run and bridge off.
-> - Requires separate explicit approval for any Zalo reconnect/QR/session/listener work.
-> - Risks: real inbound can contain secrets/PII, listener/session instability, wrong thread allowlist, operator
->   confusion between dry-run listener and live send.
-> - Safety guards: `ZALO_AUTO_REPLY_DRY_RUN=true`, `HERMES_AGENT_BRIDGE_ENABLED=false`, no global live,
->   one known allowed thread only, trace/outbound evidence required, abort on any live-test/session anomaly.
-> - Pass evidence: inbound `Message` persisted redacted, retrieval branch decision observed, `OutboundRecord`
->   `dryRun=true` with `dry-run-*`, no real Zalo send, no bridge/provider call, trace links inbound→outbound.
-> - Rollback: stop listener/reconnect attempt, unset `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED`, remove any temporary
->   allowlist/demo changes, confirm no live-test active and git status clean.
-> - This is still **not live** because outbound remains dry-run and no real Zalo send is permitted.
+### PHASE 3.5F — Limited local dry-run with **real listener** (PLAN ONLY — do NOT run)
+
+> **STATUS: PLAN ONLY. NOT STARTED. NOT APPROVED TO RUN.**
+> This section documents *how* a future real-listener dry-run would be executed. Writing this plan
+> changes no code, no config, no flags, and touches no session/QR/Zalo. **Execution requires a separate,
+> explicit approval** (see the approval gate below).
+
+**Analogy (the three stages, to prevent operator confusion):**
+- **Synthetic inbound** (already done in 3.5E) = testing in a garage with a *simulator* — fake inbound,
+  isolated `test.db`, no real Zalo.
+- **Real-listener dry-run** (THIS phase) = *starting the real engine in the garage* — the real Zalo
+  listener receives **real inbound**, but outbound stays **dry-run** (no message ever leaves).
+- **Live test** (Phase 9, still forbidden) = *driving onto the road* — a real outbound send. Not this phase.
+
+**Goal:** validate that the **real inbound listener path** (real Zalo events → normalize → persist →
+redact → retrieval dispatch decision) behaves correctly end-to-end, while **outbound remains dry-run**,
+bridge stays off, and no real message is ever sent.
+
+---
+
+#### 1. Preconditions and explicit approval gate
+
+Before ANY step below is executed, ALL of the following must hold:
+
+1. **Separate explicit approval from Anh Việt** for *each* of: Zalo reconnect, QR scan (if session
+   expired), session/listener start. Approval for this plan doc is **NOT** approval to run it.
+2. Clean, synced git baseline (working tree clean; `HEAD == origin/master`).
+3. Exactly **one** known allowed thread pre-configured in the allowlist (see §3). No group threads allowed.
+4. All safety flags confirmed at their required values (see §2) **before** the listener is started.
+5. A person present to watch the run and trigger the kill-switch (this is not an unattended run).
+6. No pending live-test session active (`LiveTestSession` table has no `active` row).
+7. Confirmation that this is a **local** run only — no deploy, no production, no shared environment.
+
+> **Hard gate:** if any precondition is unmet → **do not start the listener**. Stop and report.
+
+---
+
+#### 2. Exact safety flags required
+
+Set via **local command/env override only** — never written to `.env`, never committed:
+
+| Flag | Required value | Notes |
+|------|----------------|-------|
+| `ZALO_AUTO_REPLY_ENABLED` | `false` | Unless separately approved. Real-listener dry-run does NOT need autoReply on. |
+| `ZALO_AUTO_REPLY_DRY_RUN` | `true` | Outbound is simulated. This is the primary "no real send" guard. |
+| `HERMES_AGENT_BRIDGE_ENABLED` | `false` | Structured bridge stays off. Retrieval path does not need it. |
+| `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED` | `true` | **Local override only** (env var on the command), NOT persisted to `.env`. Enables the retrieval branch to be exercised. |
+| `ZALO_DRY_RUN` | `false` | Connection realism only; outbound still simulated by the auto-reply dryRun flag. Leave as-is. |
+
+> The retrieval flag is the ONLY flag that flips ON for this test, and only as a transient env override
+> on the run command. Everything that could cause a real send stays OFF.
+
+---
+
+#### 3. One known allowed thread only
+
+- Pre-seed / confirm exactly **one** thread in the allowlist — the known test DM
+  (`threadType = "user"`, a single known `threadId`). **No group threads.**
+- Verify via `/allow-threads` (Allowed tab) or `GET /api/access/threads/allowed` that the list contains
+  **only** that one thread before starting.
+- Any inbound from a non-allowed thread must be blocked by the allowlist gate (default-deny) — assert this.
+
+---
+
+#### 4. Step-by-step procedure (FOR A FUTURE RUN — do not run now)
+
+> Each step assumes §1 approval is granted. Stop at any step if an abort condition (§5) triggers.
+
+1. **Baseline snapshot:** `git status` clean; record `HEAD`. Confirm flags (§2). Confirm allowlist (§3).
+2. **Confirm safety state read-only:** query effective dryRun (`getCurrentEffectiveDryRun()` must be
+   `true`); confirm no active `LiveTestSession`; confirm autoReply disabled, bridge disabled.
+3. **Start backend locally** with the env overrides from §2 (transient, not `.env`). Do NOT start with
+   any live/autoReply/bridge flag on.
+4. **Reconnect Zalo listener** (requires approval): restore existing session if valid; **only** if the
+   session is expired and QR is separately approved, scan QR. Prefer session-restore over QR.
+5. **Confirm listener health:** `SystemHeartbeat` for `listener` / `messagePipeline` is fresh; connection
+   status = connected. If listener does not come up cleanly → abort (§5).
+6. **Send ONE real inbound from the allowed test DM** (a human types a retrieval-style message, e.g.
+   `gửi tôi thực đơn cửa hàng B`, in the one allowed thread from a real Zalo account).
+7. **Observe the pipeline** (read-only): inbound `Message` persisted + redacted; `tryRetrievalDispatch`
+   decision; `OutboundRecord` created with `dryRun=true` and `sentMessageId` starting `dry-run-`.
+8. **Send ONE non-intent inbound** (e.g. `hi`) → confirm no retrieval outbound created.
+9. **Send ONE not-found inbound** (e.g. `gửi tôi xyz-khong-ton-tai`) → confirm dry-run truthful
+   "Mình chưa tìm thấy…" outbound, no hallucination.
+10. **Optionally: one inbound from a NON-allowed thread** → confirm allowlist blocks it (no outbound).
+11. **Collect evidence** (§6) for each inbound. Verify trace links inbound→outbound.
+12. **Stop the listener** cleanly. Unset the transient env overrides (end the process).
+13. **Rollback / cleanup** (§7). Confirm `git status` clean, no live-test active, no real send occurred.
+
+> **Bounded:** a handful of manual inbound messages from ONE thread, watched live, then stop. Not a
+> soak test, not unattended, not multi-thread.
+
+---
+
+#### 5. Abort conditions (any one → stop immediately, revert to safe state)
+
+- Effective dryRun is **not** `true` at any check (or a `LiveTestSession` becomes active).
+- Any real outbound send is observed (`ZaloMessageSender` called; `sentMessageId` NOT `dry-run-*`).
+- Listener/session unstable: repeated disconnects, heartbeat stale, reconnect loop.
+- Inbound arrives from an **unexpected/non-allowed** thread and is NOT blocked as expected.
+- Secret/PII redaction failure on a persisted inbound `Message.content` or metadata.
+- Trace missing/incomplete, or a cross-thread mislink.
+- Any bridge/provider-AI call observed (bridge must stay off).
+- Any attempt to touch `.env` / session write / token / cookie / `zalo-session/` / backups / schema.
+- Operator uncertainty about whether a send would be real → stop first, verify.
+
+On abort: execute §7 rollback, then report what happened and what was observed.
+
+---
+
+#### 6. Evidence checklist (must all be satisfied for a PASS)
+
+For each real inbound processed during the run:
+
+- [ ] **Inbound `Message` persisted AND redacted** — row exists for the inbound; any secret/JWT/`sk-`/
+      phone appears as `[REDACTED]`; normal Vietnamese text preserved.
+- [ ] **Retrieval branch decision observed** — `tryRetrievalDispatch` ran (or was correctly skipped for
+      non-intent / non-allowed), with the expected `found | not_found | permission_denied | unavailable`.
+- [ ] **`OutboundRecord.dryRun = true`** for any retrieval outbound created.
+- [ ] **`sentMessageId` starts with `dry-run-`** — never a real Zalo message id.
+- [ ] **No real Zalo send** — `ZaloMessageSender.sendMessage/sendVoice/uploadAttachment` NOT invoked;
+      no real outbound id anywhere.
+- [ ] **No bridge / provider-AI call** — `HERMES_AGENT_BRIDGE_ENABLED=false`; no provider request logged.
+- [ ] **Trace links inbound → outbound** exactly (Phase 7 exact linking; shared `sentMessageId`).
+- [ ] (Negative) Non-intent inbound → **no** retrieval outbound. Not-found → truthful dry-run message,
+      no fabricated menu. Non-allowed thread → **blocked**, no outbound.
+
+---
+
+#### 7. Rollback steps
+
+1. **Stop the listener / abort any reconnect** in progress (clean `listener.stop()` / process stop).
+2. **End the run process**, which drops the transient env overrides — `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED`
+   returns to its default `false` (it was never written to `.env`).
+3. **Confirm no live-test session** is active (`LiveTestSession` has no `active` row); cancel if any.
+4. **Remove any temporary allowlist/demo changes** made only for the test (restore the prior allowlist
+   state if it was altered).
+5. **Do NOT delete** the DB, session, `zalo-session/`, or backups. Cleanup is limited to test-only rows
+   (if seeded) and stopping processes.
+6. **Verify `git status` clean** — no code/config/schema/migration change from the run.
+7. **Confirm safety flags** back at defaults: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
+   `HERMES_AGENT_BRIDGE_ENABLED=false`, `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=false`.
+
+---
+
+#### 8. This is NOT live — live remains forbidden
+
+- Outbound stays **dry-run** for the entire run; **no real Zalo message is ever sent**.
+- This phase exercises only the **real inbound listener** path; the outbound door remains simulated.
+- **Live (a real send) is forbidden** and belongs to Phase 9, which itself requires its own separate
+  explicit approval and a bounded `LiveTestSession` (TTL + quota + kill-switch).
+- Enabling this phase's flags does **not** enable autoReply-live, bridge, or global live — those stay off.
+
+**Blocks live:** N/A (this phase does not go live). **Prerequisite for:** deciding whether the real
+inbound path is trustworthy enough to *plan* a Phase 9 limited live test later.
 
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
