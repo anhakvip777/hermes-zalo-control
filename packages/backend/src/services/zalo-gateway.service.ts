@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { config } from "../config.js";
 import { heartbeatOk } from "./heartbeat.service.js";
 import { computeBackoffDelay } from "./zalo-recovery.js";
+import { redact } from "./tool-gateway/redaction.js";
 
 // Resolve zca-js from the project root node_modules.
 // We resolve from process.cwd() which is always the project root when running via npm/tsx.
@@ -692,7 +693,10 @@ export class ZaloGatewayService extends EventEmitter {
 
       // Dispatch to Hermes for auto-reply (safe: catches all errors)
       try {
-        console.log(`[listener] dispatching: threadId=${msg.threadId} content="${msg.content.slice(0, 50)}"`);
+        // KI-B4: redact secrets from raw inbound BEFORE slicing (slicing first
+        // could split a secret and leave a fragment un-masked in the log).
+        const contentPreview = (redact(msg.content) as string).slice(0, 50);
+        console.log(`[listener] dispatching: threadId=${msg.threadId} content="${contentPreview}"`);
         const { handleIncomingMessage } = await import("./incoming-dispatcher.service.js");
         await handleIncomingMessage(msg, this.status.selfUserId);
       } catch (err: unknown) {
