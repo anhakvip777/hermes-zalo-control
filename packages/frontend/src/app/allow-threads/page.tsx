@@ -20,7 +20,9 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   discoverThreads,
+  listAllowedThreads,
   updateThreadAllow,
+  type AllowedThreadEntry,
   type DiscoverThreadItem,
 } from "../../lib/api-client";
 import { ApiError } from "../../lib/api";
@@ -30,8 +32,12 @@ type Tab = "friends" | "groups" | "allowed";
 type FailKind = "auth" | "rate" | "disconnected" | "generic";
 interface Failure { kind: FailKind; message: string; }
 
+type AllowThreadRow = Omit<DiscoverThreadItem, "source"> & {
+  source: "zalo" | "persisted";
+};
+
 interface TabState {
-  items: DiscoverThreadItem[];
+  items: AllowThreadRow[];
   loading: boolean;
   failure: Failure | null;
   loaded: boolean;
@@ -40,8 +46,29 @@ interface TabState {
 
 const initialTabState: TabState = { items: [], loading: false, failure: null, loaded: false, loadedQuery: "" };
 
-function typeForTab(t: Tab): "user" | "group" | "all" {
-  return t === "groups" ? "group" : t === "friends" ? "user" : "all";
+function typeForTab(t: Exclude<Tab, "allowed">): "user" | "group" {
+  return t === "groups" ? "group" : "user";
+}
+
+function allowedEntryToRow(entry: AllowedThreadEntry): AllowThreadRow {
+  return {
+    threadId: entry.threadId,
+    threadType: entry.threadType,
+    displayName: entry.threadId,
+    allowed: true,
+    source: "persisted",
+    subtitle: "Persisted allowlist",
+  };
+}
+
+function matchesRow(item: AllowThreadRow, q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+  return (
+    item.displayName.toLowerCase().includes(needle) ||
+    item.threadId.toLowerCase().includes(needle) ||
+    item.threadType.toLowerCase().includes(needle)
+  );
 }
 
 function classifyError(e: unknown): Failure {
@@ -86,10 +113,17 @@ export default function AllowThreadsPage() {
     const seq = ++seqRef.current[t];
     patch(t, { loading: true, failure: null });
     try {
+      if (t === "allowed") {
+        const r = await listAllowedThreads();
+        if (seq !== seqRef.current[t]) return; // superseded
+        const rows = r.data.map(allowedEntryToRow).filter((i) => matchesRow(i, q));
+        patch(t, { items: rows, loading: false, failure: null, loaded: true, loadedQuery: q });
+        return;
+      }
+
       const r = await discoverThreads({ type: typeForTab(t), query: q, limit: 200 });
       if (seq !== seqRef.current[t]) return; // superseded
-      const list = t === "allowed" ? r.items.filter((i) => i.allowed) : r.items;
-      patch(t, { items: list, loading: false, failure: null, loaded: true, loadedQuery: q });
+      patch(t, { items: r.items, loading: false, failure: null, loaded: true, loadedQuery: q });
       if (r.warning) toast(`Cảnh báo: ${r.warning.message}`, "error");
     } catch (e: unknown) {
       if (seq !== seqRef.current[t]) return;
@@ -117,7 +151,7 @@ export default function AllowThreadsPage() {
   const st = states[tab];
   const refresh = () => loadTab(tab, search);
 
-  const toggleAllow = async (item: DiscoverThreadItem) => {
+  const toggleAllow = async (item: AllowThreadRow) => {
     const key = `${item.threadType}:${item.threadId}`;
     const next = !item.allowed;
     const flip = (allowed: boolean) => setStates((s) => ({
@@ -229,7 +263,7 @@ export default function AllowThreadsPage() {
                       </div>
                     </td>
                     <td className="px-3 py-2.5">
-                      <span className="text-[11px] text-slate-500">{item.subtitle ?? (item.memberCount != null ? `${item.memberCount} members` : "—")}</span>
+                      <span className="text-[11px] text-slate-500">{item.subtitle ?? (item.memberCount != null ? `${item.memberCount} members` : item.source === "persisted" ? "Persisted allowlist" : "—")}</span>
                     </td>
                     <td className="px-3 py-2.5">
                       {item.allowed
