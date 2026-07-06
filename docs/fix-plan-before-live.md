@@ -306,6 +306,28 @@ exhausted retries; no autoReply/live toggled by recovery.
 > - **Still deferred:** no `sendOutbound` · no provider AI · no bridge · no autoReply · no original-image
 >   resend · no live.
 
+> **STATUS: Phase 3.5E DONE ✅ (implemented, default OFF).** Retrieval-answer dispatcher
+> integration — **dryRun-only**, flag-gated, inert by default:
+> - New flag `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED` (config `retrieval.dispatcherDryRunEnabled`),
+>   **default false**. Enabling it never changes autoReply/bridge/live flags.
+> - New `services/retrieval-intent.ts` → `detectRetrievalIntent(text)` uses `parseRetrievalQuery` and
+>   derives a SHORT search term (e.g. "gửi tôi thực đơn cửa hàng B" → "cửa hàng b"); chit-chat ignored.
+> - `incoming-dispatcher.service.ts` gained `tryRetrievalDispatch()` run at the top of
+>   `handleIncomingMessage` **before** the `autoReply.enabled` gate (the audited blocker), preserving all
+>   other guards: self-message, threadId, allowlist, permission/scope (via resolved role + `answerRetrieval`),
+>   redaction (in service), idempotency (via `sendOutbound` key). It only calls `answerRetrieval()` and
+>   `sendOutbound({source:"retrieval"})` — no zca-js, no `ZaloMessageSender`, no provider AI, no bridge.
+> - **Hard dryRun guards:** aborts (no send) if flag≠true, if `getCurrentEffectiveDryRun()≠true`, or if a
+>   live-test session could flip dryRun for the thread. Phase 3.5E can never emit a live message.
+> - **Status policy:** `found` → dryRun answer · `not_found` → dryRun truthful "Mình chưa tìm thấy…" ·
+>   `permission_denied` → NO outbound · `unavailable` → NO outbound (never confirm other-thread data).
+> - Tests: `retrieval-dispatch.test.ts` **11/11** (flag-off inert, non-intent ignored, intent→search-term,
+>   found→dryRun synthetic id + no agent task, not_found truthful, permission_denied/unavailable no-send,
+>   dryRun-guard abort, live-test abort, allowlist respected, idempotency one-outbound). Full retrieval +
+>   memory + outbound + inbound regression green; backend typecheck 0.
+> - **To exercise locally:** set `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true` in a local/dev env with the
+>   thread allowlisted and `ZALO_AUTO_REPLY_DRY_RUN=true`. Still no live send possible.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 

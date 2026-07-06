@@ -516,3 +516,29 @@ delete rows in dev.db where `threadId = 'demo-group-shopB'`. dev.db is gitignore
 Safety at checkpoint: Live NOT executed · autoReply OFF · bridge OFF · autoReply dryRun ON ·
 Zalo disconnected/local-safe. Flags: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
 `HERMES_AGENT_BRIDGE_ENABLED=false`, `ZALO_DRY_RUN=false`.
+
+---
+
+# CHECKPOINT — Phase 3.5E implemented (dryRun-only, default OFF)
+
+> Doc-only status note. Retrieval-answer dispatcher integration is implemented but **inert by default**.
+
+**Phase 3.5E — retrieval-answer dispatcher integration (dryRun-only):**
+- Flag `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED` (config `retrieval.dispatcherDryRunEnabled`), **default false**.
+- `services/retrieval-intent.ts` — `detectRetrievalIntent(text)` (uses `parseRetrievalQuery`, derives a
+  short search term; chit-chat ignored).
+- `incoming-dispatcher.service.ts` — `tryRetrievalDispatch()` runs at the top of `handleIncomingMessage`
+  **before** the `autoReply.enabled` gate; preserves self/threadId/allowlist/permission-scope/redaction/
+  idempotency guards; calls only `answerRetrieval()` + `sendOutbound({source:"retrieval"})`.
+- `outbound-dispatcher.service.ts` — added `"retrieval"` OutboundSource (maps to `auto_reply`).
+- **Hard dryRun guards:** abort (no send) if flag≠true, effective dryRun≠true, or a live-test session is
+  active for the thread. No live outbound is ever possible from 3.5E.
+- **Status policy:** found→dryRun answer · not_found→dryRun truthful message · permission_denied→no send ·
+  unavailable→no send.
+- Tests: `retrieval-dispatch.test.ts` 11/11; retrieval/memory/outbound/inbound regression green; typecheck 0.
+- **Enable locally (dry-run demo):** `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true` + thread allowlisted +
+  `ZALO_AUTO_REPLY_DRY_RUN=true`. Never sends real Zalo.
+
+Safety at checkpoint: Live NOT executed · autoReply OFF · bridge OFF · dryRun ON · Zalo disconnected.
+Flags unchanged: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
+`HERMES_AGENT_BRIDGE_ENABLED=false`, `ZALO_DRY_RUN=false`.
