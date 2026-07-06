@@ -53,7 +53,8 @@ export type OutboundSource =
   | "image"
   | "file"
   | "error_fallback"
-  | "catch_all";
+  | "catch_all"
+  | "retrieval";
 
 // ── Discriminated union for OutboundIntent ───────────────────────────
 
@@ -131,6 +132,7 @@ function mapSource(source: OutboundSource): "auto_reply" | "agent_tool" | "sched
     case "file": return "auto_reply";
     case "error_fallback": return "auto_reply";
     case "catch_all": return "auto_reply";
+    case "retrieval": return "auto_reply";
   }
 }
 

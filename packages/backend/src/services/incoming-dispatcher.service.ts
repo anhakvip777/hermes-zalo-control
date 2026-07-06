@@ -26,6 +26,8 @@ import { sendOutbound } from "./outbound-dispatcher.service.js";
 import { hasUnsupportedSystemClaim, hasScheduleEvidence } from "./unsupported-claim-guard.service.js";
 import { clearAllCooldowns, getActiveCooldowns, clearCooldown } from "./cooldown.service.js";
 import { redact } from "./tool-gateway/redaction.js";
+import { detectRetrievalIntent } from "./retrieval-intent.js";
+import { answerRetrieval } from "./retrieval-answer.service.js";
 
 // KI-B4: redact secrets from any user content BEFORE it is persisted (previews,
 // audit records). Redact the FULL content first, then slice — slicing first
@@ -769,12 +771,159 @@ async function processBatchNow(
   }
 }
 
+// ── Phase 3.5E: retrieval-answer dispatch (dryRun-only, flag-gated) ──
+/**
+ * Flag-gated retrieval branch. Runs BEFORE the autoReply.enabled gate (the audit
+ * identified that gate as a blocker while ZALO_AUTO_REPLY_ENABLED stays false),
+ * but preserves every OTHER safety guard: self-message, threadId, allowlist,
+ * permission/scope (via answerRetrieval + resolved role), redaction (in the
+ * service), idempotency (via sendOutbound key). It NEVER sends live:
+ *   - inert unless RETRIEVAL_DISPATCHER_DRYRUN_ENABLED === true,
+ *   - aborts if effective dryRun !== true,
+ *   - aborts if a live-test session could flip dryRun for the thread.
+ * It only calls answerRetrieval() (pure DB/memory search) and sendOutbound()
+ * (the single outbound door, which forces the dryRun synthetic path). No zca-js,
+ * no ZaloMessageSender, no provider AI, no bridge.
+ *
+ * Status policy: found → dryRun answer · not_found → dryRun truthful message ·
+ * permission_denied → NO outbound · unavailable → NO outbound.
+ *
+ * Returns { handled:false } to let the normal pipeline proceed (flag off /
+ * not a retrieval intent), or { handled:true, ... } when it owns the message.
+ */
+async function tryRetrievalDispatch(
+  msg: NormalizedMessage,
+  selfUserId?: string | null,
+): Promise<{ handled: boolean; dispatched?: boolean; reason?: string }> {
+  if (!config.retrieval.dispatcherDryRunEnabled) return { handled: false };
+
+  // Self-message guard (defense-in-depth; mirrors safetyCheck).
+  if (msg.isSelf === true || msg.isFromBot === true) return { handled: false };
+  if (selfUserId && msg.senderId === selfUserId) return { handled: false };
+
+  // Identity / content guards.
+  if (!msg.threadId) return { handled: false };
+  if (!msg.content || msg.content.trim().length === 0) return { handled: false };
+  if (msg.messageType !== "text") return { handled: false }; // retrieval is triggered by a text query
+
+  // Retrieval intent + short search term.
+  const intent = detectRetrievalIntent(msg.content);
+  if (!intent.isRetrieval || !intent.searchQuery) return { handled: false };
+
+  // Allowlist guard (retrieval never acts in a non-allowed thread).
+  if (!isThreadAllowedCached(msg.threadId, msg.threadType)) {
+    console.log(`[retrieval] skip: thread_not_allowed (thread=${msg.threadId})`);
+    return { handled: true, dispatched: false, reason: "thread_not_allowed" };
+  }
+
+  // ── HARD dryRun guard #1: effective dryRun must be true. ──
+  if (getCurrentEffectiveDryRun() !== true) {
+    console.log(`[retrieval] ABORT: effective dryRun is not true — no send (thread=${msg.threadId})`);
+    return { handled: true, dispatched: false, reason: "retrieval_abort_not_dryrun" };
+  }
+  // ── HARD dryRun guard #2: a live-test session could flip dryRun → abort. ──
+  try {
+    const { shouldSendLiveForThread } = await import("./live-test.service.js");
+    const liveCheck = await shouldSendLiveForThread(msg.threadId);
+    if (liveCheck.live) {
+      console.log(`[retrieval] ABORT: live-test session active — no send (thread=${msg.threadId})`);
+      return { handled: true, dispatched: false, reason: "retrieval_abort_live_test" };
+    }
+  } catch {
+    // If we cannot verify live-test state, do NOT proceed (fail closed).
+    console.log(`[retrieval] ABORT: could not verify live-test state — no send (thread=${msg.threadId})`);
+    return { handled: true, dispatched: false, reason: "retrieval_abort_livecheck_error" };
+  }
+
+  // Resolve effective role (identity guard → lowest role on ambiguity). Never
+  // elevate a blank/unknown sender; this keeps cross-thread requests denied.
+  let role: "form_only" | "basic_chat" | "advanced" | "admin" = "form_only";
+  const cannotIdentify =
+    msg.identityConfidence === "unknown" || (!msg.senderId && msg.threadType === "group");
+  if (!cannotIdentify && msg.senderId) {
+    try {
+      const { resolvePrincipal, isBlocked } = await import("./principal.service.js");
+      const ctx = await resolvePrincipal(msg.senderId, msg.threadId);
+      if (isBlocked(ctx.status)) {
+        console.log(`[retrieval] skip blocked: senderId=${msg.senderId} thread=${msg.threadId}`);
+        return { handled: true, dispatched: false, reason: "blocked" };
+      }
+      role = ctx.role;
+    } catch {
+      role = "form_only";
+    }
+  }
+
+  // Evidence-backed answer (scope guard + redaction live inside the service).
+  let ans;
+  try {
+    ans = await answerRetrieval({
+      query: intent.searchQuery,
+      requesterThreadId: msg.threadId,
+      requesterThreadType: msg.threadType,
+      dateFrom: intent.dateFrom,
+      dateTo: intent.dateTo,
+      includeAttachments: true,
+      role,
+    });
+  } catch (err: unknown) {
+    console.error(`[retrieval] answerRetrieval error: ${err instanceof Error ? err.message : String(err)}`);
+    return { handled: true, dispatched: false, reason: "retrieval_error" };
+  }
+
+  // ── Status policy ──
+  // permission_denied / unavailable → NO outbound (never confirm other-thread data).
+  if (ans.status === "permission_denied" || ans.status === "unavailable") {
+    console.log(`[retrieval] no outbound for status=${ans.status} (thread=${msg.threadId})`);
+    return { handled: true, dispatched: false, reason: `retrieval_${ans.status}` };
+  }
+
+  // found → dryRun the answer; not_found → dryRun a truthful message (no fabrication).
+  const replyText =
+    ans.status === "found"
+      ? ans.answerText
+      : "Mình chưa tìm thấy thông tin phù hợp trong phạm vi được phép.";
+
+  const ob = await sendOutbound({
+    kind: "text",
+    threadId: msg.threadId,
+    threadType: msg.threadType,
+    source: "retrieval",
+    content: replyText,
+    relatedMessageId: msg.zaloMessageId ?? undefined,
+    metadata: {
+      retrieval: {
+        status: ans.status,
+        confidence: ans.confidence,
+        evidenceCount: ans.evidence.length,
+        evidenceMessageId: ans.evidence[0]?.messageId ?? null,
+        evidenceAttachmentId: ans.evidence[0]?.attachmentId ?? null,
+        searchQuery: intent.searchQuery,
+      },
+    },
+  });
+
+  console.log(
+    `[retrieval] dryRun outbound: status=${ans.status} decision=${ob.decision} ` +
+    `dryRun=${ob.dryRun} sentMessageId=${ob.sentMessageId ?? "-"} (thread=${msg.threadId})`,
+  );
+  return { handled: true, dispatched: ob.success, reason: `retrieval_${ans.status}` };
+}
+
 // ── Dispatcher ──────────────────────────────────────────────────────
 
 export async function handleIncomingMessage(
   msg: NormalizedMessage,
   selfUserId?: string | null,
 ): Promise<{ dispatched: boolean; reason?: string }> {
+  // Phase 3.5E (flag-gated, dryRun-only): try retrieval-answer dispatch first.
+  // Inert unless RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true. When it owns the
+  // message it returns here; otherwise the normal pipeline proceeds.
+  const retrieval = await tryRetrievalDispatch(msg, selfUserId);
+  if (retrieval.handled) {
+    return { dispatched: !!retrieval.dispatched, reason: retrieval.reason };
+  }
+
   const safe = safetyCheck(msg, selfUserId);
 
   if (!safe.allowed) {

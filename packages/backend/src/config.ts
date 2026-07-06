@@ -169,6 +169,15 @@ export const config = {
     threadTypes: (process.env.MESSAGE_BATCHING_THREAD_TYPES ?? "user").split(",").map(s => s.trim()),
   },
 
+  // Phase 3.5E: retrieval-answer dispatcher integration (dryRun-only).
+  // Default OFF. When enabled (local/dev only), the dispatcher may detect a
+  // retrieval intent and reply with an evidence-backed answer — but ONLY through
+  // sendOutbound in dryRun. A hard guard aborts if effective dryRun is not true.
+  // Enabling this NEVER changes autoReply/bridge/live flags.
+  retrieval: {
+    dispatcherDryRunEnabled: process.env.RETRIEVAL_DISPATCHER_DRYRUN_ENABLED === "true",
+  },
+
   logLevel: process.env.LOG_LEVEL ?? "info",
 } as const;
 
