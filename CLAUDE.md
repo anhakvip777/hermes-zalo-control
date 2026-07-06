@@ -480,3 +480,39 @@ route works manually.
 - Delete generated temp scripts (e.g. `run-verify.mjs`) before commit.
 - Always stage explicit paths only; never `git add .`.
 - Always report `git status` before commit/push.
+
+---
+
+# CHECKPOINT — /retrieval-test manual verification PASS
+
+> Doc-only status note. No runtime code changed. Safety flags unchanged.
+
+**Option A (manual browser verify of `/retrieval-test`) — PASS** (verified by user in browser):
+- Read-only banner shown: "Read-only test. Không gửi Zalo. Không bật autoReply. Không live." — PASS.
+- Found case (query `cửa hàng B`, requester=target `demo-group-shopB`/group, role admin, includeAttachments true):
+  status=`found`, menu shown (Cơm gà 45k / Bún bò 50k / Trà đào 25k), send date 2026-07-06,
+  fake secret shown as `[REDACTED]`, evidence has messageId `demo-msg-1` + attachmentId — PASS.
+- Permission guard (role `basic_chat`, cross-thread `demo-group-other`): status=`permission_denied`,
+  no other-thread content leaked — PASS.
+- Not found (non-existent query): status=`not_found`, no hallucination — PASS.
+- Network safety: only `POST /api/agent/tools/retrieval-answer` observed; no sendOutbound / Zalo send /
+  live endpoint / bridge runtime endpoint — PASS.
+
+**Also confirmed at API/service level (test.db, isolated dry-check):** same 4 outcomes PASS.
+
+**Known behavior (not a bug, do not "fix" without scope approval):** the route does a **raw substring
+search** on `query` — the parser `parseRetrievalQuery` is NOT wired into the route. Use a keyword
+(`cửa hàng B`), not the full sentence. Wiring keyword parsing into retrieval is a candidate for a later phase.
+
+**Demo data:** additive rows seeded in **dev.db** under `threadId = 'demo-group-shopB'`
+(message `demo-msg-1` + one image attachment, OCR stored already redacted). To remove later:
+delete rows in dev.db where `threadId = 'demo-group-shopB'`. dev.db is gitignored — not in version control.
+
+**Project status: `READY_FOR_PHASE_3.5E_DRY_RUN_ONLY`.**
+- Phase 3.5E (dry-run-only dispatcher integration) is **NOT started** — awaiting a separate explicit scope approval.
+- Do NOT start 3.5E code until that approval. When approved: audit-first, dryRun-only, no live/bridge,
+  tests must prove dryRun-only.
+
+Safety at checkpoint: Live NOT executed · autoReply OFF · bridge OFF · autoReply dryRun ON ·
+Zalo disconnected/local-safe. Flags: `ZALO_AUTO_REPLY_ENABLED=false`, `ZALO_AUTO_REPLY_DRY_RUN=true`,
+`HERMES_AGENT_BRIDGE_ENABLED=false`, `ZALO_DRY_RUN=false`.
