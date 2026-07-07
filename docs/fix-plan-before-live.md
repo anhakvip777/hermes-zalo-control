@@ -499,6 +499,63 @@ For each real inbound processed during the run:
 **Blocks live:** N/A (this phase does not go live). **Prerequisite for:** deciding whether the real
 inbound path is trustworthy enough to *plan* a Phase 9 limited live test later.
 
+> **STATUS: Phase 3.5F real-listener dry-run EXECUTED ✅ (2026-07-07) — safety PASS, NO live send.**
+> This run was separately approved (QR login one time only). No code changed; no commit/push from the run.
+>
+> **Baseline:** git clean & synced at `HEAD == origin/master == a910dc3` before and after the run.
+>
+> **Setup (transient env overrides on the run command only — `.env` NOT edited):**
+> `RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true`, `ZALO_AUTO_REPLY_ENABLED=false`,
+> `ZALO_AUTO_REPLY_DRY_RUN=true`, `HERMES_AGENT_BRIDGE_ENABLED=false`. Effective dryRun verified `true`
+> (source: env; no RuntimeSetting `autoReply.dryRun` present). No active `LiveTestSession`. Allowlist held
+> exactly **one** test DM (`threadType=user`, single known `threadId`) — no group.
+>
+> **Preflight gate — 5/5 PASS (read-only):** git clean/synced at `a910dc3`; safety flags confirmed;
+> no active LiveTestSession; allowlist = exactly one DM; effective dryRun = true.
+>
+> **Listener:** because `autoReply.enabled=false`, the listener does NOT auto-start at boot (the known
+> `index.ts` gate). It was started via the login path (QR scanned once by the operator →
+> `onLoginSuccess` → `persistSession` + `startListener`). Confirmed `connected=true`,
+> `listenerActive=true`, `dryRun=true`, listener heartbeat `ok`. The listener received **3 real inbound
+> messages** from the one allowed DM.
+>
+> **Evidence — 3 real inbound (dry-run outbound):**
+> | # | Inbound | Decision | OutboundRecord | sentMessageId |
+> |---|---------|----------|----------------|---------------|
+> | 1 | `gửi tôi thực đơn cửa hàng B` | retrieval `found`, decision=allow | `dryRun=1`, reason=`dry_run` | `dry-run-1783384364438-658ho` |
+> | 2 | `hi` | `skip: auto_reply_disabled` | **none created** | — |
+> | 3 | `gửi tôi xyz-khong-ton-tai-999` | retrieval `found`, decision=allow | `dryRun=1`, reason=`dry_run` | `dry-run-1783384376189-xbk1t` |
+>
+> - Inbound `Message` rows persisted (`isFromBot=0`, sender = the one allowed DM); redaction path ran
+>   (test content carried no secret, so nothing to mask; normal Vietnamese text preserved).
+> - **No real Zalo send** — grep for live-send/`ZaloMessageSender` signals → none. Every outbound stayed
+>   `dryRun=true` with a `dry-run-*` synthetic id.
+> - **No bridge / provider-AI** — `HERMES_AGENT_BRIDGE_ENABLED=false`; retrieval answers came from
+>   `answerRetrieval()` (memory search), not a provider.
+>
+> **Teardown:** backend + frontend stopped; the npm wrappers' child processes were force-killed (PID
+> teardown) because stopping the wrapper alone left them holding the ports; **ports 3001/3002 confirmed
+> clean** (no listener). `.env` unchanged. `git status` clean at `a910dc3`. No commit/push.
+>
+> **Session note (sensitive):** the one-time QR login created a real `packages/backend/zalo-session/`
+> session file locally. It is git-ignored and **must never be committed**. It was **not** deleted
+> (Iron Law #2 — no destructive ops); the operator decides whether to keep it (future reconnect without
+> QR) or disconnect/remove it manually.
+>
+> **⚠️ FUNCTIONAL ANOMALY — NEXT FIX before any live / retrieval accuracy claim:**
+> The not-found test (`gửi tôi xyz-khong-ton-tai-999`) returned `found` instead of `not_found`. Cause: the
+> retrieval search does a **raw substring / generic match** and matched the DM's own earlier inbound
+> messages (both test #1 and #3 contain the generic phrase `gửi tôi`), so it "found" the user's own prior
+> messages rather than a real menu/attachment. This is **not** a live-safety failure (still dryRun, no
+> send), but it **must be fixed** before advertising retrieval accuracy or moving toward live: the
+> retrieval matcher should (a) not match the querying user's own just-sent messages, (b) use the parsed
+> keyword/intent (`parseRetrievalQuery`) rather than a generic substring, and (c) return an honest
+> `not_found` when no relevant evidence exists. Track this as the **top NEXT FIX** for the retrieval path.
+>
+> **Conclusion:** the real inbound listener path (real Zalo events → normalize → persist → redact →
+> retrieval dispatch → dry-run outbound) works end-to-end with outbound fully simulated. Real-listener
+> dry-run safety = **PASS**. Retrieval `not_found` correctness = **must fix next**.
+
 **Goal:** the bridge can store, understand, index, and retrieve information from inbound
 image/file/media by **thread / date / keyword**, safely and with evidence.
 
