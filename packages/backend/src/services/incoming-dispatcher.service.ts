@@ -865,6 +865,9 @@ async function tryRetrievalDispatch(
       dateTo: intent.dateTo,
       includeAttachments: true,
       role,
+      // The inbound request itself is already persisted before dispatch; never
+      // let it match itself as evidence (that made not_found queries return found).
+      excludeZaloMessageId: msg.zaloMessageId ?? null,
     });
   } catch (err: unknown) {
     console.error(`[retrieval] answerRetrieval error: ${err instanceof Error ? err.message : String(err)}`);

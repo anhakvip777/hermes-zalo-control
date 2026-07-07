@@ -82,6 +82,12 @@ export interface MessageQuery {
   dateFrom?: Date;
   dateTo?: Date;
   limit: number;
+  /**
+   * Exclude one message (by Zalo message id) from results. Used so a retrieval
+   * query never matches the querying user's own just-persisted request message
+   * as evidence for itself.
+   */
+  excludeZaloMessageId?: string | null;
 }
 
 export interface MemoryDeps {
@@ -104,6 +110,7 @@ export async function defaultGetMessages(q: MessageQuery): Promise<MemoryMessage
   if (q.threadId) where.threadId = q.threadId;
   if (q.threadType) where.threadType = q.threadType;
   if (q.search) where.content = { contains: q.search };
+  if (q.excludeZaloMessageId) where.zaloMessageId = { not: q.excludeZaloMessageId };
   if (q.dateFrom || q.dateTo) {
     where.createdAt = {
       ...(q.dateFrom ? { gte: q.dateFrom } : {}),

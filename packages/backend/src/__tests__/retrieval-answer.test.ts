@@ -206,4 +206,32 @@ describe("answerRetrieval — DB-backed menu case", () => {
     const r2 = await answerRetrieval({ requesterThreadId: "group-B", requesterThreadType: "group", role: "basic_chat", query: "cửa hàng B" });
     expect(r2.status).toBe("not_found");
   });
+
+  it("does NOT use the querying user's own request message as evidence (excludeZaloMessageId)", async () => {
+    // Reproduces the Hướng C not_found bug: the user's request is persisted
+    // BEFORE the search runs, so a substring search would otherwise match the
+    // request text itself and wrongly return found.
+    await prisma.message.create({
+      data: {
+        id: "req-1", zaloMessageId: "req-zz-1", threadId: "user-A", threadType: "user",
+        senderId: "u1", content: "gửi tôi xyz-khong-ton-tai-999", isFromBot: false,
+        messageType: "text", role: "user", receivedAt: new Date(),
+      },
+    });
+
+    // Without exclusion, the request itself matches → found (the old bug).
+    const leaked = await answerRetrieval({
+      requesterThreadId: "user-A", requesterThreadType: "user", role: "basic_chat",
+      query: "xyz-khong-ton-tai-999",
+    });
+    expect(leaked.status).toBe("found"); // documents the pre-fix behavior
+
+    // With exclusion of the request's own id → honest not_found.
+    const fixed = await answerRetrieval({
+      requesterThreadId: "user-A", requesterThreadType: "user", role: "basic_chat",
+      query: "xyz-khong-ton-tai-999", excludeZaloMessageId: "req-zz-1",
+    });
+    expect(fixed.status).toBe("not_found");
+    expect(fixed.evidence).toEqual([]);
+  });
 });

@@ -169,6 +169,30 @@ describe("Phase 3.5E — retrieval dispatch (dryRun-only)", () => {
     expect(recs[0].content).not.toContain("Cơm gà");
   });
 
+  // Regression for the Hướng C anomaly: on the real listener path the inbound
+  // request is persisted to Message BEFORE dispatch. A not-found query must not
+  // match the user's OWN just-persisted request text (which contains generic
+  // command words like "gửi tôi") and wrongly return found.
+  it("not_found even when the user's own request is already persisted (no self-match)", async () => {
+    h.flagEnabled = true;
+    await seedMenu();
+    // Simulate the real path: the inbound request row exists before dispatch,
+    // sharing the same zaloMessageId ("in-1") the dispatcher will exclude.
+    await prisma.message.create({
+      data: {
+        id: "self-req-1", zaloMessageId: "in-1", threadId: THREAD, threadType: "user",
+        senderId: "u1", content: "gửi tôi xyz-khong-ton-tai-999", isFromBot: false,
+        messageType: "text", role: "user", receivedAt: new Date(),
+      },
+    });
+    const r = await handleIncomingMessage(inbound("gửi tôi xyz-khong-ton-tai-999"));
+    expect(r.dispatched).toBe(true);
+    const recs = await prisma.outboundRecord.findMany();
+    expect(recs.length).toBe(1);
+    expect(recs[0].content).toBe("Mình chưa tìm thấy thông tin phù hợp trong phạm vi được phép.");
+    expect(r.reason).toBe("retrieval_not_found");
+  });
+
   it("permission_denied → NO outbound", async () => {
     h.flagEnabled = true;
     h.answer = { status: "permission_denied", answerText: "no", evidence: [], confidence: "low" };

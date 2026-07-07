@@ -34,6 +34,12 @@ export interface RetrievalAnswerInput {
   dateTo?: string;
   includeAttachments?: boolean;
   role: string;
+  /**
+   * Exclude one message (by Zalo message id) from message-evidence. Set to the
+   * inbound request's own zaloMessageId so a retrieval query never matches the
+   * user's just-persisted request text as evidence for itself.
+   */
+  excludeZaloMessageId?: string | null;
 }
 
 export interface RetrievalEvidence {
@@ -232,6 +238,7 @@ export async function answerRetrieval(
       dateFrom,
       dateTo,
       limit: SEARCH_LIMIT,
+      excludeZaloMessageId: input.excludeZaloMessageId ?? null,
     });
   } catch {
     return {

@@ -54,11 +54,13 @@ export function detectRetrievalIntent(text: string): RetrievalIntentResult {
     .map((t) => t.trim())
     .filter((t) => t.length > 0 && !FILLER_TOKENS.has(t));
 
-  let searchQuery = tokens.join(" ").trim();
-  // Fallback to parser keywords if stripping left nothing meaningful.
-  if (!searchQuery && parsed.keywords.length > 0) {
-    searchQuery = parsed.keywords.join(" ");
-  }
+  const searchQuery = tokens.join(" ").trim();
+  // If stripping filler/intent words leaves nothing, the query was only generic
+  // command words (e.g. "menu", "tìm", "gửi tôi") with no concrete subject.
+  // Do NOT fall back to parser keywords: those aren't filtered for generic
+  // nouns and would resurrect exactly those command words as a search term,
+  // letting a subject-less request match unrelated evidence and return "found".
+  // No concrete term → not a retrieval we can answer; fall through.
   if (!searchQuery) return { isRetrieval: false };
 
   return {
