@@ -8,7 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, access, stat, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename, extname, resolve, normalize } from "node:path";
+import { basename, extname, resolve, normalize, sep } from "node:path";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
 
@@ -93,7 +93,7 @@ export function validateDocumentPath(filePath: string): { valid: boolean; error?
   const baseDir = resolve(config.document.allowedBaseDir);
 
   // Path traversal check (resolved must be inside base dir)
-  if (!resolved.startsWith(baseDir + "/") && resolved !== baseDir) {
+  if (!resolved.startsWith(baseDir + sep) && resolved !== baseDir) {
     return { valid: false, error: `Path outside allowed base directory: ${baseDir}` };
   }
 

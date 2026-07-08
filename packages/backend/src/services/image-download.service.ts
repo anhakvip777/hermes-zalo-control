@@ -5,7 +5,7 @@
 import { createWriteStream, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { resolve, basename } from "node:path";
+import { resolve, basename, sep } from "node:path";
 import { config } from "../config.js";
 
 export interface DownloadResult {
@@ -26,7 +26,7 @@ export function validateSafeDownloadPath(filePath: string): boolean {
   const resolved = resolve(filePath);
 
   // Must be within safeDir
-  if (!resolved.startsWith(safeDir + "/") && resolved !== safeDir) {
+  if (!resolved.startsWith(safeDir + sep) && resolved !== safeDir) {
     return false;
   }
 
