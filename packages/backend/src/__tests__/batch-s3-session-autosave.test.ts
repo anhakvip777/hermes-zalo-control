@@ -77,6 +77,16 @@ const mockGateway = vi.hoisted(() => ({
   beginReconnect: vi.fn(() => true),
   endReconnect: vi.fn(() => {}),
   getLastRestoreSource: vi.fn(() => "primary" as "primary" | "backup" | null),
+  getRecoveryStatus: vi.fn(() => ({
+    recoveryState: "idle" as "idle" | "scheduled" | "reconnecting" | "error",
+    reconnectAttempts: 0,
+    maxReconnectAttempts: 5,
+    lastReconnectAt: null as string | null,
+    lastReconnectError: null as string | null,
+    listenerActive: S3.gw.connected,
+    lastListenerBeatAt: null as string | null,
+    listenerHeartbeatAgeSeconds: null as number | null,
+  })),
 }));
 
 // ═════════════════════════════════════════════════════════
@@ -110,6 +120,7 @@ vi.mock("../db.js", () => ({
     outboundRecord: { count: vi.fn(async () => 0), findMany: vi.fn(async () => []), deleteMany: vi.fn(async () => ({})) },
     agentTask: { count: vi.fn(async () => 0), findMany: vi.fn(async () => []), create: vi.fn(async ({ data }: any) => ({ id: "task-001", ...data })), deleteMany: vi.fn(async () => ({})) },
     auditLog: { create: vi.fn(async ({ data }: any) => ({ id: "audit-001", ...data })), deleteMany: vi.fn(async () => ({})) },
+    attachment: { deleteMany: vi.fn(async () => ({})) },
     runtimeSetting: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []), deleteMany: vi.fn(async () => ({})) },
     document: { findMany: vi.fn(async () => []), deleteMany: vi.fn(async () => ({})) },
     systemHeartbeat: { findMany: vi.fn(async () => []), upsert: vi.fn(async () => ({})) },

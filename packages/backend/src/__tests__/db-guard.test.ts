@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const SCRIPT = "/home/anhakvip777/hermes-zalo-control/packages/backend/scripts/db-guard.mjs";
-const NODE = "/home/anhakvip777/.nvm/versions/node/v22.23.0/bin/node";
-const BACKEND_DIR = "/home/anhakvip777/hermes-zalo-control/packages/backend";
-const ROOT_DIR = "/home/anhakvip777/hermes-zalo-control";
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const BACKEND_DIR = join(TEST_DIR, "..", "..");
+const ROOT_DIR = join(BACKEND_DIR, "..", "..");
+const SCRIPT = join(BACKEND_DIR, "scripts", "db-guard.mjs");
+const NODE = process.execPath;
 const BACKUP_DIR = join(BACKEND_DIR, "backups", "db");
 
 function runGuard(args: string[], env?: Record<string, string>): {
@@ -116,6 +118,7 @@ describe("DB Guard — script integration", () => {
     const r = spawnSync("npm", ["run", "db:guard"], {
       cwd: ROOT_DIR,
       timeout: 30_000,
+      shell: true,
     });
     const output = r.stdout?.toString() ?? "";
     expect(output).toContain("Database:");

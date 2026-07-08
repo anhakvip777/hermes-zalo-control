@@ -26,6 +26,7 @@ vi.mock("../config.js", () => ({
     messageBatching: { enabled: false, windowMs: 4000, maxMessages: 5, maxChars: 3000, threadTypes: ["user"] },
     document: { enabled: false, allowedBaseDir: "/tmp/test", processedDir: "/tmp/test/processed", maxSizeMB: 50, allowedExtensions: ["pdf", "txt"], doclingBin: "/bin/true", doclingTimeoutMs: 60000, doclingKillGraceMs: 5000, doclingMaxOutputBytes: 1048576, chunkSize: 1200, chunkOverlap: 150 },
     vision: { enabled: false },
+    retrieval: { dispatcherDryRunEnabled: false },
   },
 }));
 
@@ -125,6 +126,10 @@ vi.mock("../services/outbound-guardrails.service.js", () => ({
   getRecentSentContext: vi.fn().mockResolvedValue([]),
   splitLongMessage: vi.fn().mockImplementation((s: string) => [s]),
   sanitizeOutbound: vi.fn().mockImplementation((s: string) => s),
+  findOutboundByIdempotencyKey: vi.fn().mockResolvedValue(null),
+  reserveOutboundRecord: vi.fn().mockResolvedValue("reserved-record-001"),
+  updateOutboundRecordById: vi.fn().mockResolvedValue(undefined),
+  isUniqueViolation: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("../services/thread-conversation-state.service.js", () => ({

@@ -3,6 +3,7 @@
 // =============================================================================
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { join, resolve } from "node:path";
 import { ZaloTtsService } from "../services/zalo-tts.service.js";
 
 // Mock child_process to avoid actually calling edge-tts
@@ -52,7 +53,7 @@ describe("ZaloTtsService", () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.audioPath).toContain("/tmp/hermes-media/voice/tts-");
+      expect(result.audioPath).toContain(join(resolve("/tmp/hermes-media/voice"), "tts-"));
       expect(result.audioPath).toMatch(/\.mp3$/);
       expect(result.duration).toBe(2);
       expect(result.textHash).toBeDefined();

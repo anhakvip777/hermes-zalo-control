@@ -90,6 +90,16 @@ const mockGateway = vi.hoisted(() => ({
   beginReconnect: vi.fn(() => true),
   endReconnect: vi.fn(() => {}),
   getLastRestoreSource: vi.fn(() => "primary" as "primary" | "backup" | null),
+  getRecoveryStatus: vi.fn(() => ({
+    recoveryState: "idle" as "idle" | "scheduled" | "reconnecting" | "error",
+    reconnectAttempts: 0,
+    maxReconnectAttempts: 5,
+    lastReconnectAt: null,
+    lastReconnectError: null,
+    listenerActive: true,
+    lastListenerBeatAt: new Date().toISOString(),
+    listenerHeartbeatAgeSeconds: 3,
+  })),
 }));
 
 vi.mock("../services/zalo-gateway.service.js", () => ({

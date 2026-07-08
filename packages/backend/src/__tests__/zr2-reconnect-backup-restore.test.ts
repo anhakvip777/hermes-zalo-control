@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { resolve } from "node:path";
 
 // =============================================================================
 // ZR2 — Reconnect / backup-restore fix
@@ -123,8 +124,8 @@ const gwState = vi.hoisted(() => ({
   qrAvailable: false,
 }));
 
-const SESSION_PATH = "/tmp/test-zalo-session-zr2/zalo-session.json";
-const BACKUP_PATH = "/tmp/test-zalo-session-zr2/backups/zalo-session-20260630T040455/zalo-session.json";
+const SESSION_PATH = resolve("/tmp/test-zalo-session-zr2", "zalo-session.json");
+const BACKUP_PATH = resolve("/tmp/test-zalo-session-zr2", "backups/zalo-session-20260630T040455/zalo-session.json");
 
 // Track side-effects for assertions
 const sideEffects = vi.hoisted(() => ({ quarantined: [] as string[] }));

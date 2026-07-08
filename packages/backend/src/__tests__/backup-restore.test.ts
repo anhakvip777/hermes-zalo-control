@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const NODE = "/home/anhakvip777/.nvm/versions/node/v22.23.0/bin/node";
-const SCRIPT = "/home/anhakvip777/hermes-zalo-control/packages/backend/scripts/backup-restore.mjs";
-const BACKEND_DIR = "/home/anhakvip777/hermes-zalo-control/packages/backend";
-const ROOT_DIR = "/home/anhakvip777/hermes-zalo-control";
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const BACKEND_DIR = join(TEST_DIR, "..", "..");
+const ROOT_DIR = join(BACKEND_DIR, "..", "..");
+const NODE = process.execPath;
+const SCRIPT = join(BACKEND_DIR, "scripts", "backup-restore.mjs");
 const BACKUP_ROOT = join(BACKEND_DIR, "backups", "system");
 
 function runBackup(args: string[], env: Record<string, string> = {}) {
@@ -172,6 +174,7 @@ describe("Backup/Restore — no regression", () => {
     const r = spawnSync("npm", ["run", "backup:list"], {
       cwd: ROOT_DIR,
       timeout: 30_000,
+      shell: true,
     });
     const output = (r.stdout?.toString() ?? "") + (r.stderr?.toString() ?? "");
     // npm puts lifecycle output on stderr, actual script output on stdout
