@@ -679,28 +679,34 @@ export class ZaloGatewayService extends EventEmitter {
     this.api.listener.on("message", async (raw: Record<string, unknown>) => {
       // KI-H2: confirm listener liveness on every received event.
       this.lastListenerBeatAt = new Date().toISOString();
-      const msg = normalizeMessage(raw);
-      if (!msg) {
-        console.log("[listener] normalizeMessage returned null → dropped");
-        return;
-      }
-
-      // Anti-loop: skip self
-      if (raw.isSelf === true || raw.isSelf === "true") return;
-
-      const saved = await saveIncomingMessage(msg, this.status.selfUserId);
-      if (!saved.saved) return; // dedup or anti-loop
-
-      // Dispatch to Hermes for auto-reply (safe: catches all errors)
       try {
-        // KI-B4: redact secrets from raw inbound BEFORE slicing (slicing first
-        // could split a secret and leave a fragment un-masked in the log).
-        const contentPreview = (redact(msg.content) as string).slice(0, 50);
-        console.log(`[listener] dispatching: threadId=${msg.threadId} content="${contentPreview}"`);
-        const { handleIncomingMessage } = await import("./incoming-dispatcher.service.js");
-        await handleIncomingMessage(msg, this.status.selfUserId);
+        const msg = normalizeMessage(raw);
+        if (!msg) {
+          console.log("[listener] normalizeMessage returned null → dropped");
+          return;
+        }
+
+        // Anti-loop: skip self
+        if (raw.isSelf === true || raw.isSelf === "true") return;
+
+        const saved = await saveIncomingMessage(msg, this.status.selfUserId);
+        if (!saved.saved) return; // dedup or anti-loop
+
+        // Dispatch to Hermes for auto-reply (safe: catches all errors)
+        try {
+          // KI-B4: redact secrets from raw inbound BEFORE slicing (slicing first
+          // could split a secret and leave a fragment un-masked in the log).
+          const contentPreview = (redact(msg.content) as string).slice(0, 50);
+          console.log(`[listener] dispatching: threadId=${msg.threadId} content="${contentPreview}"`);
+          const { handleIncomingMessage } = await import("./incoming-dispatcher.service.js");
+          await handleIncomingMessage(msg, this.status.selfUserId);
+        } catch (err: unknown) {
+          console.error("[listener] dispatcher error (non-fatal): " + ((err as Error).message || "unknown"));
+        }
       } catch (err: unknown) {
-        console.error("[listener] dispatcher error (non-fatal): " + ((err as Error).message || "unknown"));
+        // W5: normalize/save can throw (e.g. DB error). Previously this rejected
+        // the listener callback and the message was silently dropped. Log instead.
+        console.error("[listener] inbound save failed (non-fatal): " + ((err as Error).message || "unknown"));
       }
     });
 

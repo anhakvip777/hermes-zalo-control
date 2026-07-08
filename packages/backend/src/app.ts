@@ -70,8 +70,6 @@ export async function buildApp() {
 
   // ── Public routes (no admin auth) ────────────────────────────────
   await app.register(healthRoutes, { prefix: "/api" });
-  // Public zalo ops status endpoints — no auth required (dashboard polling)
-  await app.register(zaloPublicOpsRoutes, { prefix: "/api" });
   // System status — intentionally public (unchanged; never had admin auth)
   await app.register(systemRoutes, { prefix: "/api" });
   // Internal auth — localhost + token, guarded inside the plugin (no admin middleware)
@@ -84,6 +82,8 @@ export async function buildApp() {
   await registerProtected(app, executionRoutes, strictRateLimit);
   await registerProtected(app, adminRoutes, strictRateLimit);
   await registerProtected(app, zaloRoutes, strictRateLimit);
+  // B1: zalo ops (status + recent-events) return real inbound content → admin-only
+  await registerProtected(app, zaloPublicOpsRoutes, strictRateLimit);
   await registerProtected(app, agentRoutes, agentRateLimit);
   await registerProtected(app, attendanceRoutes, strictRateLimit);
   await registerProtected(app, threadSettingsRoutes, strictRateLimit);

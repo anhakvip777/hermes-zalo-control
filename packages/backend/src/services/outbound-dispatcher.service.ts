@@ -391,11 +391,18 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
   // On failure the reservation stays (key remains) so accidental retries do NOT
   // double-send; an explicit retry policy is out of scope (Phase 4A).
   if (reservedRecordId) {
-    await updateOutboundRecordById(reservedRecordId, {
-      sentMessageId: sendResult.messageId ?? "",
-      reason: sendResult.success ? (liveTestSessionId ? "live_test" : "single_send") : "send_failed",
-      errorCode: sendResult.errorCode ?? null,
-    });
+    // W6: the message is ALREADY sent by this point. A DB failure here must not
+    // bubble up (it would mislabel a live send as hermes_error and skip the
+    // cooldown below → possible duplicate send). Log and continue.
+    try {
+      await updateOutboundRecordById(reservedRecordId, {
+        sentMessageId: sendResult.messageId ?? "",
+        reason: sendResult.success ? (liveTestSessionId ? "live_test" : "single_send") : "send_failed",
+        errorCode: sendResult.errorCode ?? null,
+      });
+    } catch (err: unknown) {
+      console.error("[outbound] post-send record update failed (non-fatal): " + ((err as Error).message || "unknown"));
+    }
   }
 
   csSetCooldown(threadId).catch(() => {});
