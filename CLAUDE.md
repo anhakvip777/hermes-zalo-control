@@ -278,6 +278,20 @@ checklists / methodology references** — not as installed, auto-routing tooling
 
 > Installation requires explicit approval and a separate audit of exact commands.
 
+## External Agent Framework Exception
+
+External agent frameworks may be inspected or used only when:
+- No production secrets are exposed.
+- No auto-commit is allowed.
+- No schema migration is applied without explicit approval.
+- No deployment/restart of production services happens without explicit approval.
+- Any cloned repo must stay outside the main project directory unless approved.
+- The agent must report all commands and exit codes.
+- Any generated patch must be reviewed before applying to the main project.
+- The main project repository must remain the source of truth.
+- External frameworks may be used for planning, reviewing, scaffolding, and local sandbox experiments only.
+- Do not grant external agents direct access to production credentials, live Zalo sessions, `.env` secrets, database files, or deployment tokens.
+
 ---
 
 # SESSION HANDOFF — Retrieval Answer feature (3.5A → 3.5D) + Track 1 prep
