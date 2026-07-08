@@ -23,6 +23,7 @@ vi.mock("../config.js", () => ({
       minConfidence: 0.5,
     },
     zalo: { dryRun: false },
+    hermesAgentBridge: { enabled: false },
     messageBatching: { enabled: false, windowMs: 4000, maxMessages: 5, maxChars: 3000, threadTypes: ["user"] },
     document: { enabled: false, allowedBaseDir: "/tmp/test", processedDir: "/tmp/test/processed", maxSizeMB: 50, allowedExtensions: ["pdf", "txt"], doclingBin: "/bin/true", doclingTimeoutMs: 60000, doclingKillGraceMs: 5000, doclingMaxOutputBytes: 1048576, chunkSize: 1200, chunkOverlap: 150 },
     vision: { enabled: false },
@@ -121,14 +122,16 @@ vi.mock("../services/conversation-context.service.js", () => ({
 }));
 
 const mockSaveOutboundRecord = vi.fn().mockResolvedValue(undefined);
+const mockReserveOutboundRecord = vi.fn().mockResolvedValue("reserved-record-001");
+const mockUpdateOutboundRecordById = vi.fn().mockResolvedValue(undefined);
 vi.mock("../services/outbound-guardrails.service.js", () => ({
   saveOutboundRecord: (...args: unknown[]) => mockSaveOutboundRecord(...args),
   getRecentSentContext: vi.fn().mockResolvedValue([]),
   splitLongMessage: vi.fn().mockImplementation((s: string) => [s]),
   sanitizeOutbound: vi.fn().mockImplementation((s: string) => s),
   findOutboundByIdempotencyKey: vi.fn().mockResolvedValue(null),
-  reserveOutboundRecord: vi.fn().mockResolvedValue("reserved-record-001"),
-  updateOutboundRecordById: vi.fn().mockResolvedValue(undefined),
+  reserveOutboundRecord: (...args: unknown[]) => mockReserveOutboundRecord(...args),
+  updateOutboundRecordById: (...args: unknown[]) => mockUpdateOutboundRecordById(...args),
   isUniqueViolation: vi.fn().mockReturnValue(false),
 }));
 
@@ -580,12 +583,21 @@ describe("IncomingDispatcher", () => {
 
       await resetAutoReplyCooldowns();
       mockSaveOutboundRecord.mockClear();
+      mockReserveOutboundRecord.mockClear();
+      mockUpdateOutboundRecordById.mockClear();
 
-      // Fresh message after reset: should dispatch
+      // Fresh message after reset: should dispatch. Phase 4A: a hermes text reply
+      // WITH relatedMessageId (baseMsg always sets zaloMessageId) takes the
+      // write-ahead reservation path — one reserved row, updated with reason
+      // "dry_run" — not saveOutboundRecord.
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-3" }));
-      expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-      const call = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(call.decision).toBe("allow");
+      expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+      expect(mockReserveOutboundRecord).toHaveBeenCalledTimes(1);
+      const reserved = mockReserveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(reserved.dryRun).toBe(true);
+      expect(mockUpdateOutboundRecordById).toHaveBeenCalledTimes(1);
+      const update = mockUpdateOutboundRecordById.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(update.reason).toBe("dry_run");
     });
   });
 
@@ -604,6 +616,8 @@ describe("R1.2 — Image/File outbound source types", () => {
     vi.clearAllMocks();
     resetAutoReplyCooldowns();
     mockSaveOutboundRecord.mockResolvedValue(undefined);
+    mockReserveOutboundRecord.mockResolvedValue("reserved-record-001");
+    mockUpdateOutboundRecordById.mockResolvedValue(undefined);
   });
 
   it("sendOutbound with source=image creates OutboundRecord with source=auto_reply", async () => {
@@ -616,12 +630,18 @@ describe("R1.2 — Image/File outbound source types", () => {
       taskId: "task-img-1",
     });
 
-    // Dispatcher creates OutboundRecord for every outbound
-    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(record.source).toBe("auto_reply"); // mapSource("image") → "auto_reply"
-    expect(record.decision).toBe("allow");
-    expect(record.dryRun).toBe(true);
+    // Phase 4A: a text reply WITH relatedMessageId takes the write-ahead
+    // reservation path (reserveOutboundRecord + updateOutboundRecordById),
+    // NOT saveOutboundRecord. Exactly one outbound evidence row is created.
+    expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).toHaveBeenCalledTimes(1);
+    const reserved = mockReserveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(reserved.source).toBe("auto_reply"); // mapSource("image") → "auto_reply"
+    expect(reserved.dryRun).toBe(true);
+    expect(reserved.inboundMessageId).toBe("msg-img-1");
+    expect(mockUpdateOutboundRecordById).toHaveBeenCalledTimes(1);
+    const update = mockUpdateOutboundRecordById.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(update.reason).toBe("dry_run");
   });
 
   it("sendOutbound with source=file creates OutboundRecord with source=auto_reply", async () => {
@@ -634,12 +654,16 @@ describe("R1.2 — Image/File outbound source types", () => {
       taskId: "task-file-1",
     });
 
-    // Dispatcher creates OutboundRecord for every outbound
-    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(record.source).toBe("auto_reply"); // mapSource("file") → "auto_reply"
-    expect(record.decision).toBe("allow");
-    expect(record.dryRun).toBe(true);
+    // Phase 4A: reservation path (relatedMessageId present), not saveOutboundRecord.
+    expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).toHaveBeenCalledTimes(1);
+    const reserved = mockReserveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(reserved.source).toBe("auto_reply"); // mapSource("file") → "auto_reply"
+    expect(reserved.dryRun).toBe(true);
+    expect(reserved.inboundMessageId).toBe("msg-file-1");
+    expect(mockUpdateOutboundRecordById).toHaveBeenCalledTimes(1);
+    const update = mockUpdateOutboundRecordById.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(update.reason).toBe("dry_run");
   });
 
   it("sendOutbound with source=error_fallback creates OutboundRecord", async () => {
@@ -652,10 +676,16 @@ describe("R1.2 — Image/File outbound source types", () => {
       taskId: "task-err-1",
     });
 
-    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(record.source).toBe("auto_reply");
-    expect(record.decision).toBe("allow");
+    // Phase 4A: reservation path (relatedMessageId present), not saveOutboundRecord.
+    expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).toHaveBeenCalledTimes(1);
+    const reserved = mockReserveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(reserved.source).toBe("auto_reply");
+    expect(reserved.dryRun).toBe(true);
+    expect(reserved.inboundMessageId).toBe("msg-err-1");
+    expect(mockUpdateOutboundRecordById).toHaveBeenCalledTimes(1);
+    const update = mockUpdateOutboundRecordById.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(update.reason).toBe("dry_run");
   });
 
   it("sendOutbound with source=catch_all creates OutboundRecord", async () => {
@@ -668,9 +698,15 @@ describe("R1.2 — Image/File outbound source types", () => {
       taskId: "task-catch-1",
     });
 
-    expect(mockSaveOutboundRecord).toHaveBeenCalledTimes(1);
-    const record = mockSaveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(record.source).toBe("auto_reply");
-    expect(record.decision).toBe("allow");
+    // Phase 4A: reservation path (relatedMessageId present), not saveOutboundRecord.
+    expect(mockSaveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).toHaveBeenCalledTimes(1);
+    const reserved = mockReserveOutboundRecord.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(reserved.source).toBe("auto_reply");
+    expect(reserved.dryRun).toBe(true);
+    expect(reserved.inboundMessageId).toBe("msg-catch-1");
+    expect(mockUpdateOutboundRecordById).toHaveBeenCalledTimes(1);
+    const update = mockUpdateOutboundRecordById.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(update.reason).toBe("dry_run");
   });
 });

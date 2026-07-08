@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { runConfigChecks } from "../config-consistency.js";
 
 const originalEnv = { ...process.env };
@@ -11,6 +11,20 @@ function restoreEnv() {
 }
 
 describe("Config Consistency — current env", () => {
+  // Test-env fixture: the "current valid config" case assumes real secrets are
+  // present in the environment (as they are on the dev/CI shell). On a bare
+  // Windows shell these are unset, which would make every secret check ERROR.
+  // Provide valid, non-placeholder values for THIS describe only, then restore
+  // in afterEach so nothing leaks into other test files sharing the worker
+  // process. This does NOT relax validation — the "missing/placeholder → ERROR"
+  // cases below still prove fail-closed behavior.
+  beforeEach(() => {
+    if (!process.env.ADMIN_PASSWORD) process.env.ADMIN_PASSWORD = "valid-admin-pass-1234";
+    if (!process.env.JWT_SECRET) process.env.JWT_SECRET = "valid-jwt-secret-abcdefgh";
+    if (!process.env.CHIASEGPU_API_KEY) process.env.CHIASEGPU_API_KEY = "sk-valid-vision-key-1234";
+  });
+  afterEach(restoreEnv);
+
   it("CONFIG_OK with current valid config", () => {
     const result = runConfigChecks();
     expect(result.status).toMatch(/CONFIG_OK|CONFIG_WARN/);
