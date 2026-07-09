@@ -1,9 +1,23 @@
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(__dirname, "..");
+
+/**
+ * Resolve the Zalo session directory deterministically, independent of
+ * process.cwd(). pkgRoot is packages/backend (derived from import.meta.url, so
+ * it is the same whether run via tsx from src/ or compiled from dist/).
+ *   - no env override → <pkgRoot>/zalo-session
+ *   - absolute ZALO_SESSION_DIR → used as-is
+ *   - relative ZALO_SESSION_DIR → resolved against pkgRoot (NOT cwd)
+ */
+export function resolveSessionDir(pkgRoot: string, envValue?: string): string {
+  const trimmed = envValue?.trim();
+  if (!trimmed) return resolve(pkgRoot, "zalo-session");
+  return isAbsolute(trimmed) ? resolve(trimmed) : resolve(pkgRoot, trimmed);
+}
 
 function requireEnv(key: string, defaultValue?: string): string {
   const value = process.env[key] ?? defaultValue;
@@ -52,9 +66,7 @@ export const config = {
   },
 
   zalo: {
-    sessionDir: process.env.ZALO_SESSION_DIR
-      ? resolve(process.env.ZALO_SESSION_DIR)
-      : resolve(process.cwd(), "packages", "backend", "zalo-session"),
+    sessionDir: resolveSessionDir(PKG_ROOT, process.env.ZALO_SESSION_DIR),
     dryRun: process.env.ZALO_DRY_RUN === "true",
     rateLimitPerMinute: parseInt(process.env.ZALO_RATE_LIMIT_PER_MINUTE ?? "10", 10),
     rateLimitGlobalPerMinute: parseInt(process.env.ZALO_RATE_LIMIT_GLOBAL_PER_MINUTE ?? "60", 10),
