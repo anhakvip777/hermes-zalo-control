@@ -349,7 +349,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     const dryRunResult: OutboundResult = { success: true, dryRun: true, decision: "allow", reason: "dry_run", sentMessageId: fakeMsgId, assistantMessageId };
     if (reservedRecordId) dryRunResult.outboundRecordId = reservedRecordId;
 
-    csSetCooldown(threadId).catch(() => {});
+    await csSetCooldown(threadId).catch(() => {});
     const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
     heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 
@@ -405,7 +405,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     }
   }
 
-  csSetCooldown(threadId).catch(() => {});
+  await csSetCooldown(threadId).catch(() => {});
   const hbType = kind === "media" ? "media" : kind === "voice" ? "voice" : "text";
   heartbeatOk("messagePipeline", { threadId, threadType, messageType: hbType }).catch(() => {});
 

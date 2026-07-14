@@ -69,9 +69,18 @@ import type { NormalizedMessage } from "../services/zalo-receive.js";
 const THREAD = "demo-user-shopB";
 const OCR = "Menu cửa hàng B:\n- Cơm gà 45k\n- Bún bò 50k\n- Trà đào 25k\nsk-test-THIS_SHOULD_BE_REDACTED_1234567890";
 
+// Unique inbound id PER TEST. The outbound idempotency key is
+// `reply:${zaloMessageId}:${threadId}:${threadType}`; a shared "in-1" across
+// every test makes all tests collide on one key, so a leaked fire-and-forget
+// write from a prior test can make the next test skip as duplicate_idempotency.
+// A fresh id each test keeps keys unique across tests while staying identical
+// within a test (so the idempotency-retry case still shares one key).
+let inboundSeq = 0;
+let currentInboundId = "in-1";
+
 function inbound(content: string, over: Partial<NormalizedMessage> = {}): NormalizedMessage {
   return {
-    zaloMessageId: "in-1",
+    zaloMessageId: currentInboundId,
     threadId: THREAD,
     threadType: "user",
     senderId: "u1",
@@ -105,6 +114,7 @@ async function seedMenu(threadId = THREAD) {
 beforeEach(async () => {
   await cleanDatabase();
   await clearAllCooldowns();
+  currentInboundId = `in-${++inboundSeq}`;
   h.flagEnabled = false;
   h.effectiveDryRun = true;
   h.allowed = true;
@@ -177,10 +187,10 @@ describe("Phase 3.5E — retrieval dispatch (dryRun-only)", () => {
     h.flagEnabled = true;
     await seedMenu();
     // Simulate the real path: the inbound request row exists before dispatch,
-    // sharing the same zaloMessageId ("in-1") the dispatcher will exclude.
+    // sharing the SAME zaloMessageId as the inbound the dispatcher will exclude.
     await prisma.message.create({
       data: {
-        id: "self-req-1", zaloMessageId: "in-1", threadId: THREAD, threadType: "user",
+        id: "self-req-1", zaloMessageId: currentInboundId, threadId: THREAD, threadType: "user",
         senderId: "u1", content: "gửi tôi xyz-khong-ton-tai-999", isFromBot: false,
         messageType: "text", role: "user", receivedAt: new Date(),
       },
@@ -243,7 +253,7 @@ describe("Phase 3.5E — retrieval dispatch (dryRun-only)", () => {
     await seedMenu();
     await handleIncomingMessage(inbound("gửi tôi thực đơn cửa hàng B"));
     await clearAllCooldowns(); // isolate idempotency from the cooldown gate
-    await handleIncomingMessage(inbound("gửi tôi thực đơn cửa hàng B")); // same zaloMessageId "in-1"
+    await handleIncomingMessage(inbound("gửi tôi thực đơn cửa hàng B")); // same currentInboundId → same idempotency key
     // One reserved+updated record; the retry is skipped as duplicate_idempotency.
     expect(await prisma.outboundRecord.count()).toBe(1);
   });

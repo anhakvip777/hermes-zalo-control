@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { cleanDatabase } from "./shared-setup.js";
 import { prisma } from "../db.js";
 import { sendOutbound } from "../services/outbound-dispatcher.service.js";
-import { clearAllCooldowns } from "../services/cooldown.service.js";
+import { clearAllCooldowns, isInCooldown } from "../services/cooldown.service.js";
 import {
   reserveOutboundRecord,
   findOutboundByIdempotencyKey,
@@ -19,13 +19,23 @@ import {
   resetOutboundDedup,
 } from "../services/outbound-guardrails.service.js";
 
-async function resetTransient() {
+// sendOutbound() writes the ThreadCooldown row fire-and-forget (not awaited).
+// So after a send returns, its cooldown upsert may still be in flight; clearing
+// cooldowns immediately can be undone by that late write, and the NEXT send then
+// hits the cooldown gate (reason 'cooldown') before reaching the idempotency
+// gate. Wait until the write is observable, THEN clear — a deterministic barrier.
+async function resetTransient(threadId: string) {
+  for (let i = 0; i < 100 && !(await isInCooldown(threadId)); i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
   await clearAllCooldowns(); // simulate cooldown window elapsed / process restart
   resetOutboundDedup();      // clear in-memory outbound dedup (lost on restart anyway)
 }
 
 beforeEach(async () => {
   await cleanDatabase();
+  await clearAllCooldowns(); // ThreadCooldown is DB-backed and persists across files;
+                             // cleanDatabase() does not clear it, so clear it here.
   resetOutboundDedup();
 });
 afterAll(async () => {
@@ -43,7 +53,7 @@ describe("Phase 4A — outbound idempotency (dry-run)", () => {
     expect(r1.reason).toBe("dry_run");
     expect(r1.dryRun).toBe(true);
 
-    await resetTransient(); // so the 2nd call is NOT blocked by cooldown — must hit idempotency
+    await resetTransient("user:t1"); // so the 2nd call is NOT blocked by cooldown — must hit idempotency
 
     const r2 = await sendOutbound(intent);
     expect(r2.decision).toBe("skip");
@@ -60,7 +70,7 @@ describe("Phase 4A — outbound idempotency (dry-run)", () => {
       relatedMessageId: "inb-2", content: "hello",
     };
     await sendOutbound(intent);
-    await resetTransient(); // <- "restart": cooldown + in-memory dedup gone
+    await resetTransient("user:t2"); // <- "restart": cooldown + in-memory dedup gone
     const r2 = await sendOutbound(intent);
     expect(r2.reason).toBe("duplicate_idempotency");
     const total = await prisma.outboundRecord.count({ where: { threadId: "user:t2" } });
@@ -70,7 +80,7 @@ describe("Phase 4A — outbound idempotency (dry-run)", () => {
   it("user vs group with same id -> different keys, both send (no collision)", async () => {
     const base = { threadId: "77", source: "hermes" as const, content: "x", relatedMessageId: "inb-77" };
     const ru = await sendOutbound({ ...base, threadType: "user" });
-    await resetTransient();
+    await resetTransient("77");
     const rg = await sendOutbound({ ...base, threadType: "group" });
     expect(ru.reason).toBe("dry_run");
     expect(rg.reason).toBe("dry_run");
@@ -84,10 +94,10 @@ describe("Phase 4A — outbound idempotency (dry-run)", () => {
     });
     const a1 = await sendOutbound(mk("cùng nội dung"));
     expect(a1.reason).toBe("dry_run");
-    await resetTransient();
+    await resetTransient("user:t3");
     const a2 = await sendOutbound(mk("cùng nội dung"));
     expect(a2.reason).toBe("duplicate_idempotency");
-    await resetTransient();
+    await resetTransient("user:t3");
     const b1 = await sendOutbound(mk("nội dung khác"));
     expect(b1.reason).toBe("dry_run"); // different content -> different key -> allowed
   });
