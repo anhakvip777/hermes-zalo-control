@@ -15,46 +15,42 @@ import type {
 
 // ── Prisma-backed sink (runtime) ─────────────────────────────────────
 // Uses dynamic import of ../db.js so tests that inject the in-memory sink don't
-// require @prisma/client at all. Never throws — evidence write failures degrade
-// gracefully (return a synthetic id) so a DB hiccup can't crash a tool call.
+// require @prisma/client at all. ToolCall writes propagate failures so the
+// gateway can fail closed without fabricating an evidence id. ZaloAction keeps
+// its existing best-effort semantics.
 export class PrismaToolEvidenceSink implements ToolEvidenceSink {
   async writeToolCall(record: ToolCallEvidence): Promise<string> {
-    try {
-      const { prisma } = await import("../../db.js");
-      const row = await (prisma as any).toolCallRecord.create({
-        data: {
-          agentName: record.agentName,
-          toolName: record.toolName,
-          kind: record.kind,
-          threadId: record.threadId,
-          threadType: record.threadType,
-          principalId: record.principalId ?? null,
-          role: record.role,
-          executionStatus: record.executionStatus,
-          deliveryStatus: record.deliveryStatus,
-          idempotencyKey: record.idempotencyKey ?? null,
-          idempotencyKeySource: record.idempotencyKeySource ?? null,
-          argsRedacted: record.argsRedacted ?? null,
-          resultRedacted: record.resultRedacted ?? null,
-          errorCode: record.errorCode ?? null,
-          errorMessage: record.errorMessage ?? null,
-          evidence: record.evidence ?? null,
-          outboundRecordId: record.outboundRecordId ?? null,
-          zaloActionRecordId: record.zaloActionRecordId ?? null,
-          agentTaskId: record.agentTaskId ?? null,
-          scheduleId: record.scheduleId ?? null,
-          relatedMessageId: record.relatedMessageId ?? null,
-          durationMs: record.durationMs ?? null,
-          startedAt: record.startedAt ?? null,
-          completedAt: record.completedAt ?? null,
-        },
-        select: { id: true },
-      });
-      return row.id as string;
-    } catch (err: unknown) {
-      console.error(`[tool-gateway] writeToolCall failed (non-fatal): ${(err as Error).message}`);
-      return `unpersisted-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    }
+    const { prisma } = await import("../../db.js");
+    const row = await (prisma as any).toolCallRecord.create({
+      data: {
+        agentName: record.agentName,
+        toolName: record.toolName,
+        kind: record.kind,
+        threadId: record.threadId,
+        threadType: record.threadType,
+        principalId: record.principalId ?? null,
+        role: record.role,
+        executionStatus: record.executionStatus,
+        deliveryStatus: record.deliveryStatus,
+        idempotencyKey: record.idempotencyKey ?? null,
+        idempotencyKeySource: record.idempotencyKeySource ?? null,
+        argsRedacted: record.argsRedacted ?? null,
+        resultRedacted: record.resultRedacted ?? null,
+        errorCode: record.errorCode ?? null,
+        errorMessage: record.errorMessage ?? null,
+        evidence: record.evidence ?? null,
+        outboundRecordId: record.outboundRecordId ?? null,
+        zaloActionRecordId: record.zaloActionRecordId ?? null,
+        agentTaskId: record.agentTaskId ?? null,
+        scheduleId: record.scheduleId ?? null,
+        relatedMessageId: record.relatedMessageId ?? null,
+        durationMs: record.durationMs ?? null,
+        startedAt: record.startedAt ?? null,
+        completedAt: record.completedAt ?? null,
+      },
+      select: { id: true },
+    });
+    return row.id as string;
   }
 
   async writeZaloAction(record: ZaloActionEvidence): Promise<string> {
@@ -91,16 +87,12 @@ export class PrismaToolEvidenceSink implements ToolEvidenceSink {
   }
 
   async findByIdempotencyKey(key: string): Promise<{ id: string; resultRedacted: string | null } | null> {
-    try {
-      const { prisma } = await import("../../db.js");
-      const row = await (prisma as any).toolCallRecord.findUnique({
-        where: { idempotencyKey: key },
-        select: { id: true, resultRedacted: true },
-      });
-      return row ? { id: row.id as string, resultRedacted: (row.resultRedacted as string | null) ?? null } : null;
-    } catch {
-      return null;
-    }
+    const { prisma } = await import("../../db.js");
+    const row = await (prisma as any).toolCallRecord.findUnique({
+      where: { idempotencyKey: key },
+      select: { id: true, resultRedacted: true },
+    });
+    return row ? { id: row.id as string, resultRedacted: (row.resultRedacted as string | null) ?? null } : null;
   }
 }
 

@@ -1,9 +1,17 @@
 import type { FastifyInstance } from "fastify";
-import { AdminActionSchema } from "@hermes/shared";
 import * as settingsService from "../services/settings.service.js";
 import * as executionService from "../services/execution.service.js";
+import { config } from "../config.js";
 
 export async function adminRoutes(app: FastifyInstance) {
+  // Protected by registerProtected() in app.ts. Returns metadata only and is
+  // never cacheable because it authenticates the current Authorization header.
+  app.get("/admin/session", async (_request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    reply.header("Vary", "Authorization");
+    return { authenticated: true, username: config.security.adminUsername };
+  });
+
   // =========================================================================
   // GET /api/admin/status
   // =========================================================================

@@ -18,8 +18,16 @@ import { listThreads } from "../services/zalo-receive.js";
 import { parseCommand } from "../agent/parse-command.js";
 import { executeDryRun } from "../workers/scheduler.js";
 import { MockMessageSender } from "../services/message-sender.js";
+import { sendApiError } from "../http/api-error.js";
 
 const mockSender = new MockMessageSender();
+
+function parsePaginationInteger(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Wrap a tool call with AgentTask lifecycle
@@ -147,27 +155,42 @@ export async function agentRoutes(app: FastifyInstance) {
   // lower role to verify permission_denied. Never toggles live/autoReply.
   app.post("/agent/tools/retrieval-answer", async (request) => {
     const input = RetrievalAnswerToolInput.parse(request.body);
+    const role = input.role ?? "admin";
+    if (role === "form_only") {
+      return {
+        status: "permission_denied" as const,
+        answerText: "Bạn chưa được cấp quyền dùng công cụ tra cứu này.",
+        evidence: [],
+        confidence: "low" as const,
+      };
+    }
     return answerRetrieval({
       query: input.query,
       requesterThreadId: input.requesterThreadId,
       requesterThreadType: input.requesterThreadType,
-      targetThreadId: input.targetThreadId,
-      targetThreadType: input.targetThreadType,
+      targetThreadId: input.targetThreadId ?? input.requesterThreadId,
+      targetThreadType: input.targetThreadType ?? input.requesterThreadType,
       dateFrom: input.dateFrom,
       dateTo: input.dateTo,
       includeAttachments: input.includeAttachments,
-      role: input.role ?? "admin",
+      role,
     });
   });
 
   // ─── GET /api/agent/messages ────────────────────────────────────
-  app.get("/agent/messages", async (request) => {
-    const query = request.query as Record<string, string>;
+  app.get("/agent/messages", async (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+    const page = parsePaginationInteger(query.page, 1);
+    const pageSize = parsePaginationInteger(query.pageSize, 50);
+    if (page === null || page < 1 || pageSize === null || pageSize < 1 || pageSize > 100) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "page must be >= 1 and pageSize must be 1-100");
+    }
+
     return listMessages({
-      threadId: query.threadId,
-      search: query.search,
-      page: query.page ? parseInt(query.page, 10) : 1,
-      pageSize: query.pageSize ? parseInt(query.pageSize, 10) : 50,
+      threadId: typeof query.threadId === "string" ? query.threadId : undefined,
+      search: typeof query.search === "string" ? query.search : undefined,
+      page,
+      pageSize,
     });
   });
 

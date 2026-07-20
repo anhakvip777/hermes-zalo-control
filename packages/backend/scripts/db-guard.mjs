@@ -10,18 +10,35 @@
  *
  * Env vars:
  *   ALLOW_DB_RESET=true       Required for --before-reset
- *   DB_BACKUP_KEEP=10         Number of backups to retain (default: 10)
+ *   DB_BACKUP_KEEP=10           Number of backups to retain (default: 10)
+ *   DB_BACKUP_DIR=<path>        Override backup directory (tests)
+ *   ZALO_SESSION_DIR=<path>     Override session directory (tests)
  *   DATABASE_URL=file:./dev.db  DB path (read from .env or explicit)
  */
 
 import { readFileSync, existsSync, statSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from "node:fs";
-import { resolve, dirname, basename, join } from "node:path";
+import { resolve, dirname, basename, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..");
-const BACKUP_DIR = resolve(PROJECT_ROOT, "backups", "db");
+loadEnv();
+
+function resolveConfiguredPath(value, fallback) {
+  const configured = typeof value === "string" ? value.trim() : "";
+  if (!configured) return fallback;
+  return isAbsolute(configured) ? resolve(configured) : resolve(PROJECT_ROOT, configured);
+}
+
+const BACKUP_DIR = resolveConfiguredPath(
+  process.env.DB_BACKUP_DIR,
+  resolve(PROJECT_ROOT, "backups", "db"),
+);
+const SESSION_DIR = resolveConfiguredPath(
+  process.env.ZALO_SESSION_DIR,
+  resolve(PROJECT_ROOT, "zalo-session"),
+);
 
 // Critical tables that MUST have data in a healthy DB
 const CRITICAL_TABLES = [
@@ -104,6 +121,11 @@ function green(s) { return `\x1b[32m${s}\x1b[0m`; }
 function red(s) { return `\x1b[31m${s}\x1b[0m`; }
 function yellow(s) { return `\x1b[33m${s}\x1b[0m`; }
 
+function readRetentionCount(envName, fallback) {
+  const value = Number(process.env[envName] ?? fallback);
+  return Number.isInteger(value) && value >= 1 ? value : null;
+}
+
 // --- Core functions ---
 
 function status(dbPath) {
@@ -169,6 +191,12 @@ function status(dbPath) {
 }
 
 function backup(dbPath) {
+  const keep = readRetentionCount("DB_BACKUP_KEEP", 10);
+  if (keep === null) {
+    console.log(red("[db-guard] DB_BACKUP_KEEP must be an integer >= 1"));
+    return { ok: false };
+  }
+
   if (!existsSync(dbPath)) {
     console.log(red("[db-guard] Cannot backup: database file not found"));
     return { ok: false };
@@ -187,7 +215,6 @@ function backup(dbPath) {
   console.log(`[db-guard] Size: ${formatBytes(statSync(backupPath).size)}`);
 
   // Retention
-  const keep = parseInt(process.env.DB_BACKUP_KEEP || "10", 10);
   const files = readdirSync(BACKUP_DIR)
     .filter((f) => f.startsWith("dev.db.backup-") && f.endsWith(".sqlite"))
     .sort()
@@ -203,11 +230,10 @@ function backup(dbPath) {
   }
 
   // Also backup zalo-session if exists
-  const sessionDir = resolve(PROJECT_ROOT, "..", "zalo-session");
-  if (existsSync(sessionDir)) {
+  if (existsSync(SESSION_DIR)) {
     const sessionBackup = resolve(BACKUP_DIR, `zalo-session-${timestamp}`);
     // Simple copy of the session directory (just the JSON file)
-    const sessionJson = resolve(sessionDir, "zalo-session.json");
+    const sessionJson = resolve(SESSION_DIR, "zalo-session.json");
     if (existsSync(sessionJson)) {
       mkdirSync(sessionBackup, { recursive: true });
       copyFileSync(sessionJson, resolve(sessionBackup, "zalo-session.json"));
@@ -221,7 +247,6 @@ function backup(dbPath) {
 // --- Main ---
 
 async function main() {
-  loadEnv();
   const args = process.argv.slice(2);
   const mode = args.find((a) => a.startsWith("--")) || "--status";
 

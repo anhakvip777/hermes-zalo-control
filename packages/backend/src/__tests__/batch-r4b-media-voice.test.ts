@@ -172,6 +172,22 @@ describe("R4B — Media/Voice via Unified Outbound Dispatcher", () => {
         payload: { type: "image" },
       });
       expect(res.statusCode).toBe(400);
+      expect(realSendOutbound).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { label: "legacy browser payload", payload: { mediaType: "image", mediaUrl: "blob:http://localhost/example", threadId: "t1" } },
+      { label: "array payload", payload: [] },
+      { label: "null payload", payload: null },
+    ])("rejects $label before the dispatcher", async ({ payload }) => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/zalo/send-media",
+        payload,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(realSendOutbound).not.toHaveBeenCalled();
     });
 
     it("returns 403 for path traversal attempt", async () => {

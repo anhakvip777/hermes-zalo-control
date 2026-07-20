@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   getEffectiveAutoReplyConfig,
+  getEffectiveAutoReplyConfigSync,
   getCurrentEffectiveDryRun,
   setRuntimeConfig,
   getRuntimeConfig,
@@ -14,16 +15,38 @@ describe("Runtime Config — init", () => {
     await expect(initRuntimeConfig()).resolves.not.toThrow();
   });
 
-  it("getCurrentEffectiveDryRun returns boolean", () => {
-    expect(typeof getCurrentEffectiveDryRun()).toBe("boolean");
+  it("global effective dry-run remains enabled", () => {
+    expect(getCurrentEffectiveDryRun()).toBe(true);
+    expect(getEffectiveAutoReplyConfigSync().dryRun).toBe(true);
   });
 
   it("getEffectiveAutoReplyConfig returns valid config", async () => {
     const cfg = await getEffectiveAutoReplyConfig();
     expect(typeof cfg.enabled).toBe("boolean");
-    expect(typeof cfg.dryRun).toBe("boolean");
+    expect(cfg.dryRun).toBe(true);
     expect(Array.isArray(cfg.allowedThreads)).toBe(true);
     expect(["env", "runtime"]).toContain(cfg.dryRunSource);
+  });
+
+  it("clamps a stale persisted false value to effective dry-run", async () => {
+    await prisma.runtimeSetting.upsert({
+      where: { key: "autoReply.dryRun" },
+      create: { key: "autoReply.dryRun", value: "false", updatedBy: "test" },
+      update: { value: "false", updatedBy: "test" },
+    });
+
+    try {
+      await initRuntimeConfig();
+      expect(getCurrentEffectiveDryRun()).toBe(true);
+      expect(getEffectiveAutoReplyConfigSync().dryRun).toBe(true);
+      await expect(getEffectiveAutoReplyConfig()).resolves.toMatchObject({
+        dryRun: true,
+        dryRunSource: "runtime",
+      });
+    } finally {
+      await prisma.runtimeSetting.deleteMany({ where: { key: "autoReply.dryRun" } });
+      await initRuntimeConfig();
+    }
   });
 
   it("getRuntimeConfig returns array", async () => {
@@ -33,44 +56,15 @@ describe("Runtime Config — init", () => {
 });
 
 describe("Runtime Config — validation", () => {
-  it("rejects toggle to live with wrong confirmText", async () => {
-    const result = await setRuntimeConfig({
-      dryRun: false,
-      confirmText: "wrong",
-      reason: "Testing invalid confirm text",
-    });
+  it.each([
+    { confirmText: "wrong", reason: "Testing invalid confirm text" },
+    { confirmText: "", reason: "Testing empty confirm" },
+    { confirmText: "ENABLE LIVE MODE", reason: "short" },
+    { confirmText: "ENABLE LIVE MODE", reason: "" },
+  ])("rejects every global-live request before other validation", async ({ confirmText, reason }) => {
+    const result = await setRuntimeConfig({ dryRun: false, confirmText, reason });
     expect(result.success).toBe(false);
-    expect(result.errorCode).toBe("BAD_CONFIRM_TEXT");
-  });
-
-  it("rejects toggle to live without confirmText", async () => {
-    const result = await setRuntimeConfig({
-      dryRun: false,
-      confirmText: "",
-      reason: "Testing empty confirm",
-    });
-    expect(result.success).toBe(false);
-    expect(result.errorCode).toBe("BAD_CONFIRM_TEXT");
-  });
-
-  it("rejects toggle to live with short reason", async () => {
-    const result = await setRuntimeConfig({
-      dryRun: false,
-      confirmText: "ENABLE LIVE MODE",
-      reason: "short",
-    });
-    expect(result.success).toBe(false);
-    expect(result.errorCode).toBe("REASON_TOO_SHORT");
-  });
-
-  it("rejects toggle to live without reason", async () => {
-    const result = await setRuntimeConfig({
-      dryRun: false,
-      confirmText: "ENABLE LIVE MODE",
-      reason: "",
-    });
-    expect(result.success).toBe(false);
-    expect(result.errorCode).toBe("REASON_TOO_SHORT");
+    expect(result.errorCode).toBe("GLOBAL_LIVE_DISABLED");
   });
 
   it("rejects toggle to dry-run with wrong confirmText", async () => {

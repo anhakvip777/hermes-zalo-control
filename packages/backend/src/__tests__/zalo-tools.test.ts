@@ -58,7 +58,22 @@ class StubProvider implements ZaloProvider {
 }
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
-  return { agentName: "hermes", threadId: "t1", threadType: "user", role: "admin", principalId: "p1", ...overrides };
+  return {
+    agentName: "hermes",
+    allowedTools: [
+      "zalo.getRuntimeStatus",
+      "zalo.listGroups",
+      "zalo.getThreadInfo",
+      "zalo.listFriends",
+      "zalo.getFriendInfo",
+      "zalo.sendText",
+    ],
+    threadId: "t1",
+    threadType: "user",
+    role: "admin",
+    principalId: "p1",
+    ...overrides,
+  };
 }
 
 function makeGateway(registry: ToolRegistry, sink: InMemoryToolEvidenceSink, over: Record<string, unknown> = {}) {

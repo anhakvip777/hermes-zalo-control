@@ -1,5 +1,6 @@
 import { prisma } from "../db.js";
 import * as settingsService from "../services/settings.service.js";
+import { basename } from "node:path";
 
 // =============================================================================
 // TDB1 — Test Database Isolation Guard
@@ -30,7 +31,8 @@ function assertTestDatabase(): void {
   }
 
   // Guard 3: DATABASE_URL must reference a test DB (test.db or :memory:)
-  if (!dbUrl.includes("test.db") && !dbUrl.includes(":memory:")) {
+  const databaseName = basename(/^file:(.+)$/.exec(dbUrl)?.[1] ?? "");
+  if (!/^test(?:-[A-Za-z0-9_-]+)?\.db$/i.test(databaseName) && !dbUrl.includes(":memory:")) {
     throw new Error(
       `[TDB1] cleanDatabase REFUSED: DATABASE_URL is not a test DB. ` +
       `URL: ${dbUrl} — Expected file:./test.db or file::memory:.`

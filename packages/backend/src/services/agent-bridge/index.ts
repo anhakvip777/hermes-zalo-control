@@ -39,7 +39,11 @@ export function getAgentBridge(): AgentBridge {
   if (!sharedBridge) {
     const registry = getToolRegistry();
     registerAllTools(registry); // idempotent; only runs when the bridge is built
-    sharedBridge = new AgentBridge({ adapter: new HermesAdapter(), registry });
+    sharedBridge = new AgentBridge({
+      adapter: new HermesAdapter(),
+      registry,
+      allowedToolNames: ["memory.getRecentMessages"],
+    });
   }
   return sharedBridge;
 }

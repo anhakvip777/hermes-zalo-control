@@ -62,6 +62,7 @@ type BaseOutboundIntent = {
   threadId: string;
   threadType: "user" | "group";
   source: OutboundSource;
+  deliveryPolicy?: "runtime" | "dry_run_only";
   relatedMessageId?: string;
   taskId?: string;
   metadata?: Record<string, unknown>;
@@ -100,6 +101,74 @@ export interface OutboundResult {
   assistantMessageId?: string;
   error?: string;
   errorCode?: string;
+}
+
+function strictOutboundFailure(
+  reason: "outbound_evidence_persistence_failed" | "outbound_idempotency_incomplete",
+  errorCode: "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED" | "OUTBOUND_IDEMPOTENCY_INCOMPLETE",
+  links: { outboundRecordId?: string; assistantMessageId?: string } = {},
+): OutboundResult {
+  return {
+    success: false,
+    dryRun: true,
+    decision: "block",
+    reason,
+    error: "Outbound evidence is unavailable",
+    errorCode,
+    ...links,
+  };
+}
+
+function hasFinalizedOutboundEvidence(record: {
+  reason: string;
+  sentMessageId: string | null;
+}): boolean {
+  return record.reason !== "reserved" && !!record.sentMessageId?.trim();
+}
+
+/**
+ * Resolve the assistant Message that proves a strict outbound replay completed.
+ * OutboundRecord and assistant metadata must agree on both record/message IDs;
+ * a reservation or legacy row without that linkage is not replayable evidence.
+ */
+export async function resolveStrictOutboundReplayEvidence(
+  record: { id: string; reason: string; sentMessageId: string | null },
+  relatedMessageId: string | undefined,
+): Promise<{ assistantMessageId: string } | null> {
+  if (!relatedMessageId || !hasFinalizedOutboundEvidence(record)) return null;
+
+  const candidates = await prisma.message.findMany({
+    where: {
+      relatedMessageId,
+      role: "assistant",
+      isFromBot: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: { id: true, metadata: true },
+  });
+
+  for (const candidate of candidates) {
+    let metadata: unknown;
+    try {
+      metadata = candidate.metadata ? JSON.parse(candidate.metadata) : null;
+    } catch {
+      continue;
+    }
+    if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+      continue;
+    }
+    const evidence = metadata as Record<string, unknown>;
+    if (
+      evidence.outboundRecordId === record.id &&
+      evidence.sentMessageId === record.sentMessageId &&
+      (evidence.status === "dryRun" || evidence.status === "sent")
+    ) {
+      return { assistantMessageId: candidate.id };
+    }
+  }
+
+  return null;
 }
 
 // ── Cooldown (R5): unified DB-backed store ──────────────────────────
@@ -183,7 +252,7 @@ function checkPromptEcho(content: unknown): string | null {
 
 export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResult> {
   const threadId = normalizeThreadId(intent.threadId);
-  const { threadType, source, relatedMessageId, taskId, metadata } = intent;
+  const { threadType, source, deliveryPolicy, relatedMessageId, taskId, metadata } = intent;
   const kind = (intent as any).kind || "text";
 
   // Runtime guard
@@ -227,11 +296,13 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
   }
 
   // 3. ── DryRun decision ───────────────────────────────────────────
-  let effectiveDryRun = getCurrentEffectiveDryRun();
+  const strictEvidence = deliveryPolicy === "dry_run_only";
+  const forceDryRun = strictEvidence;
+  let effectiveDryRun = forceDryRun || getCurrentEffectiveDryRun();
 
   // 4. ── LiveTest override ─────────────────────────────────────────
   let liveTestSessionId: string | undefined;
-  if (effectiveDryRun) {
+  if (effectiveDryRun && !forceDryRun) {
     try {
       const { shouldSendLiveForThread } = await import("./live-test.service.js");
       const liveCheck = await shouldSendLiveForThread(threadId);
@@ -249,16 +320,48 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
   const idempotencyKey = computeReplyIdempotencyKey(intent);
   let reservedRecordId: string | null = null;
   if (idempotencyKey) {
-    const existing = await findOutboundByIdempotencyKey(idempotencyKey);
+    let existing;
+    try {
+      existing = await findOutboundByIdempotencyKey(idempotencyKey, {
+        throwOnError: strictEvidence,
+      });
+    } catch {
+      return strictOutboundFailure(
+        "outbound_evidence_persistence_failed",
+        "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+      );
+    }
     if (existing && existing.decision !== "block" && existing.decision !== "skip") {
+      let assistantMessageId: string | undefined;
+      if (strictEvidence) {
+        let replayEvidence;
+        try {
+          replayEvidence = await resolveStrictOutboundReplayEvidence(existing, relatedMessageId);
+        } catch {
+          return strictOutboundFailure(
+            "outbound_evidence_persistence_failed",
+            "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+            { outboundRecordId: existing.id },
+          );
+        }
+        if (!replayEvidence) {
+          return strictOutboundFailure(
+            "outbound_idempotency_incomplete",
+            "OUTBOUND_IDEMPOTENCY_INCOMPLETE",
+            { outboundRecordId: existing.id },
+          );
+        }
+        assistantMessageId = replayEvidence.assistantMessageId;
+      }
       console.log(`[outbound] duplicate_idempotency skip: key=${idempotencyKey} existing=${existing.id}`);
       return {
         success: true,
-        dryRun: existing.dryRun,
+        dryRun: forceDryRun || existing.dryRun,
         decision: "skip",
         reason: "duplicate_idempotency",
         sentMessageId: existing.sentMessageId ?? undefined,
         outboundRecordId: existing.id,
+        assistantMessageId,
       };
     }
     try {
@@ -274,24 +377,71 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
     } catch (err: unknown) {
       if (isUniqueViolation(err)) {
         // Concurrent reservation won the race → treat as duplicate, do NOT send.
-        const dup = await findOutboundByIdempotencyKey(idempotencyKey);
+        let dup;
+        try {
+          dup = await findOutboundByIdempotencyKey(idempotencyKey, {
+            throwOnError: strictEvidence,
+          });
+        } catch {
+          return strictOutboundFailure(
+            "outbound_evidence_persistence_failed",
+            "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+          );
+        }
+        let assistantMessageId: string | undefined;
+        if (strictEvidence) {
+          let replayEvidence;
+          try {
+            replayEvidence = dup
+              ? await resolveStrictOutboundReplayEvidence(dup, relatedMessageId)
+              : null;
+          } catch {
+            return strictOutboundFailure(
+              "outbound_evidence_persistence_failed",
+              "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+              dup ? { outboundRecordId: dup.id } : {},
+            );
+          }
+          if (!dup || !replayEvidence) {
+            return strictOutboundFailure(
+              "outbound_idempotency_incomplete",
+              "OUTBOUND_IDEMPOTENCY_INCOMPLETE",
+              dup ? { outboundRecordId: dup.id } : {},
+            );
+          }
+          assistantMessageId = replayEvidence.assistantMessageId;
+        }
         console.log(`[outbound] duplicate_idempotency (concurrent) skip: key=${idempotencyKey}`);
         return {
           success: true,
-          dryRun: dup?.dryRun ?? effectiveDryRun,
+          dryRun: forceDryRun || (dup?.dryRun ?? effectiveDryRun),
           decision: "skip",
           reason: "duplicate_idempotency",
           sentMessageId: dup?.sentMessageId ?? undefined,
           outboundRecordId: dup?.id,
+          assistantMessageId,
         };
       }
       // Other DB error → continue without a reservation (fail-open to not lose the reply).
+      if (strictEvidence) {
+        return strictOutboundFailure(
+          "outbound_evidence_persistence_failed",
+          "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+        );
+      }
       console.error(`[outbound] reservation failed (continuing unkeyed): ${(err as Error).message}`);
       reservedRecordId = null;
     }
   }
 
   // 5. ── Create Assistant Message (text only) ───────────────────────
+  if (strictEvidence && !reservedRecordId) {
+    return strictOutboundFailure(
+      "outbound_evidence_persistence_failed",
+      "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+    );
+  }
+
   let assistantMessageId: string | undefined;
   if (kind === "text") {
     const t = intent as TextOutboundIntent;
@@ -303,17 +453,25 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
           role: "assistant", isFromBot: true, messageType: "text",
           relatedMessageId: relatedMessageId ?? null,
           metadata: JSON.stringify({
+            ...metadata,
             source: `outbound_${source}`,
             dryRun: effectiveDryRun,
             taskId: taskId ?? null,
-            status: effectiveDryRun ? "dryRun" : "sending",
+            status: strictEvidence ? "draft" : effectiveDryRun ? "dryRun" : "sending",
             liveTestSessionId: liveTestSessionId ?? null,
-            ...metadata,
+            outboundRecordId: reservedRecordId ?? null,
           }),
         },
       });
       assistantMessageId = msg.id;
     } catch (err: unknown) {
+      if (strictEvidence) {
+        return strictOutboundFailure(
+          "outbound_evidence_persistence_failed",
+          "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+          { outboundRecordId: reservedRecordId ?? undefined },
+        );
+      }
       console.error(`[outbound-dispatcher] Failed to save assistant message: ${(err as Error).message}`);
     }
   }
@@ -330,10 +488,40 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
       fakeMsgId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     }
 
-    if (reservedRecordId) {
+    if (strictEvidence) {
+      if (!reservedRecordId || !assistantMessageId) {
+        return strictOutboundFailure(
+          "outbound_evidence_persistence_failed",
+          "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+          {
+            outboundRecordId: reservedRecordId ?? undefined,
+            assistantMessageId,
+          },
+        );
+      }
+      try {
+        await updateMessageStatus(
+          assistantMessageId,
+          "dryRun",
+          { sentMessageId: fakeMsgId, outboundRecordId: reservedRecordId },
+          { throwOnError: true },
+        );
+        await updateOutboundRecordById(
+          reservedRecordId,
+          { sentMessageId: fakeMsgId, reason: "dry_run" },
+          { throwOnError: true },
+        );
+      } catch {
+        return strictOutboundFailure(
+          "outbound_evidence_persistence_failed",
+          "OUTBOUND_EVIDENCE_PERSISTENCE_FAILED",
+          { outboundRecordId: reservedRecordId, assistantMessageId },
+        );
+      }
+    } else if (reservedRecordId) {
       // Update the write-ahead reservation (single record for the keyed path).
       await updateOutboundRecordById(reservedRecordId, { sentMessageId: fakeMsgId, reason: "dry_run" });
-    } else {
+    } else if (!strictEvidence) {
       const recordContent = buildRecordContent(intent);
       saveOutboundRecord({
         threadId, threadType, content: recordContent,
@@ -342,7 +530,7 @@ export async function sendOutbound(intent: OutboundIntent): Promise<OutboundResu
       }).catch(() => {});
     }
 
-    if (assistantMessageId) {
+    if (!strictEvidence && assistantMessageId) {
       updateMessageStatus(assistantMessageId, "dryRun", { sentMessageId: fakeMsgId });
     }
 
@@ -434,10 +622,19 @@ function computeReplyIdempotencyKey(intent: OutboundIntent): string | null {
   const tid = normalizeThreadId(intent.threadId);
   const tt = intent.threadType;
   if (intent.relatedMessageId) {
-    return `reply:${intent.relatedMessageId}:${tid}:${tt}`;
+    return buildInboundReplyIdempotencyKey(intent.relatedMessageId, tid, tt);
   }
   const hash = createHash("sha256").update(t.content ?? "").digest("hex").slice(0, 16);
   return `reply:unknown:${tid}:${tt}:${hash}`;
+}
+
+/** Stable key shared with the structured-dispatch replay preflight. */
+export function buildInboundReplyIdempotencyKey(
+  inboundMessageId: string,
+  threadId: string,
+  threadType: "user" | "group",
+): string {
+  return `reply:${inboundMessageId}:${normalizeThreadId(threadId)}:${threadType}`;
 }
 
 // ── Helper: build safe content string for OutboundRecord ─────────────
@@ -463,16 +660,21 @@ async function updateMessageStatus(
   messageId: string,
   status: "draft" | "dryRun" | "sent" | "failed" | "blocked",
   extra?: Record<string, unknown>,
+  options: { throwOnError?: boolean } = {},
 ): Promise<void> {
   try {
     const existing = await prisma.message.findUnique({ where: { id: messageId }, select: { metadata: true } });
-    if (!existing) return;
+    if (!existing) {
+      if (options.throwOnError) throw new Error("Assistant message evidence missing");
+      return;
+    }
     let meta: Record<string, unknown> = {};
     try { meta = existing.metadata ? JSON.parse(existing.metadata) : {}; } catch { /* keep empty */ }
     meta.status = status;
     if (extra) Object.assign(meta, extra);
     await prisma.message.update({ where: { id: messageId }, data: { metadata: JSON.stringify(meta) } });
   } catch (err: unknown) {
+    if (options.throwOnError) throw err;
     console.error(`[outbound-dispatcher] Failed to update message status: ${(err as Error).message}`);
   }
 }

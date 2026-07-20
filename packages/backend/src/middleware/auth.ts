@@ -5,43 +5,67 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { config } from "../config.js";
 
-export async function adminAuth(request: FastifyRequest, reply: FastifyReply) {
-  // M1: Only skip auth in explicit dev mode WITH the specific default dev password
-  // This prevents accidental auth bypass in production or with misconfigured env
-  const isDevBypass =
-    config.nodeEnv === "development" &&
-    config.security.adminPassword === "dev-admin-password";
+const BASIC_CHALLENGE = 'Basic realm="Hermes Admin", charset="UTF-8"';
+const UNAUTHORIZED_MESSAGE = "Authentication required";
 
-  if (isDevBypass) {
-    return;
+function unauthorized(reply: FastifyReply) {
+  reply.header("WWW-Authenticate", BASIC_CHALLENGE);
+  reply.header("Cache-Control", "no-store");
+  reply.header("Vary", "Authorization");
+  return reply.status(401).send({
+    error: { code: "UNAUTHORIZED", message: UNAUTHORIZED_MESSAGE },
+  });
+}
+
+/**
+ * Decode one Basic credential without throwing or exposing which part failed.
+ * The delimiter is intentionally limited to the first colon so passwords may
+ * contain colons. Basic credentials are UTF-8 for this application.
+ */
+function decodeBasicCredentials(value: string): { username: string; password: string } | null {
+  if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    return null;
   }
 
-  const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Basic ")) {
-    reply.header("WWW-Authenticate", 'Basic realm="Hermes Admin"');
-    return reply.status(401).send({
-      error: { code: "UNAUTHORIZED", message: "Authentication required" },
-    });
-  }
+  try {
+    const bytes = Buffer.from(value, "base64");
+    if (bytes.length === 0 || bytes.toString("base64") !== value) {
+      return null;
+    }
 
-  const decoded = Buffer.from(authHeader.slice(6), "base64").toString("utf-8");
-  const [username, password] = decoded.split(":");
+    const decoded = bytes.toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator <= 0) {
+      return null;
+    }
 
-  if (
-    username !== config.security.adminUsername ||
-    password !== config.security.adminPassword
-  ) {
-    reply.header("WWW-Authenticate", 'Basic realm="Hermes Admin"');
-    return reply.status(401).send({
-      error: { code: "UNAUTHORIZED", message: "Invalid credentials" },
-    });
+    const username = decoded.slice(0, separator);
+    const password = decoded.slice(separator + 1);
+    if (!username || !password || decoded.includes("�")) {
+      return null;
+    }
+    return { username, password };
+  } catch {
+    return null;
   }
 }
 
-// H8 helper: return the dev password for tests to use
-export function getDevAuthCredentials(): { username: string; password: string } | null {
-  if (config.nodeEnv === "development" && config.security.adminPassword === "dev-admin-password") {
-    return { username: config.security.adminUsername, password: config.security.adminPassword };
+export async function adminAuth(request: FastifyRequest, reply: FastifyReply) {
+  const authHeader = request.headers.authorization;
+  if (!authHeader) {
+    return unauthorized(reply);
   }
-  return null;
+
+  const match = /^Basic\s+(.+)$/i.exec(authHeader);
+  const credentials = match?.[1] ? decodeBasicCredentials(match[1]) : null;
+  if (
+    !credentials ||
+    credentials.username !== config.security.adminUsername ||
+    credentials.password !== config.security.adminPassword
+  ) {
+    return unauthorized(reply);
+  }
+
+  reply.header("Cache-Control", "no-store");
+  reply.header("Vary", "Authorization");
 }

@@ -9,6 +9,7 @@
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "./config.js";
+import { BACKUPS_DIR, resolveSqliteDatabasePath } from "./backend-paths.js";
 
 export type Severity = "PASS" | "WARN" | "ERROR";
 
@@ -30,9 +31,7 @@ export interface ConfigCheckResult {
 }
 
 function mask(value: string | undefined): string {
-  if (!value) return "missing";
-  if (value.length <= 8) return "***";
-  return value.slice(0, 4) + "***" + value.slice(-4);
+  return value ? "[REDACTED]" : "missing";
 }
 
 function isPlaceholder(value: string | undefined): boolean {
@@ -144,7 +143,7 @@ export function runConfigChecks(): ConfigCheckResult {
       checks.push({
         name: "vision.apiKey",
         severity: "PASS",
-        message: `API key present (prefix: ${mask(visionKey)})`,
+        message: `API key present (${mask(visionKey)})`,
         safe: true,
       });
     }
@@ -215,10 +214,7 @@ export function runConfigChecks(): ConfigCheckResult {
 
   // ═══ 4. DB + backup ═══
   const dbUrl = process.env.DATABASE_URL || "file:./dev.db";
-  const dbMatch = dbUrl.match(/^file:(.+)$/);
-  const dbPath = dbMatch?.[1]
-    ? resolve(resolve(process.cwd(), "prisma"), dbMatch[1])
-    : null;
+  const dbPath = resolveSqliteDatabasePath(dbUrl);
 
   if (dbPath && existsSync(dbPath)) {
     const dbSize = statSync(dbPath).size;
@@ -233,7 +229,7 @@ export function runConfigChecks(): ConfigCheckResult {
   }
 
   // Recent backup check
-  const backupsDir = resolve(process.cwd(), "backups", "system");
+  const backupsDir = resolve(BACKUPS_DIR, "system");
   if (isLive) {
     const hasRecentBackup = checkRecentBackup(backupsDir);
     if (!hasRecentBackup) {

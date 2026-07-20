@@ -7,16 +7,20 @@
 // touched.
 // =============================================================================
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { z } from "zod";
 
+import { prisma } from "../db.js";
 import { ToolGateway } from "../services/tool-gateway/gateway.js";
 import { ToolRegistry } from "../services/tool-gateway/registry.js";
-import { InMemoryToolEvidenceSink } from "../services/tool-gateway/evidence.js";
+import { InMemoryToolEvidenceSink, PrismaToolEvidenceSink } from "../services/tool-gateway/evidence.js";
+import { toolErrors } from "../services/tool-gateway/errors.js";
 import type {
   AgentToolCall,
+  ToolCallEvidence,
   ToolContext,
   ToolDefinition,
+  ToolEvidenceSink,
   ToolExecuteInput,
   ToolExecuteResult,
 } from "../services/tool-gateway/types.js";
@@ -31,6 +35,13 @@ function baseCtx(overrides: Partial<ToolContext> = {}): ToolContext {
     role: "advanced",
     principalId: "user-1",
     relatedMessageId: "msg-1",
+    allowedTools: [
+      "test.readEcho",
+      "test.write",
+      "test.secrets",
+      "test.slow",
+      "test.adminOnly",
+    ],
     ...overrides,
   };
 }
@@ -94,7 +105,7 @@ describe("ToolGateway — Phase 1", () => {
   it("unknown tool → unavailable + evidence", async () => {
     const gw = makeGateway(registry, sink);
     const call: AgentToolCall = { name: "does.not.exist" };
-    const res = await gw.execute(call, baseCtx());
+    const res = await gw.execute(call, baseCtx({ allowedTools: [] }));
 
     expect(res.executionStatus).toBe("unavailable");
     expect(res.deliveryStatus).toBe("not_applicable");
@@ -102,6 +113,65 @@ describe("ToolGateway — Phase 1", () => {
     expect(sink.toolCalls).toHaveLength(1);
     expect(sink.toolCalls[0]!.executionStatus).toBe("unavailable");
     expect(sink.toolCalls[0]!.toolName).toBe("does.not.exist");
+  });
+
+  it("registered tool omitted from the exact grant → blocked + evidence + NO execute", async () => {
+    const spy = { calls: 0 };
+    registry.register(readEchoTool(spy));
+    const gw = makeGateway(registry, sink);
+
+    const res = await gw.execute(
+      { name: "test.readEcho", arguments: { q: "must not run" } },
+      baseCtx({ allowedTools: [] }),
+    );
+
+    expect(res.executionStatus).toBe("blocked");
+    expect(res.deliveryStatus).toBe("not_applicable");
+    expect(res.error?.code).toBe("blocked");
+    expect(spy.calls).toBe(0);
+    expect(sink.toolCalls).toHaveLength(1);
+    expect(sink.toolCalls[0]!.executionStatus).toBe("blocked");
+    expect(sink.toolCalls[0]!.toolName).toBe("test.readEcho");
+  });
+
+  it("caller role still resolves blocked status and preserves caller role/principal", async () => {
+    const spy = { calls: 0 };
+    registry.register(readEchoTool(spy));
+    const gw = makeGateway(registry, sink, {
+      resolveRole: async () => ({ role: "form_only", principalId: "resolved-principal", blocked: true }),
+    });
+
+    const res = await gw.execute(
+      { name: "test.readEcho", arguments: { q: "must not run" } },
+      baseCtx({ role: "advanced", principalId: "caller-principal" }),
+    );
+
+    expect(res.executionStatus).toBe("blocked");
+    expect(spy.calls).toBe(0);
+    expect(sink.toolCalls).toHaveLength(1);
+    expect(sink.toolCalls[0]!.executionStatus).toBe("blocked");
+    expect(sink.toolCalls[0]!.role).toBe("advanced");
+    expect(sink.toolCalls[0]!.principalId).toBe("caller-principal");
+  });
+
+  it("blocked-status resolver failure fails closed with caller role and no execute", async () => {
+    const spy = { calls: 0 };
+    registry.register(readEchoTool(spy));
+    const gw = makeGateway(registry, sink, {
+      resolveRole: async () => { throw new Error("resolver detail must stay closed"); },
+    });
+
+    const res = await gw.execute(
+      { name: "test.readEcho", arguments: { q: "must not run" } },
+      baseCtx({ role: "advanced", principalId: "caller-principal" }),
+    );
+
+    expect(res.executionStatus).toBe("blocked");
+    expect(spy.calls).toBe(0);
+    expect(sink.toolCalls).toHaveLength(1);
+    expect(sink.toolCalls[0]!.executionStatus).toBe("blocked");
+    expect(sink.toolCalls[0]!.role).toBe("advanced");
+    expect(sink.toolCalls[0]!.principalId).toBe("caller-principal");
   });
 
   it("role deny → blocked + evidence", async () => {
@@ -190,6 +260,30 @@ describe("ToolGateway — Phase 1", () => {
     expect(second.idempotencyKey).toBe(first.idempotencyKey);
   });
 
+  it("fails closed before a write when idempotency evidence lookup throws", async () => {
+    const spy = { calls: 0, sawDryRun: [] as boolean[] };
+    registry.register(writeTool(spy));
+    vi.spyOn(sink, "findByIdempotencyKey").mockRejectedValueOnce(
+      new Error("raw idempotency database failure"),
+    );
+    const gw = makeGateway(registry, sink, {
+      getDryRun: () => false,
+      getLiveAllowed: () => true,
+    });
+
+    const res = await gw.execute(
+      { name: "test.write", arguments: { value: "must-not-run" } },
+      baseCtx(),
+    );
+
+    expect(res.executionStatus).toBe("failed");
+    expect(res.deliveryStatus).toBe("not_applicable");
+    expect(res.error).toMatchObject({ code: "provider_error", message: "Tool provider failed" });
+    expect(spy.calls).toBe(0);
+    expect(sink.toolCalls).toHaveLength(1);
+    expect(JSON.stringify(res)).not.toContain("raw idempotency database failure");
+  });
+
   it("redaction masks token/cookie/session/phone", async () => {
     const secretTool: ToolDefinition = {
       name: "test.secrets",
@@ -266,5 +360,131 @@ describe("ToolGateway — Phase 1", () => {
     const res = await gw.execute({ name: "test.slow", arguments: {} }, baseCtx());
     expect(res.executionStatus).toBe("failed");
     expect(res.error?.code).toBe("timeout");
+  });
+
+  it("returns a stable failed result when ToolCall evidence persistence throws", async () => {
+    registry.register(readEchoTool());
+    const rawSinkError = "db token sk-test-1234567890abcdef phone +84 912 345 678";
+    const failingEvidence: ToolEvidenceSink = {
+      writeToolCall: async () => { throw new Error(rawSinkError); },
+      writeZaloAction: async () => "unused",
+      findByIdempotencyKey: async () => null,
+    };
+    const gw = new ToolGateway({
+      registry,
+      evidence: failingEvidence,
+      getDryRun: () => true,
+      getLiveAllowed: () => false,
+      resolveRole: async () => ({ role: "form_only", principalId: null, blocked: false }),
+    });
+
+    const res = await gw.execute(
+      { name: "test.readEcho", arguments: { q: "provider result must be discarded" } },
+      baseCtx(),
+    );
+
+    expect(res.executionStatus).toBe("failed");
+    expect(res.error).toMatchObject({
+      code: "provider_error",
+      message: "Tool evidence persistence failed",
+      retryable: true,
+    });
+    expect(res.result).toBeUndefined();
+    expect(res.toolCallRecordId).toBeUndefined();
+    expect(JSON.stringify(res)).not.toContain(rawSinkError);
+    expect(JSON.stringify(res)).not.toContain("provider result must be discarded");
+    expect(JSON.stringify(res)).not.toContain("unpersisted-");
+  });
+
+  it("PrismaToolEvidenceSink propagates ToolCall persistence failures", async () => {
+    const createSpy = vi.spyOn(prisma.toolCallRecord, "create").mockRejectedValueOnce(new Error("raw prisma write failure"));
+    const evidence: ToolCallEvidence = {
+      agentName: "hermes", toolName: "test.readEcho", kind: "read",
+      threadId: "thread-1", threadType: "user", role: "advanced",
+      executionStatus: "success", deliveryStatus: "not_applicable",
+    };
+    try {
+      await expect(new PrismaToolEvidenceSink().writeToolCall(evidence)).rejects.toThrow("raw prisma write failure");
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it("PrismaToolEvidenceSink propagates idempotency lookup failures", async () => {
+    const findSpy = vi.spyOn(prisma.toolCallRecord, "findUnique").mockRejectedValueOnce(
+      new Error("raw prisma lookup failure"),
+    );
+    try {
+      await expect(new PrismaToolEvidenceSink().findByIdempotencyKey("idem-key"))
+        .rejects.toThrow("raw prisma lookup failure");
+    } finally {
+      findSpy.mockRestore();
+    }
+  });
+
+  it("redacts expected ToolError message/detail before persistence and return", async () => {
+    const rawToken = "sk-test-1234567890abcdef";
+    const rawPhone = "+84 912 345 678";
+    const rawProviderText = "RAW_PROVIDER_SENTINEL upstream body";
+    registry.register({
+      name: "test.expectedError", kind: "read", minRole: "basic_chat", dataScope: "own_thread",
+      argsSchema: z.object({}).strip(), resultSchema: z.any(),
+      execute: () => { throw toolErrors.providerError(`${rawProviderText}; token ${rawToken}; phone ${rawPhone}`, { providerBody: rawProviderText, token: rawToken, contact: rawPhone }); },
+    });
+    const res = await makeGateway(registry, sink).execute(
+      { name: "test.expectedError", arguments: {} },
+      baseCtx({ allowedTools: ["test.expectedError"], role: "admin" }),
+    );
+    const persisted = sink.toolCalls[0]!;
+    expect(res.error?.code).toBe("provider_error");
+    expect(res.error?.message).toBe("Tool provider failed");
+    expect(res.error?.detail).toBeUndefined();
+    expect(JSON.stringify(res.error)).not.toContain(rawProviderText);
+    expect(JSON.stringify(res.error)).not.toContain(rawToken);
+    expect(JSON.stringify(res.error)).not.toContain(rawPhone);
+    expect(persisted.errorMessage).toBe(res.error?.message);
+    expect(persisted.evidence).toBeNull();
+    expect(JSON.stringify(persisted)).not.toContain(rawProviderText);
+    expect(JSON.stringify(persisted)).not.toContain(rawToken);
+    expect(JSON.stringify(persisted)).not.toContain(rawPhone);
+  });
+
+  it("uses a stable public message for unexpected tool exceptions", async () => {
+    const rawProviderError = "provider secret sk-test-abcdef1234567890 phone +84 988 777 666";
+    registry.register({
+      name: "test.unexpectedError", kind: "read", minRole: "basic_chat", dataScope: "own_thread",
+      argsSchema: z.object({}).strip(), resultSchema: z.any(),
+      execute: () => { throw new Error(rawProviderError); },
+    });
+    const res = await makeGateway(registry, sink).execute(
+      { name: "test.unexpectedError", arguments: {} },
+      baseCtx({ allowedTools: ["test.unexpectedError"] }),
+    );
+    expect(res.error).toMatchObject({ code: "provider_error", message: "Tool execution failed" });
+    expect(sink.toolCalls[0]!.errorMessage).toBe("Tool execution failed");
+    expect(JSON.stringify(res)).not.toContain(rawProviderError);
+    expect(JSON.stringify(sink.toolCalls[0])).not.toContain(rawProviderError);
+  });
+
+  it("persists exact context-owned evidence links and ignores tool-supplied replacements", async () => {
+    registry.register({
+      name: "test.links", kind: "read", minRole: "basic_chat", dataScope: "own_thread",
+      argsSchema: z.object({}).strip(), resultSchema: z.object({ ok: z.boolean() }),
+      execute: () => ({ result: { ok: true }, links: {
+        agentTaskId: "tool-supplied-task", relatedMessageId: "tool-supplied-message", outboundRecordId: "outbound-1",
+      } }),
+    });
+    const res = await makeGateway(registry, sink).execute(
+      { name: "test.links", arguments: {} },
+      baseCtx({ allowedTools: ["test.links"], agentTaskId: "task-db-1", relatedMessageId: "message-db-1",
+        principalId: "principal-db-1", role: "advanced", threadId: "thread-db-1", threadType: "group" }),
+    );
+    expect(sink.toolCalls[0]).toMatchObject({
+      agentTaskId: "task-db-1", relatedMessageId: "message-db-1", principalId: "principal-db-1", role: "advanced",
+      threadId: "thread-db-1", threadType: "group", outboundRecordId: "outbound-1",
+    });
+    expect(res.links).toMatchObject({ agentTaskId: "task-db-1", relatedMessageId: "message-db-1", outboundRecordId: "outbound-1" });
+    expect(JSON.stringify(res.links)).not.toContain("tool-supplied-task");
+    expect(JSON.stringify(res.links)).not.toContain("tool-supplied-message");
   });
 });

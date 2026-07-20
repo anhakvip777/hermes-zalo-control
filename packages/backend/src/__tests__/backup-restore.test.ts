@@ -1,7 +1,8 @@
-import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterEach, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { copyFileSync, existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -9,12 +10,25 @@ const BACKEND_DIR = join(TEST_DIR, "..", "..");
 const ROOT_DIR = join(BACKEND_DIR, "..", "..");
 const NODE = process.execPath;
 const SCRIPT = join(BACKEND_DIR, "scripts", "backup-restore.mjs");
-const BACKUP_ROOT = join(BACKEND_DIR, "backups", "system");
+const ISOLATION_ROOT = mkdtempSync(join(tmpdir(), "hermes-backup-restore-test-"));
+const BACKUP_ROOT = join(ISOLATION_ROOT, "backups", "system");
+const SESSION_DIR = join(ISOLATION_ROOT, "zalo-session");
+const TEST_DATABASE_DIR = join(ISOLATION_ROOT, "prisma");
+const TEST_DATABASE_PATH = join(TEST_DATABASE_DIR, "test.db");
+const ACTIVE_DATABASE_URL = process.env.DATABASE_URL ?? "file:./test.db";
+const ACTIVE_DATABASE_PATH = resolve(BACKEND_DIR, "prisma", ACTIVE_DATABASE_URL.replace(/^file:/, ""));
+mkdirSync(TEST_DATABASE_DIR, { recursive: true });
+copyFileSync(ACTIVE_DATABASE_PATH, TEST_DATABASE_PATH);
+const ISOLATED_ENV = {
+  DATABASE_URL: `file:${TEST_DATABASE_PATH}`,
+  SYSTEM_BACKUP_ROOT: BACKUP_ROOT,
+  ZALO_SESSION_DIR: SESSION_DIR,
+};
 
 function runBackup(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync(NODE, [SCRIPT, ...args], {
     cwd: BACKEND_DIR,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...ISOLATED_ENV, ...env },
     timeout: 15_000,
   });
   return {
@@ -29,6 +43,21 @@ function cleanupBackups() {
     try { rmSync(BACKUP_ROOT, { recursive: true, force: true }); } catch {}
   }
 }
+
+function cleanupSession() {
+  if (existsSync(SESSION_DIR)) {
+    try { rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
+  }
+}
+
+afterEach(() => {
+  cleanupBackups();
+  cleanupSession();
+});
+
+afterAll(() => {
+  rmSync(ISOLATION_ROOT, { recursive: true, force: true });
+});
 
 describe("Backup/Restore — create", () => {
   afterEach(cleanupBackups);
@@ -74,9 +103,8 @@ describe("Backup/Restore — create", () => {
   it("backup includes session when file exists", () => {
     cleanupBackups();
     // Create a fake session file
-    const sessionDir = join(BACKEND_DIR, "zalo-session");
-    mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(join(sessionDir, "zalo-session.json"), JSON.stringify({ test: true }));
+    mkdirSync(SESSION_DIR, { recursive: true });
+    writeFileSync(join(SESSION_DIR, "zalo-session.json"), JSON.stringify({ test: true }));
 
     const r = runBackup(["create", "--reason", "test"]);
     expect(r.exitCode).toBe(0);
@@ -84,9 +112,6 @@ describe("Backup/Restore — create", () => {
     const dirs = readdirSync(BACKUP_ROOT);
     const sessFile = join(BACKUP_ROOT, dirs[0]!, "zalo-session.json");
     expect(existsSync(sessFile)).toBe(true);
-
-    // Cleanup
-    try { rmSync(sessionDir, { recursive: true, force: true }); } catch {}
   });
 
   it("list shows backups sorted newest first", () => {
@@ -122,6 +147,23 @@ describe("Backup/Restore — verify", () => {
     expect(r.stdout).toContain("not found");
   });
 
+  it("rejects a backup name that escapes the isolated backup root", () => {
+    const outsideDir = join(ISOLATION_ROOT, "backups", "outside-backup");
+    mkdirSync(outsideDir, { recursive: true });
+    copyFileSync(TEST_DATABASE_PATH, join(outsideDir, "dev.db"));
+    writeFileSync(join(outsideDir, "manifest.json"), JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      dbSizeBytes: 2048,
+    }));
+    writeFileSync(join(outsideDir, "metadata.json"), JSON.stringify({ sessionExists: false }));
+
+    const r = runBackup(["verify", "../outside-backup"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("invalid backup name");
+  });
+
   it("verify fails on corrupted manifest", () => {
     cleanupBackups();
     const cr = runBackup(["create", "--reason", "test"]);
@@ -137,6 +179,17 @@ describe("Backup/Restore — verify", () => {
 
 describe("Backup/Restore — retention", () => {
   afterEach(cleanupBackups);
+
+  it.each(["0", "-1", "1.5", "invalid"])(
+    "rejects an invalid SYSTEM_BACKUP_KEEP value (%s) before creating a backup",
+    (keep) => {
+      const r = runBackup(["create", "--reason", "invalid-retention"], { SYSTEM_BACKUP_KEEP: keep });
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("SYSTEM_BACKUP_KEEP");
+      expect(existsSync(BACKUP_ROOT)).toBe(false);
+    },
+  );
 
   it("keeps only latest N backups", () => {
     cleanupBackups();
@@ -173,6 +226,7 @@ describe("Backup/Restore — no regression", () => {
   it("npm run backup:list works", () => {
     const r = spawnSync("npm", ["run", "backup:list"], {
       cwd: ROOT_DIR,
+      env: { ...process.env, ...ISOLATED_ENV },
       timeout: 30_000,
       shell: true,
     });

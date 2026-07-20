@@ -21,8 +21,15 @@ import {
 } from "./group-safety.service.js";
 import type { NormalizedMessage } from "./zalo-receive.js";
 import type { ConversationState } from "./thread-conversation-state.service.js";
-import { saveOutboundRecord } from "./outbound-guardrails.service.js";
-import { sendOutbound } from "./outbound-dispatcher.service.js";
+import {
+  findOutboundByIdempotencyKey,
+  saveOutboundRecord,
+} from "./outbound-guardrails.service.js";
+import {
+  buildInboundReplyIdempotencyKey,
+  resolveStrictOutboundReplayEvidence,
+  sendOutbound,
+} from "./outbound-dispatcher.service.js";
 import { hasUnsupportedSystemClaim, hasScheduleEvidence } from "./unsupported-claim-guard.service.js";
 import { clearAllCooldowns, getActiveCooldowns, clearCooldown } from "./cooldown.service.js";
 import { redact } from "./tool-gateway/redaction.js";
@@ -643,48 +650,146 @@ async function fetchScheduleContext(threadId: string): Promise<ScheduleContext> 
 // are unchanged.
 
 // ── Phase 5: structured AgentBridge (flag-gated, default OFF) ────────
+interface DispatchPrincipalContext {
+  role: "form_only" | "basic_chat" | "advanced" | "admin";
+  principalId: string | null;
+  status: "active" | "blocked";
+}
+
+interface StructuredAgentReply {
+  reply: string;
+  confidence?: number;
+  rounds: number;
+  toolEvidenceIds: string[];
+}
+
+type StructuredAgentBridgeOutcome =
+  | { ok: true; value: StructuredAgentReply }
+  | { ok: false; reason: string };
+
+const STABLE_AGENT_BRIDGE_FAILURES = new Set([
+  "total_timeout",
+  "adapter_timeout",
+  "adapter_error",
+  "malformed_response",
+  "adapter_safety",
+  "max_calls_per_round",
+  "max_rounds",
+  "tool_gateway_error",
+  "tool_invalid_args",
+  "tool_timeout",
+  "tool_unavailable",
+  "tool_blocked",
+  "tool_failed",
+  "evidence_check_error",
+  "unsupported_system_claim",
+  "empty_final_text",
+]);
+
+function stableAgentBridgeFailure(reason: unknown): string {
+  return typeof reason === "string" && STABLE_AGENT_BRIDGE_FAILURES.has(reason)
+    ? `agent_bridge_${reason}`
+    : "agent_bridge_fallback";
+}
+
 /**
- * Try the structured AgentBridge. Returns a {reply, confidence} on success, or
- * null to signal the caller to fall back to the text-only HermesChatAdapter.
- * Any error / safe-fallback → null (never throws), so the text-only path is
- * never broken. Only invoked when config.hermesAgentBridge.enabled is true.
+ * Try the structured AgentBridge. Once the flag is enabled, every failure is
+ * terminal and redacted; the caller must never fall back to the text adapter.
  */
 async function tryAgentBridgeReply(
   msg: NormalizedMessage,
   content: string,
   recentMessages: string[],
   scheduleContext: string | undefined,
-): Promise<{ reply: string; confidence?: number } | null> {
+  agentTaskId: string,
+  principal: DispatchPrincipalContext,
+): Promise<StructuredAgentBridgeOutcome> {
   try {
     const { getAgentBridge } = await import("./agent-bridge/index.js");
-    const role = ((msg as any).__principalRole ?? "form_only") as
-      | "form_only"
-      | "basic_chat"
-      | "advanced"
-      | "admin";
-    const result = await getAgentBridge().run({
+    const result: unknown = await getAgentBridge().run({
       threadId: msg.threadId,
       threadType: msg.threadType,
       senderId: msg.senderId,
       senderName: msg.senderName,
-      role,
-      principalId: msg.senderId ?? null,
+      role: principal.role,
+      principalId: principal.principalId,
+      principalBlocked: principal.status === "blocked",
+      agentTaskId,
       content,
       recentMessages,
       scheduleContext,
       agentName: "hermes",
-      relatedMessageId: msg.zaloMessageId ?? undefined,
+      relatedMessageId: msg.dbMessageId,
       runtime: { dryRun: getCurrentEffectiveDryRun(), live: false },
     });
-    // On any safe fallback (error/timeout/too-many-rounds/claim), defer to the
-    // proven text-only path rather than sending the bridge's canned fallback.
-    if (result.usedFallback) return null;
-    const text = (result.text ?? "").trim();
-    if (!text) return null;
-    return { reply: text, confidence: result.confidence };
-  } catch (err: unknown) {
-    console.error(`[dispatcher] AgentBridge error (fallback to text-only): ${(err as Error)?.message ?? "unknown"}`);
-    return null;
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      return { ok: false, reason: "agent_bridge_malformed_response" };
+    }
+
+    const candidate = result as Record<string, unknown>;
+    const validConfidence = candidate.confidence === undefined || (
+      typeof candidate.confidence === "number" &&
+      Number.isFinite(candidate.confidence) &&
+      candidate.confidence >= 0 &&
+      candidate.confidence <= 1
+    );
+    if (
+      typeof candidate.text !== "string" ||
+      typeof candidate.usedFallback !== "boolean" ||
+      !Number.isInteger(candidate.rounds) ||
+      (candidate.rounds as number) < 0 ||
+      !Array.isArray(candidate.toolResults) ||
+      !validConfidence
+    ) {
+      return { ok: false, reason: "agent_bridge_malformed_response" };
+    }
+    if (candidate.usedFallback) {
+      return { ok: false, reason: stableAgentBridgeFailure(candidate.reason) };
+    }
+
+    const reply = candidate.text.trim();
+    if (!reply) return { ok: false, reason: "agent_bridge_empty_final_text" };
+
+    const toolEvidenceIds: string[] = [];
+    const seenEvidenceIds = new Set<string>();
+    for (const toolResult of candidate.toolResults) {
+      if (typeof toolResult !== "object" || toolResult === null || Array.isArray(toolResult)) {
+        return { ok: false, reason: "agent_bridge_malformed_response" };
+      }
+      const evidence = toolResult as Record<string, unknown>;
+      const evidenceId = evidence.toolCallRecordId;
+      const links = evidence.links;
+      if (
+        evidence.kind !== "read" ||
+        evidence.executionStatus !== "success" ||
+        evidence.deliveryStatus !== "not_applicable" ||
+        typeof evidenceId !== "string" ||
+        !evidenceId.trim() ||
+        seenEvidenceIds.has(evidenceId) ||
+        typeof links !== "object" ||
+        links === null ||
+        Array.isArray(links) ||
+        (links as Record<string, unknown>).agentTaskId !== agentTaskId ||
+        (links as Record<string, unknown>).relatedMessageId !== msg.dbMessageId
+      ) {
+        return { ok: false, reason: "agent_bridge_malformed_response" };
+      }
+      seenEvidenceIds.add(evidenceId);
+      toolEvidenceIds.push(evidenceId);
+    }
+
+    return {
+      ok: true,
+      value: {
+        reply,
+        confidence: candidate.confidence as number | undefined,
+        rounds: candidate.rounds as number,
+        toolEvidenceIds,
+      },
+    };
+  } catch {
+    console.error("[dispatcher] AgentBridge failed");
+    return { ok: false, reason: "agent_bridge_error" };
   }
 }
 
@@ -699,7 +804,8 @@ async function processBatchNow(
   threadId: string,
   threadType: "user" | "group",
 ): Promise<void> {
-  const { claimBatch, getBatch, completeBatch } = await import("./message-batch.service.js");
+  const { claimBatch, getBatch, completeBatch, resolveLastBatchMessageIdentity } =
+    await import("./message-batch.service.js");
 
   const claimed = await claimBatch(batchId);
   if (!claimed) {
@@ -716,9 +822,39 @@ async function processBatchNow(
   console.log(`[batch] processing batch ${batchId.slice(0, 8)}: ${batch.messageCount} msgs, ${batch.totalChars} chars, thread=${threadId}`);
 
   // Build synthetic NormalizedMessage from combined batch text
-  const messageIds: string[] = JSON.parse(batch.messageIds);
+  let messageIds: string[] = [];
+  try {
+    const parsed = JSON.parse(batch.messageIds) as unknown;
+    if (Array.isArray(parsed)) {
+      messageIds = parsed.filter((id): id is string => typeof id === "string");
+    }
+  } catch {
+    // Invalid batch metadata is handled by the fail-closed identity gate below.
+  }
+
+  let identity: Awaited<ReturnType<typeof resolveLastBatchMessageIdentity>> = null;
+  try {
+    identity = await resolveLastBatchMessageIdentity(
+      messageIds,
+      threadId,
+      batch.messageCount,
+    );
+  } catch {
+    // A lookup failure must never fall through to a synthetic dispatch.
+  }
+  if (!identity) {
+    console.error(`[batch] batch ${batchId.slice(0, 8)} has no resolvable internal message id`);
+    await completeBatch(batchId, {
+      dispatched: false,
+      reason: "batch_internal_message_id_missing",
+      messageCount: batch.messageCount,
+      totalChars: batch.totalChars,
+    });
+    return;
+  }
   const syntheticMsg: NormalizedMessage = {
-    zaloMessageId: messageIds[messageIds.length - 1] ?? null, // Use last message ID for reply threading
+    zaloMessageId: identity.zaloMessageId,
+    dbMessageId: identity.dbMessageId,
     threadId,
     threadType,
     senderId: "",  // Will be resolved by dispatcher from last message
@@ -850,7 +986,8 @@ async function tryRetrievalDispatch(
       }
       role = ctx.role;
     } catch {
-      role = "form_only";
+      console.error("[retrieval] principal lookup failed — no outbound");
+      return { handled: true, dispatched: false, reason: "principal_resolution_failed" };
     }
   }
 
@@ -893,7 +1030,7 @@ async function tryRetrievalDispatch(
     threadType: msg.threadType,
     source: "retrieval",
     content: replyText,
-    relatedMessageId: msg.zaloMessageId ?? undefined,
+    relatedMessageId: msg.dbMessageId,
     metadata: {
       retrieval: {
         status: ans.status,
@@ -922,9 +1059,11 @@ export async function handleIncomingMessage(
   // Phase 3.5E (flag-gated, dryRun-only): try retrieval-answer dispatch first.
   // Inert unless RETRIEVAL_DISPATCHER_DRYRUN_ENABLED=true. When it owns the
   // message it returns here; otherwise the normal pipeline proceeds.
-  const retrieval = await tryRetrievalDispatch(msg, selfUserId);
-  if (retrieval.handled) {
-    return { dispatched: !!retrieval.dispatched, reason: retrieval.reason };
+  if (!config.hermesAgentBridge.enabled) {
+    const retrieval = await tryRetrievalDispatch(msg, selfUserId);
+    if (retrieval.handled) {
+      return { dispatched: !!retrieval.dispatched, reason: retrieval.reason };
+    }
   }
 
   const safe = safetyCheck(msg, selfUserId);
@@ -949,6 +1088,43 @@ export async function handleIncomingMessage(
     }
 
     return { dispatched: false, reason: safe.reason };
+  }
+
+  // Structured replay/missing-ID preflight must run before heartbeat or group
+  // window mutations. A replay is a durable no-op, and a structured request
+  // without the internal Message.id cannot produce trustworthy linkage.
+  if (config.hermesAgentBridge.enabled) {
+    if (!msg.dbMessageId?.trim()) {
+      console.error("[dispatcher] structured inbound is missing internal message id");
+      return {
+        dispatched: false,
+        reason: "agent_bridge_internal_message_id_missing",
+      };
+    }
+    try {
+      const existing = await findOutboundByIdempotencyKey(
+        buildInboundReplyIdempotencyKey(msg.dbMessageId, msg.threadId, msg.threadType),
+        { throwOnError: true },
+      );
+      if (existing) {
+        const replayEvidence = existing.decision !== "block" && existing.decision !== "skip"
+          ? await resolveStrictOutboundReplayEvidence(existing, msg.dbMessageId)
+          : null;
+        if (!replayEvidence) {
+          return {
+            dispatched: false,
+            reason: "outbound_idempotency_incomplete",
+          };
+        }
+        console.log(
+          `[dispatcher] structured duplicate_idempotency skip: inbound=${msg.dbMessageId} existing=${existing.id}`,
+        );
+        return { dispatched: false, reason: "duplicate_idempotency" };
+      }
+    } catch {
+      console.error("[dispatcher] structured idempotency lookup failed");
+      return { dispatched: false, reason: "agent_bridge_idempotency_error" };
+    }
   }
 
   // ── Heartbeat: message pipeline active ─────────────────────────
@@ -979,6 +1155,11 @@ export async function handleIncomingMessage(
   const cannotIdentifySender =
     msg.identityConfidence === "unknown" ||
     (!msg.senderId && msg.threadType === "group");
+  let principalContext: DispatchPrincipalContext = {
+    role: "form_only",
+    principalId: null,
+    status: "active",
+  };
   if (cannotIdentifySender) {
     (msg as any).__principalRole = "form_only";
     (msg as any).__principalStatus = "active";
@@ -1013,16 +1194,19 @@ export async function handleIncomingMessage(
     // Attach resolved role to message metadata so downstream (Hermes, rules) can use it
     (msg as any).__principalRole = ctx.role;
     (msg as any).__principalStatus = ctx.status;
+    principalContext = {
+      role: ctx.role,
+      principalId: ctx.principal?.principalId ?? null,
+      status: ctx.status,
+    };
 
     console.log(
       `[dispatcher] principal resolved: senderId=${msg.senderId.slice(0, 12)}… ` +
       `role=${ctx.role} status=${ctx.status} fromDb=${ctx.fromDb} thread=${msg.threadId}`,
     );
-  } catch (err: unknown) {
-    // Permission lookup error → fail safe (form_only default)
-    const msg2 = err instanceof Error ? err.message : String(err);
-    console.error(`[dispatcher] principal lookup failed: ${msg2} — using form_only default`);
-    (msg as any).__principalRole = "form_only";
+  } catch {
+    console.error("[dispatcher] principal lookup failed — skipping message");
+    return { dispatched: false, reason: "principal_resolution_failed" };
   }
   } // end identity guard (else)
 
@@ -1038,7 +1222,7 @@ export async function handleIncomingMessage(
       contentPreview: redactPreview(msg.content, 200),
       zaloMessageId: msg.zaloMessageId,
     },
-    messageId: msg.zaloMessageId ?? undefined,
+    messageId: msg.dbMessageId,
   });
 
   // ── Batch 14: Message Batching / Debounce ──────────────────
@@ -1137,7 +1321,7 @@ export async function handleIncomingMessage(
           threadType: msg.threadType,
           source: "image",
           content: "Mình không tải được ảnh bạn gửi. Bạn thử gửi lại nhé.",
-          relatedMessageId: msg.zaloMessageId ?? undefined,
+          relatedMessageId: msg.dbMessageId,
           taskId: task.id,
           metadata: { downloadError: downloadResult.error },
         }).catch(() => {});
@@ -1242,7 +1426,7 @@ export async function handleIncomingMessage(
         threadType: msg.threadType,
         source: "image",
         content: replyText,
-        relatedMessageId: msg.zaloMessageId ?? undefined,
+        relatedMessageId: msg.dbMessageId,
         taskId: task.id,
         metadata: { imageDescription: visionResult.description, provider: visionResult.provider },
       });
@@ -1312,7 +1496,7 @@ export async function handleIncomingMessage(
         threadType: msg.threadType,
         source: "file",
         content: `Mình chưa hỗ trợ đọc file .${ext ?? "này"}. Các định dạng hỗ trợ: PDF, DOCX, TXT, MD, CSV, PPTX, XLSX.`,
-        relatedMessageId: msg.zaloMessageId ?? undefined,
+        relatedMessageId: msg.dbMessageId,
         taskId: task.id,
         metadata: { unsupportedExtension: ext ?? "unknown" },
       }).catch(() => {});
@@ -1367,7 +1551,7 @@ export async function handleIncomingMessage(
       const ingestResult = await docIngest(destPath, {
         source: "zalo",
         threadId: msg.threadId,
-        messageId: msg.zaloMessageId ?? undefined,
+        messageId: msg.dbMessageId,
       });
 
       const fileResult: Record<string, unknown> = {
@@ -1389,7 +1573,7 @@ export async function handleIncomingMessage(
         threadType: msg.threadType,
         source: "file",
         content: replyText,
-        relatedMessageId: msg.zaloMessageId ?? undefined,
+        relatedMessageId: msg.dbMessageId,
         taskId: task.id,
         metadata: { documentId: ingestResult.documentId, fileName: ingestResult.fileName },
       });
@@ -1419,7 +1603,7 @@ export async function handleIncomingMessage(
         threadType: msg.threadType,
         source: "file",
         content: "Mình nhận được file nhưng chưa xử lý được. Bạn thử lại sau nhé.",
-        relatedMessageId: msg.zaloMessageId ?? undefined,
+        relatedMessageId: msg.dbMessageId,
         taskId: task.id,
         metadata: { error: errorMsg.slice(0, 200) },
       }).catch(() => {});
@@ -1468,7 +1652,7 @@ export async function handleIncomingMessage(
             source: "zalo_auto_reply_create_reminder",
             threadType: msg.threadType,
             threadId: msg.threadId,
-            createdFromMessageId: msg.zaloMessageId,
+            createdFromMessageId: msg.dbMessageId,
           }),
         });
 
@@ -1499,7 +1683,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           threadType: msg.threadType,
           source: "reminder",
           content: replyText,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
+          relatedMessageId: msg.dbMessageId,
           taskId: task.id,
           metadata: { scheduleId: schedule.id, jobId: job.id },
         });
@@ -1528,7 +1712,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           threadType: msg.threadType,
           source: "reminder",
           content: failReply,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
+          relatedMessageId: msg.dbMessageId,
           taskId: task.id,
           metadata: { scheduleCreationFailed: true, error: errorMsg.slice(0, 200) },
         });
@@ -1568,7 +1752,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
               source: "zalo_auto_reply_context_reminder",
               threadType: msg.threadType,
               threadId: msg.threadId,
-              createdFromMessageId: msg.zaloMessageId,
+              createdFromMessageId: msg.dbMessageId,
               resolvedFrom: "conversation_context",
             }),
           });
@@ -1599,7 +1783,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             threadType: msg.threadType,
             source: "reminder",
             content: replyText,
-            relatedMessageId: msg.zaloMessageId ?? undefined,
+            relatedMessageId: msg.dbMessageId,
             taskId: task.id,
             metadata: { scheduleId: schedule.id, jobId: job.id, resolvedFromContext: true },
           });
@@ -1629,7 +1813,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
             threadType: msg.threadType,
             source: "reminder",
             content: failReply,
-            relatedMessageId: msg.zaloMessageId ?? undefined,
+            relatedMessageId: msg.dbMessageId,
             taskId: task.id,
             metadata: { scheduleCreationFailed: true, error: errorMsg.slice(0, 200) },
           });
@@ -1655,7 +1839,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           threadType: msg.threadType,
           source: "reminder",
           content: clarifyReply,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
+          relatedMessageId: msg.dbMessageId,
           taskId: task.id,
           metadata: { reason: "no_context_for_pronoun" },
         }).catch(() => {});
@@ -1678,7 +1862,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       senderId: msg.senderId,
       content: msg.content,
       messageType: msg.messageType ?? "text",
-      messageId: msg.zaloMessageId ?? undefined,
+      messageId: msg.dbMessageId,
     });
 
     if (ruleResult.matched && ruleResult.winningRule) {
@@ -1688,7 +1872,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       if (winning.actionType === "ignore") {
         await saveRuleExec({
           ruleId: winning.id,
-          messageId: msg.zaloMessageId ?? undefined,
+          messageId: msg.dbMessageId,
           threadId: msg.threadId,
           matched: true,
           actionTaken: "ignore",
@@ -1714,7 +1898,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
           threadType: msg.threadType,
           source: "rule",
           content: reply,
-          relatedMessageId: msg.zaloMessageId ?? undefined,
+          relatedMessageId: msg.dbMessageId,
           taskId: task.id,
           metadata: { ruleId: winning.id, ruleName: winning.name },
         });
@@ -1734,7 +1918,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
         await agentTaskService.markAgentTaskCompleted(task.id, ruleResultPayload);
         await saveRuleExec({
           ruleId: winning.id,
-          messageId: msg.zaloMessageId ?? undefined,
+          messageId: msg.dbMessageId,
           threadId: msg.threadId,
           matched: true,
           actionTaken: "fixed_reply",
@@ -1792,15 +1976,34 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       scheduleContext = ctx.summary;
     }
 
-    // Generate reply: structured AgentBridge (flag-gated, default OFF) → text-only fallback.
-    // With HERMES_AGENT_BRIDGE_ENABLED=false (default) this branch is skipped and
-    // behavior is identical to the text-only path.
+    // Generate reply. Flag OFF preserves the existing text-only path. Flag ON
+    // exclusively owns the turn and fails closed without text fallback.
     const recentForReply = convContext.recentMessages.map((m) => `${m.role}: ${m.content}`);
-    let chatReply: { reply: string; confidence?: number } | null = null;
+    let chatReply: { reply: string; confidence?: number };
+    let structuredMetadata: { rounds: number; toolEvidenceIds: string[] } | undefined;
     if (config.hermesAgentBridge.enabled) {
-      chatReply = await tryAgentBridgeReply(msg, effectiveContent, recentForReply, scheduleContext);
-    }
-    if (!chatReply) {
+      const structured = await tryAgentBridgeReply(
+        msg,
+        effectiveContent,
+        recentForReply,
+        scheduleContext,
+        task.id,
+        principalContext,
+      );
+      if (!structured.ok) {
+        await agentTaskService.markAgentTaskFailed(task.id, structured.reason);
+        console.error(`[dispatcher] structured bridge failed: ${structured.reason}`);
+        return { dispatched: false, reason: structured.reason };
+      }
+      chatReply = {
+        reply: structured.value.reply,
+        confidence: structured.value.confidence,
+      };
+      structuredMetadata = {
+        rounds: structured.value.rounds,
+        toolEvidenceIds: structured.value.toolEvidenceIds,
+      };
+    } else {
       const adapter = getHermesChatAdapter();
       chatReply = await adapter.generateReply({
         threadId: msg.threadId,
@@ -1859,6 +2062,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
       replyPreview: finalReply.slice(0, 200),
       confidence,
       dryRun: getCurrentEffectiveDryRun(),
+      ...(structuredMetadata ?? {}),
     };
     if (truncated) {
       result.truncated = true;
@@ -1866,7 +2070,7 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     }
 
     // Low confidence → force dry-run, don't send real reply
-    if (confidence !== undefined && confidence < cfg.minConfidence) {
+    if (!structuredMetadata && confidence !== undefined && confidence < cfg.minConfidence) {
       result.dryRun = true;
       result.confidenceTooLow = true;
       result.minConfidence = cfg.minConfidence;
@@ -1881,18 +2085,40 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     const obResult = await sendOutbound({
       threadId: msg.threadId,
       threadType: msg.threadType,
-      source: "hermes",
+      source: structuredMetadata ? "agent_tool" : "hermes",
       content: finalReply,
-      relatedMessageId: msg.zaloMessageId ?? undefined,
+      relatedMessageId: msg.dbMessageId,
       taskId: task.id,
-      metadata: { confidence, truncated: truncated || undefined },
+      ...(structuredMetadata ? { deliveryPolicy: "dry_run_only" as const } : {}),
+      metadata: {
+        confidence,
+        truncated: truncated || undefined,
+        ...(structuredMetadata ?? {}),
+      },
     });
     
     result.sentMessageId = obResult.sentMessageId;
     result.sendSuccess = obResult.success;
     result.dryRun = obResult.dryRun;
+    result.outboundRecordId = obResult.outboundRecordId;
+    result.assistantMessageId = obResult.assistantMessageId;
 
-    if (obResult.success || obResult.dryRun) {
+    if (structuredMetadata) {
+      const strictFailureReason = !obResult.success
+        ? obResult.reason
+        : !obResult.outboundRecordId || !obResult.assistantMessageId
+          ? "outbound_idempotency_incomplete"
+          : null;
+      if (strictFailureReason) {
+        await agentTaskService.markAgentTaskFailed(task.id, strictFailureReason);
+        console.error(
+          `[dispatcher] structured outbound failed: ${strictFailureReason} (thread=${msg.threadId})`,
+        );
+        return { dispatched: false, reason: strictFailureReason };
+      }
+    }
+
+    if (obResult.success || (!structuredMetadata && obResult.dryRun)) {
       await agentTaskService.markAgentTaskCompleted(task.id, result);
       console.log(`[dispatcher] ${obResult.dryRun ? "dry-run" : "sent"} reply: "${finalReply.slice(0, 60)}..." (thread=${msg.threadId})`);
     } else {
@@ -1901,6 +2127,9 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
         obResult.error ?? "SEND_FAILED",
       );
       console.error(`[dispatcher] send failed: ${obResult.error} (thread=${msg.threadId})`);
+      if (structuredMetadata) {
+        return { dispatched: false, reason: obResult.reason };
+      }
     }
 
     // ── Detect if this reply is a question (potential multi-turn) ──
@@ -1910,6 +2139,12 @@ Lịch ID: ${schedule.id.slice(0, 8)}...`;
     return { dispatched: true };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+    if (config.hermesAgentBridge.enabled) {
+      const reason = "agent_bridge_error";
+      await agentTaskService.markAgentTaskFailed(task.id, reason).catch(() => {});
+      console.error("[dispatcher] structured dispatch failed");
+      return { dispatched: false, reason };
+    }
     // Mark task with safe-failure result (no fabricated claims, no retry spam)
     const failResult: Record<string, unknown> = {
       safeReplySuppressed: true,

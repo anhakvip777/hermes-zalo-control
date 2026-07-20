@@ -25,6 +25,7 @@ vi.mock("../services/incoming-dispatcher.service.js", () => ({
 
 // ── Import the exported helpers ──────────────────────────────────────
 import { isLocalRequest, safeTokenEquals } from "../routes/internal.js";
+import { prisma } from "../db.js";
 
 // ── Helper tests ─────────────────────────────────────────────────────
 
@@ -273,6 +274,11 @@ describe("Internal API — POST /api/internal/outbound/send", () => {
 // ═══════════════════════════════════════════════════════════════════
 describe("Internal API — POST /api/internal/messages/handle-batch", () => {
   const VALID_TOKEN = "test-internal-token-12345";
+  const BATCH_THREAD_ID = "thread-test-1";
+  const BATCH_MESSAGE_ROWS = [
+    { id: "internal-batch-db-1", zaloMessageId: "internal-batch-zalo-1", content: "hello" },
+    { id: "internal-batch-db-2", zaloMessageId: "internal-batch-zalo-2", content: "world" },
+  ] as const;
   let app: import("fastify").FastifyInstance;
 
   beforeAll(async () => {
@@ -286,24 +292,45 @@ describe("Internal API — POST /api/internal/messages/handle-batch", () => {
   });
 
   afterAll(async () => {
+    await prisma.message.deleteMany({
+      where: { id: { in: BATCH_MESSAGE_ROWS.map((row) => row.id) } },
+    });
     delete process.env.INTERNAL_API_TOKEN;
     await app.close();
     vi.resetModules();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mockHandleIncoming.mockClear();
+    await prisma.message.deleteMany({
+      where: { id: { in: BATCH_MESSAGE_ROWS.map((row) => row.id) } },
+    });
+    await prisma.message.createMany({
+      data: BATCH_MESSAGE_ROWS.map((row) => ({
+        ...row,
+        threadId: BATCH_THREAD_ID,
+        threadType: "user",
+        isFromBot: false,
+        messageType: "text",
+        role: "user",
+        receivedAt: new Date(),
+      })),
+    });
   });
 
   const validBatchBody = {
-    threadId: "thread-test-1",
+    threadId: BATCH_THREAD_ID,
     threadType: "user",
     messages: [
-      { messageId: "msg-1", content: "hello" },
-      { messageId: "msg-2", content: "world" },
+      { messageId: "internal-batch-zalo-1", content: "hello" },
+      { messageId: "internal-batch-zalo-2", content: "world" },
     ],
     combinedContent: "hello\nworld",
-    metadata: { batchId: "batch-1", messageIds: ["msg-1", "msg-2"], messageCount: 2 },
+    metadata: {
+      batchId: "batch-1",
+      messageIds: ["internal-batch-zalo-1", "internal-batch-zalo-2"],
+      messageCount: 2,
+    },
   };
 
   it("rejects request without token → 401", async () => {
@@ -371,6 +398,58 @@ describe("Internal API — POST /api/internal/messages/handle-batch", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("fails closed when the last external batch ID has no internal Message row", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: {
+        ...validBatchBody,
+        messages: [{ messageId: "missing-batch-zalo", content: "missing" }],
+        combinedContent: "missing",
+        metadata: {
+          ...validBatchBody.metadata,
+          messageIds: ["missing-batch-zalo"],
+          messageCount: 1,
+        },
+      },
+      remoteAddress: "127.0.0.1",
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      error: "BATCH_MESSAGE_ID_UNRESOLVED",
+    });
+    expect(mockHandleIncoming).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when canonical batch count does not match the messages array", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/messages/handle-batch",
+      headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      payload: {
+        ...validBatchBody,
+        messages: [{ messageId: "internal-batch-zalo-2", content: "world" }],
+        combinedContent: "world",
+        metadata: {
+          ...validBatchBody.metadata,
+          messageIds: ["internal-batch-zalo-2"],
+          messageCount: 2,
+        },
+      },
+      remoteAddress: "127.0.0.1",
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      error: "BATCH_MESSAGE_COUNT_MISMATCH",
+    });
+    expect(mockHandleIncoming).not.toHaveBeenCalled();
+  });
+
   it("accepts valid request → 200, calls handleIncomingMessage", async () => {
     const res = await app.inject({
       method: "POST",
@@ -386,8 +465,10 @@ describe("Internal API — POST /api/internal/messages/handle-batch", () => {
     expect(mockHandleIncoming).toHaveBeenCalledTimes(1);
 
     const callArg = mockHandleIncoming.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(callArg.threadId).toBe("thread-test-1");
+    expect(callArg.threadId).toBe(BATCH_THREAD_ID);
     expect(callArg.content).toBe("hello\nworld");
+    expect(callArg.zaloMessageId).toBe("internal-batch-zalo-2");
+    expect(callArg.dbMessageId).toBe("internal-batch-db-2");
   });
 
   it("synthetic message preserves batch metadata in rawMetadata", async () => {
@@ -404,6 +485,6 @@ describe("Internal API — POST /api/internal/messages/handle-batch", () => {
     expect(metadata.source).toBe("message_batch");
     expect(metadata.batchId).toBe("batch-1");
     expect(metadata.messageCount).toBe(2);
-    expect(metadata.messageIds).toEqual(["msg-1", "msg-2"]);
+    expect(metadata.messageIds).toEqual(["internal-batch-zalo-1", "internal-batch-zalo-2"]);
   });
 });

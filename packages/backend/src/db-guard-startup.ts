@@ -4,7 +4,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolveSqliteDatabasePath } from "./backend-paths.js";
 
 const CRITICAL_TABLES = [
   "Message",
@@ -19,10 +19,9 @@ const CRITICAL_TABLES = [
 
 function getDbPath(): string {
   const url = process.env.DATABASE_URL || "file:./dev.db";
-  const match = url.match(/^file:(.+)$/);
-  if (!match || !match[1]) throw new Error(`Cannot parse DATABASE_URL: ${url}`);
-  // Prisma resolves relative paths from the prisma/ directory
-  return resolve(process.cwd(), "prisma", match[1]);
+  const dbPath = resolveSqliteDatabasePath(url);
+  if (!dbPath) throw new Error(`Cannot parse file-backed DATABASE_URL: ${url}`);
+  return dbPath;
 }
 
 export async function checkDbOnStartup(): Promise<void> {

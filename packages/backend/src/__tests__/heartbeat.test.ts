@@ -144,11 +144,21 @@ describe("Heartbeat — stale detection", () => {
     expect(row!.status).toBe("stale");
   });
 
-  it("getAllHeartbeats includes stale detection", async () => {
+  it("getAllHeartbeats derives stale status without mutating the stored row", async () => {
+    const oldDate = new Date(Date.now() - 120 * 1000);
+    await prisma.systemHeartbeat.upsert({
+      where: { name: "schedulerWorker" },
+      create: { name: "schedulerWorker", status: "ok", lastBeatAt: oldDate },
+      update: { status: "ok", lastBeatAt: oldDate },
+    });
+
     const result = await getAllHeartbeats();
     const stale = result.items.find((i) => i.name === "schedulerWorker");
     expect(stale).toBeDefined();
     expect(stale!.status).toBe("stale");
+
+    const persisted = await prisma.systemHeartbeat.findUnique({ where: { name: "schedulerWorker" } });
+    expect(persisted!.status).toBe("ok");
   });
 });
 

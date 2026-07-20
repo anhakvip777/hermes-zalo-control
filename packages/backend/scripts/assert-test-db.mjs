@@ -17,7 +17,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -74,11 +74,12 @@ function main() {
     process.exit(1);
   }
 
-  // Guard 3: DATABASE_URL must reference test.db or :memory:
-  if (!url.includes("test.db") && !url.includes(":memory:")) {
+  // Guard 3: DATABASE_URL must reference test.db, an owned test-*.db, or :memory:
+  const testDatabaseName = resolved ? basename(resolved) : "";
+  if (!/^test(?:-[A-Za-z0-9_-]+)?\.db$/i.test(testDatabaseName) && !url.includes(":memory:")) {
     console.error(red(`[assert-test-db] FAIL: DATABASE_URL does not reference a test DB`));
     console.error(`[assert-test-db] URL: ${url}`);
-    console.error(`[assert-test-db] Expected file:./test.db or file::memory:`);
+    console.error(`[assert-test-db] Expected file:./test.db, file:./test-<run>.db, or file::memory:`);
     process.exit(1);
   }
 

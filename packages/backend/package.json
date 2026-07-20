@@ -26,8 +26,8 @@
     "backup:verify": "node scripts/backup-restore.mjs verify",
     "backup:restore": "node scripts/backup-restore.mjs restore",
     "restart:safe": "node scripts/backup-restore.mjs create --reason pre-restart",
-    "config:check": "tsx src/config-consistency.ts",
-    "config:check:strict": "STRICT_CONFIG_CHECK=true tsx src/config-consistency.ts",
+    "config:check": "tsx src/config-check-cli.ts",
+    "config:check:strict": "node scripts/config-check-strict.mjs",
     "secret:audit": "node scripts/secret-audit.mjs",
     "secret:audit:strict": "node scripts/secret-audit.mjs --strict"
   },

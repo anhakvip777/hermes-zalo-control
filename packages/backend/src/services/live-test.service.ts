@@ -3,7 +3,10 @@
 // =============================================================================
 
 import { prisma } from "../db.js";
-import { getProductionReadiness } from "./production-readiness.service.js";
+import {
+  getProductionReadiness,
+  REQUIRED_READINESS_CHECK_IDS,
+} from "./production-readiness.service.js";
 import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 import { config } from "../config.js";
 import { normalizeThreadId } from "./thread-id.js";
@@ -58,11 +61,48 @@ const MIN_REASON_LENGTH = 10;
 const MAX_MAX_MESSAGES = 3;
 const MAX_TTL_SECONDS = 3600;
 
+async function expireActiveSessions(): Promise<number> {
+  const now = new Date();
+  const result = await prisma.liveTestSession.updateMany({
+    where: {
+      status: "active",
+      expiresAt: { lt: now },
+    },
+    data: {
+      status: "expired",
+      completedAt: now,
+    },
+  });
+  return result.count;
+}
+
+let liveTestStartTail: Promise<void> = Promise.resolve();
+
+async function withLiveTestStartLock<T>(work: () => Promise<T>): Promise<T> {
+  const previous = liveTestStartTail;
+  let release = () => {};
+  liveTestStartTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
 // ── Start live test ───────────────────────────────────────────────────
 
 export async function startLiveTest(input: StartLiveTestInput): Promise<StartLiveTestResult> {
+  const { maxMessages, ttlSeconds, confirmText, createdBy } = input;
+
+  if (typeof input.threadId !== "string" || input.threadId.trim().length === 0) {
+    return { success: false, error: "threadId must be a non-empty string", errorCode: "INVALID_THREAD_ID" };
+  }
   const threadId = normalizeThreadId(input.threadId);
-  const { maxMessages, ttlSeconds, confirmText, reason, createdBy } = input;
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
 
   // Guard: confirm text
   if (confirmText !== CONFIRM_TEXT) {
@@ -70,17 +110,17 @@ export async function startLiveTest(input: StartLiveTestInput): Promise<StartLiv
   }
 
   // Guard: reason length
-  if (!reason || reason.length < MIN_REASON_LENGTH) {
+  if (reason.length < MIN_REASON_LENGTH) {
     return { success: false, error: `Reason must be at least ${MIN_REASON_LENGTH} characters`, errorCode: "REASON_TOO_SHORT" };
   }
 
   // Guard: maxMessages
-  if (maxMessages < 1 || maxMessages > MAX_MAX_MESSAGES) {
+  if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_MAX_MESSAGES) {
     return { success: false, error: `maxMessages must be 1-${MAX_MAX_MESSAGES}`, errorCode: "INVALID_MAX_MESSAGES" };
   }
 
   // Guard: ttlSeconds
-  if (ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) {
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) {
     return { success: false, error: `ttlSeconds must be 1-${MAX_TTL_SECONDS}`, errorCode: "INVALID_TTL" };
   }
 
@@ -89,11 +129,46 @@ export async function startLiveTest(input: StartLiveTestInput): Promise<StartLiv
     return { success: false, error: "Already in live mode (global dryRun=false). Live test not needed.", errorCode: "ALREADY_LIVE" };
   }
 
-  // Guard: production readiness
+  // Guard: production readiness must be complete and explicitly ready.
   try {
     const readiness = await getProductionReadiness();
-    if (readiness.verdict === "NOT_READY") {
-      return { success: false, error: `Production readiness: NOT_READY. Fix ${readiness.summary.criticalFail + readiness.summary.highFail} critical/high issues first.`, errorCode: "NOT_READY" };
+    const summary = readiness.summary;
+    const checkIds = Array.isArray(readiness.checks) ? readiness.checks.map((check) => check.id) : [];
+    const expectedIds = new Set<string>(REQUIRED_READINESS_CHECK_IDS);
+    const actualIds = new Set(checkIds);
+    const checksValid = Array.isArray(readiness.checks) &&
+      checkIds.length === REQUIRED_READINESS_CHECK_IDS.length &&
+      actualIds.size === checkIds.length &&
+      REQUIRED_READINESS_CHECK_IDS.every((id) => actualIds.has(id)) &&
+      readiness.checks.every((check) => expectedIds.has(check.id) && ["pass", "warn", "fail", "unknown"].includes(check.status));
+    const derivedSummary = checksValid ? {
+      pass: readiness.checks.filter((check) => check.status === "pass").length,
+      warn: readiness.checks.filter((check) => check.status === "warn").length,
+      fail: readiness.checks.filter((check) => check.status === "fail").length,
+      unknown: readiness.checks.filter((check) => check.status === "unknown").length,
+      criticalFail: readiness.checks.filter((check) =>
+        (check.status === "fail" || check.status === "unknown") && check.severity === "critical"
+      ).length,
+      highFail: readiness.checks.filter((check) =>
+        (check.status === "fail" || check.status === "unknown") && check.severity === "high"
+      ).length,
+    } : null;
+    const summaryValid = Boolean(summary && derivedSummary) &&
+      summary.pass === derivedSummary?.pass &&
+      summary.warn === derivedSummary.warn &&
+      summary.fail === derivedSummary.fail &&
+      summary.unknown === derivedSummary.unknown &&
+      summary.criticalFail === derivedSummary.criticalFail &&
+      summary.highFail === derivedSummary.highFail;
+    const ready = readiness.verdict === "READY_FOR_LIVE" &&
+      readiness.dataQuality === "complete" &&
+      readiness.score !== null &&
+      summaryValid &&
+      summary.unknown === 0 &&
+      summary.fail === 0 &&
+      checksValid;
+    if (!ready) {
+      return { success: false, error: "Production readiness is incomplete or not explicitly READY_FOR_LIVE", errorCode: "NOT_READY" };
     }
   } catch {
     return { success: false, error: "Could not check production readiness", errorCode: "READINESS_CHECK_FAILED" };
@@ -107,67 +182,98 @@ export async function startLiveTest(input: StartLiveTestInput): Promise<StartLiv
     ? (() => { try { const v = JSON.parse(allowedSetting.value); return Array.isArray(v) ? v : []; } catch { return []; } })()
     : config.autoReply.allowedThreads;
 
-  if (allowedThreads.length > 0 && !allowedThreads.includes(threadId)) {
+  if (allowedThreads.length === 0 || !allowedThreads.includes(threadId)) {
     return { success: false, error: `Thread ${threadId} is not in allowedThreads`, errorCode: "THREAD_NOT_ALLOWED" };
   }
 
-  // Guard: thread must be DM (user type) — check DB
+  // Guard: live tests require explicit, non-conflicting DM evidence.
   try {
-    const thread = await prisma.zaloThread.findUnique({ where: { id: threadId } });
-    if (thread && thread.type === "group") {
-      return { success: false, error: "Live test is only allowed for DM threads, not groups", errorCode: "GROUP_NOT_ALLOWED" };
-    }
-  } catch { /* if no ZaloThread record, check messages */ }
+    const [thread, messageTypes] = await Promise.all([
+      prisma.zaloThread.findUnique({
+        where: { id: threadId },
+        select: { type: true },
+      }),
+      prisma.message.findMany({
+        where: { threadId },
+        distinct: ["threadType"],
+        select: { threadType: true },
+      }),
+    ]);
+    const knownTypes = new Set(messageTypes.map((message) => message.threadType));
 
-  // Check if thread has group messages
-  try {
-    const groupMsg = await prisma.message.findFirst({ where: { threadId, threadType: "group" } });
-    if (groupMsg) {
-      return { success: false, error: "Thread appears to be a group. Live test only for DM threads.", errorCode: "GROUP_NOT_ALLOWED" };
+    if (!thread) {
+      return { success: false, error: "Live test requires a verified ZaloThread record", errorCode: "THREAD_UNVERIFIED" };
     }
-  } catch { /* fall through */ }
-
-  // Guard: no existing active session for this thread
-  const existing = await prisma.liveTestSession.findFirst({
-    where: { threadId, status: "active" },
-  });
-  if (existing) {
-    return { success: false, error: `Active live test session already exists for thread ${threadId} (${existing.id}). Stop it first.`, errorCode: "SESSION_EXISTS" };
+    if (thread.type !== "user" && thread.type !== "group") {
+      return { success: false, error: "Thread type evidence is invalid", errorCode: "THREAD_UNVERIFIED" };
+    }
+    if (thread.type === "group" || knownTypes.has("group")) {
+      return { success: false, error: "Live test is only allowed for verified DM threads", errorCode: "GROUP_NOT_ALLOWED" };
+    }
+    if ([...knownTypes].some((type) => type !== "user" && type !== "group")) {
+      return { success: false, error: "Thread message evidence contains an unknown type", errorCode: "THREAD_UNVERIFIED" };
+    }
+    if (knownTypes.size > 0 && (!knownTypes.has("user") || knownTypes.size !== 1)) {
+      return { success: false, error: "Thread type evidence conflicts", errorCode: "THREAD_TYPE_CONFLICT" };
+    }
+  } catch {
+    return { success: false, error: "Could not verify thread type evidence", errorCode: "THREAD_VERIFICATION_FAILED" };
   }
 
-  // Create session
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+  return withLiveTestStartLock(async () => {
+    try {
+      await expireActiveSessions();
+    } catch {
+      return { success: false, error: "Could not persist expired live test session cleanup", errorCode: "SESSION_CLEANUP_FAILED" };
+    }
 
-  const session = await prisma.liveTestSession.create({
-    data: {
-      threadId,
-      maxMessages,
-      sentCount: 0,
-      ttlSeconds,
-      expiresAt,
-      status: "active",
-      createdBy: createdBy ?? "admin",
-      reason,
-    },
+    // System-wide invariant: at most one controlled live-test session is active.
+    const existing = await prisma.liveTestSession.findFirst({
+      where: { status: "active" },
+    });
+    if (existing) {
+      return {
+        success: false,
+        error: `Active live test session already exists for thread ${existing.threadId} (${existing.id}). Stop it first.`,
+        errorCode: "SESSION_EXISTS",
+      };
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+    const session = await prisma.$transaction(async (tx) => {
+      const created = await tx.liveTestSession.create({
+        data: {
+          threadId,
+          maxMessages,
+          sentCount: 0,
+          ttlSeconds,
+          expiresAt,
+          status: "active",
+          createdBy: createdBy ?? "admin",
+          reason,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: "live_test_started",
+          entityType: "LiveTestSession",
+          entityId: created.id,
+          actor: createdBy ?? "admin",
+          details: JSON.stringify({ threadId, maxMessages, ttlSeconds, reason }),
+        },
+      });
+
+      return created;
+    });
+
+    return {
+      success: true,
+      sessionId: session.id,
+      expiresAt: expiresAt.toISOString(),
+    };
   });
-
-  // Audit
-  await prisma.auditLog.create({
-    data: {
-      action: "live_test_started",
-      entityType: "LiveTestSession",
-      entityId: session.id,
-      actor: createdBy ?? "admin",
-      details: JSON.stringify({ threadId, maxMessages, ttlSeconds, reason }),
-    },
-  });
-
-  return {
-    success: true,
-    sessionId: session.id,
-    expiresAt: expiresAt.toISOString(),
-  };
 }
 
 // ── Stop live test ────────────────────────────────────────────────────
@@ -211,23 +317,9 @@ export async function getLiveTestStatus(): Promise<LiveTestStatusResult> {
     orderBy: { createdAt: "desc" },
   });
 
-  // Auto-expire if TTL passed
+  // Status reads are observational. Expiry persistence remains in the
+  // outbound decision/cleanup paths, not in dashboard polling.
   if (session && new Date() > session.expiresAt) {
-    await prisma.liveTestSession.update({
-      where: { id: session.id },
-      data: { status: "expired", completedAt: new Date() },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        action: "live_test_expired",
-        entityType: "LiveTestSession",
-        entityId: session.id,
-        actor: "system",
-        details: JSON.stringify({ threadId: session.threadId, sentCount: session.sentCount }),
-      },
-    });
-
     return { active: false, session: null, dryRun: getCurrentEffectiveDryRun() };
   }
 
@@ -261,7 +353,7 @@ export async function getLiveTestStatus(): Promise<LiveTestStatusResult> {
  * Check if a message to this thread should be sent live (bypass dry-run).
  *
  * Logic:
- * 1. If global dryRun=false → live everywhere (Safety Mode handles this)
+ * 1. If global dryRun=false → fail closed (global live is unsupported)
  * 2. Else if active liveTestSession for this thread with quota remaining → live
  * 3. Else → dryRun
  */
@@ -273,9 +365,10 @@ export async function shouldSendLiveForThread(threadId: string): Promise<{
   const tid = normalizeThreadId(threadId);
   const globalDryRun = getCurrentEffectiveDryRun();
 
-  // Safety Mode: global live
+  // Global live is unsupported. A false dryRun value must fail closed rather
+  // than creating an unscoped bypass; LiveTestSession is the only live path.
   if (!globalDryRun) {
-    return { live: true, reason: "global_live" };
+    return { live: false, reason: "global_live_disabled" };
   }
 
   // Check for active live test session
@@ -376,17 +469,7 @@ export async function recordLiveTestSent(sessionId: string, threadId: string, me
  */
 export async function cleanupExpiredSessions(): Promise<number> {
   try {
-    const result = await prisma.liveTestSession.updateMany({
-      where: {
-        status: "active",
-        expiresAt: { lt: new Date() },
-      },
-      data: {
-        status: "expired",
-        completedAt: new Date(),
-      },
-    });
-    return result.count;
+    return await expireActiveSessions();
   } catch {
     return 0;
   }

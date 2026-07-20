@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // ═════════════════════════════════════════════════════════
 const mockConfig = vi.hoisted(() => ({
   nodeEnv: "test",
+  database: { url: "file:./test.db" },
   zalo: {
     sessionDir: "/tmp/test-zalo-session",
     dryRun: true,
@@ -41,6 +42,7 @@ const prismaMocks = {
     findMany: vi.fn(async () => []),
   },
   outboundRecord: { count: vi.fn(async () => 0) },
+  runtimeSetting: { findMany: vi.fn(async () => []) },
   $queryRaw: vi.fn(async () => [{ "1": 1 }]),
 };
 
@@ -66,7 +68,7 @@ const gatewayMocks = vi.hoisted(() => {
     })),
     isConnected: vi.fn(() => connected),
     setConnected: (c: boolean, l: boolean) => { connected = c; listenerActive = l; },
-    listenerActive: true,
+    isListenerActive: vi.fn(() => listenerActive),
   };
 });
 
@@ -237,7 +239,7 @@ describe("Batch 17 — Production Readiness Gate", () => {
 
     const groupCheck = r1.checks.find(c => c.id === "safety.groupRisk");
     expect(groupCheck).toBeDefined();
-    expect(groupCheck!.status).toBe("warn");
+    expect(groupCheck!.status).toBe("fail");
     // In dry-run, high risk groups are warnings not fails
     // But test env has no backups → backup check FAILS → overall NOT_READY
     // So we only check that the group risk check itself is "warn" not "fail"
@@ -293,7 +295,7 @@ describe("Batch 17 — Production Readiness Gate", () => {
     const { getProductionReadiness } = await import("../services/production-readiness.service.js");
     const result = await getProductionReadiness();
 
-    const docCheck = result.checks.find(c => c.id === "docs.disabled");
+    const docCheck = result.checks.find(c => c.id === "docs.status");
     expect(docCheck).toBeDefined();
     expect(docCheck!.status).toBe("pass");
   });
@@ -315,7 +317,7 @@ describe("Batch 17 — Production Readiness Gate", () => {
     const { getProductionReadiness } = await import("../services/production-readiness.service.js");
     const result = await getProductionReadiness();
 
-    const validStatuses = ["pass", "warn", "fail"];
+    const validStatuses = ["pass", "warn", "fail", "unknown"];
     const validSeverities = ["critical", "high", "medium", "low"];
 
     for (const check of result.checks) {
@@ -330,8 +332,61 @@ describe("Batch 17 — Production Readiness Gate", () => {
     const { getProductionReadiness } = await import("../services/production-readiness.service.js");
     const result = await getProductionReadiness();
 
-    expect(result.score).toBeGreaterThanOrEqual(0);
-    expect(result.score).toBeLessThanOrEqual(100);
+    if (result.dataQuality === "complete") {
+      expect(result.score).not.toBeNull();
+      expect(result.score!).toBeGreaterThanOrEqual(0);
+      expect(result.score!).toBeLessThanOrEqual(100);
+    } else {
+      expect(result.score).toBeNull();
+      expect(result.verdict).toBe("NOT_READY");
+    }
+  });
+
+  it("12a. missing dependency evidence is UNKNOWN, incomplete, and NOT_READY", async () => {
+    const { getHeartbeatSummary } = await import("../services/heartbeat.service.js");
+    (getHeartbeatSummary as any).mockResolvedValueOnce({});
+
+    const { getProductionReadiness } = await import("../services/production-readiness.service.js");
+    const result = await getProductionReadiness();
+
+    expect(result.summary.unknown).toBeGreaterThan(0);
+    expect(result.dataQuality).toBe("incomplete");
+    expect(result.score).toBeNull();
+    expect(result.verdict).toBe("NOT_READY");
+  });
+
+  it("12b. required checks are unique and output order is stable", async () => {
+    const { getProductionReadiness } = await import("../services/production-readiness.service.js");
+    const first = await getProductionReadiness();
+    const second = await getProductionReadiness();
+
+    const firstIds = first.checks.map((check) => check.id);
+    expect(new Set(firstIds).size).toBe(firstIds.length);
+    expect(second.checks.map((check) => check.id)).toEqual(firstIds);
+  });
+
+  it("12c. unknown critical/high checks contribute to canonical severity totals", async () => {
+    const { getProductionReadiness } = await import("../services/production-readiness.service.js");
+    const baseline = await getProductionReadiness();
+    const { getHeartbeatSummary } = await import("../services/heartbeat.service.js");
+    const heartbeatMock = getHeartbeatSummary as any;
+    heartbeatMock
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const result = await getProductionReadiness();
+
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "health.backend", status: "unknown", severity: "critical" }),
+      expect.objectContaining({ id: "health.worker", status: "unknown", severity: "high" }),
+      expect.objectContaining({ id: "errors.heartbeats", status: "unknown", severity: "critical" }),
+    ]));
+    expect(result.summary.criticalFail).toBe(baseline.summary.criticalFail + 2);
+    expect(result.summary.highFail).toBe(baseline.summary.highFail + 1);
+    expect(result.dataQuality).toBe("incomplete");
+    expect(result.score).toBeNull();
+    expect(result.verdict).toBe("NOT_READY");
   });
 
   it("13. Summary counts match actual checks", async () => {
@@ -341,11 +396,16 @@ describe("Batch 17 — Production Readiness Gate", () => {
     const actualPass = result.checks.filter(c => c.status === "pass").length;
     const actualWarn = result.checks.filter(c => c.status === "warn").length;
     const actualFail = result.checks.filter(c => c.status === "fail").length;
-    const actualCritFail = result.checks.filter(c => c.status === "fail" && c.severity === "critical").length;
+    const actualUnknown = result.checks.filter(c => c.status === "unknown").length;
+    const actualCritFail = result.checks.filter(c => (c.status === "fail" || c.status === "unknown") && c.severity === "critical").length;
+    const actualHighFail = result.checks.filter(c => (c.status === "fail" || c.status === "unknown") && c.severity === "high").length;
 
     expect(result.summary.pass).toBe(actualPass);
     expect(result.summary.warn).toBe(actualWarn);
     expect(result.summary.fail).toBe(actualFail);
+    expect(result.summary.unknown).toBe(actualUnknown);
     expect(result.summary.criticalFail).toBe(actualCritFail);
+    expect(result.summary.highFail).toBe(actualHighFail);
+    expect(result.dataQuality).toBe(actualUnknown === 0 ? "complete" : "incomplete");
   });
 });

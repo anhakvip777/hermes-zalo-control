@@ -8,7 +8,8 @@ import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { getZaloGateway, findLatestSessionBackup, type ZaloGatewayStatus } from "./zalo-gateway.service.js";
 import { getCurrentEffectiveDryRun, getEffectiveCooldownSeconds, getAllRuntimeSettings } from "./runtime-config.service.js";
-import { getHeartbeatSummary, heartbeatOk } from "./heartbeat.service.js";
+import { getHeartbeatSummary } from "./heartbeat.service.js";
+import { normalizeThreadId } from "./thread-id.js";
 // Session safety: info extracted below in getSessionInfo() — no external dep
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -161,8 +162,8 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
   } catch { /* directory may not exist */ }
 
   // Mask the path: only show last 2 segments
-  const parts = sessionPath.split("/");
-  const maskedPath = parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : sessionPath;
+  const parts = sessionPath.split(/[\\/]+/).filter(Boolean);
+  const maskedPath = parts.length >= 2 ? `…/${parts.slice(-2).join("/")}` : "…/session";
 
   const gw = getZaloGateway();
   const gwStatus = gw.getStatus();
@@ -202,14 +203,9 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
   const gw = getZaloGateway();
   const gwStatus = gw.getStatus();
 
-  // Refresh heartbeats when connected; when disconnected let them go stale/down naturally
-  if (gwStatus.connected) {
-    heartbeatOk("zaloConnection", { connected: true, via: "ops/status" }).catch(() => {});
-  }
-  const listenerIsActive: boolean = (gw as any).listenerActive === true;
-  if (gwStatus.connected && listenerIsActive) {
-    heartbeatOk("zaloListener", { via: "ops/status" }).catch(() => {});
-  }
+  // This observational endpoint must not write heartbeat evidence. The
+  // gateway lifecycle is the producer of connection/listener heartbeats.
+  const listenerIsActive = gw.isListenerActive();
 
   // Last message timestamp
   const lastMessage = await prisma.message.findFirst({
@@ -268,13 +264,13 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
     lastConnectedAt: gwStatus.lastConnectedAt,
     lastError: gwStatus.lastError,
     lastMessageAt: lastMessage?.receivedAt?.toISOString() ?? null,
-    listenerActive: (gw as any).listenerActive === true,
+    listenerActive: listenerIsActive,
     dryRun: getCurrentEffectiveDryRun(),
     dryRunSource,
     allowedThreads,
     cooldownSeconds: getEffectiveCooldownSeconds(),
 
-    session: getSessionInfo(),
+    session: sessionInfo,
 
     heartbeats: {
       // When disconnected, connection/listener heartbeats are always "down" regardless of DB cache
@@ -455,7 +451,13 @@ export function getQRStatus(): QRStatus {
 // ── Test DM (dry-run only) ───────────────────────────────────────────
 
 export async function testDM(input: TestDMInput, userId?: string): Promise<TestDMResult> {
-  const { threadId, content } = input;
+  const threadId = normalizeThreadId(input.threadId);
+  const { content } = input;
+
+  // Guard 0: a missing/blank thread must never reach settings or evidence writes.
+  if (!threadId) {
+    return { allowed: false, reason: "MISSING_THREAD_ID" };
+  }
 
   // Guard 1: must be dryRun=true
   if (!getCurrentEffectiveDryRun()) {
@@ -465,11 +467,19 @@ export async function testDM(input: TestDMInput, userId?: string): Promise<TestD
   // Guard 2: threadId must be in allowedThreads
   const settingsArr = await getAllRuntimeSettings();
   const allowedSetting = settingsArr.find((s: any) => s.key === "autoReply.allowedThreads");
-  const allowedThreads: string[] = allowedSetting?.value
-    ? (() => { try { const v = JSON.parse(allowedSetting.value); return Array.isArray(v) ? v : []; } catch { return []; } })()
-    : config.autoReply.allowedThreads;
+  let rawAllowedThreads: unknown = config.autoReply.allowedThreads;
+  if (allowedSetting !== undefined) {
+    try {
+      rawAllowedThreads = JSON.parse(allowedSetting.value);
+    } catch {
+      rawAllowedThreads = [];
+    }
+  }
+  const allowedThreads: string[] = Array.isArray(rawAllowedThreads)
+    ? rawAllowedThreads.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
 
-  if (allowedThreads.length > 0 && !allowedThreads.includes(threadId)) {
+  if (allowedThreads.length === 0 || !allowedThreads.includes(threadId)) {
     return { allowed: false, reason: `THREAD_NOT_ALLOWED: threadId ${threadId} not in allowedThreads [${allowedThreads.join(", ")}]` };
   }
 

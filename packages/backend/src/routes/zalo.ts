@@ -9,7 +9,7 @@ import { getCurrentEffectiveDryRun } from "../services/runtime-config.service.js
 import { sendOutbound } from "../services/outbound-dispatcher.service.js";
 import { normalizeThreadId } from "../services/thread-id.js";
 import { prisma } from "../db.js";
-import { adminAuth } from "../middleware/auth.js";
+import { sendApiError } from "../http/api-error.js";
 
 /**
  * Validate that a file path is within the allowed media base directory.
@@ -42,14 +42,8 @@ function validateSafeMediaPath(filePath: string): { allowed: false; error: strin
 }
 
 export async function zaloRoutes(app: FastifyInstance) {
-  // Guard: all routes in this plugin require admin authentication.
-  // Fastify register-level preHandler options do NOT propagate into plugins —
-  // addHook is the correct pattern to protect an entire plugin scope.
-  app.addHook("preHandler", adminAuth);
-  // Protect all /api/zalo/* routes with admin auth
-  // Note: Fastify register-level preHandler options are not propagated into plugins;
-  // addHook ensures the guard runs for every route in this plugin scope.
-  app.addHook("preHandler", adminAuth);
+  // Authentication is owned by registerProtected() in app.ts. Keeping it at
+  // that boundary prevents duplicate hooks and weaker route-local checks.
   // ═════════════════════════════════════════════════════════════════
   // GET /api/zalo/status
   // ═════════════════════════════════════════════════════════════════
@@ -74,7 +68,7 @@ export async function zaloRoutes(app: FastifyInstance) {
       return { data: result };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return reply.status(500).send({ error: "LoginFailed", message: msg });
+      return sendApiError(reply, 500, "LOGIN_FAILED", msg);
     }
   });
 
@@ -99,15 +93,10 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // POST /api/zalo/session/save (S4: admin-only session persistence)
   // ═════════════════════════════════════════════════════════════════
-  app.post("/zalo/session/save", async (request, reply) => {
-    // Admin-only: check auth via basic auth header
-    const auth = request.headers.authorization;
-    if (!auth || !auth.startsWith("Basic ")) {
-      return reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Admin authentication required" } });
-    }
+  app.post("/zalo/session/save", async (_request, reply) => {
     const result = await getZaloGateway().persistSession();
     if (!result.ok) {
-      return reply.status(400).send({ ok: false, error: result.message });
+      return sendApiError(reply, 400, "SESSION_PERSIST_FAILED", result.message);
     }
     return {
       ok: true,
@@ -214,47 +203,74 @@ export async function zaloRoutes(app: FastifyInstance) {
   // POST /api/zalo/send-media
   // ═════════════════════════════════════════════════════════════════
   app.post("/zalo/send-media", async (request, reply) => {
+    if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "Media payload must be a JSON object");
+    }
+
     const body = request.body as {
-      type: "image" | "file";
-      path: string;
-      threadId: string;
+      type?: "image" | "file";
+      path?: string;
+      threadId?: string;
       threadType?: "user" | "group";
       caption?: string;
     };
 
-    if (!body.type || !body.path || !body.threadId) {
-      reply.status(400);
-      return { success: false, error: "Missing required fields: type, path, threadId" };
+    const bodyKeys = Object.keys(body);
+    const allowedKeys = new Set(["type", "path", "threadId", "threadType", "caption"]);
+    const unknownKeys = bodyKeys.filter((key) => !allowedKeys.has(key));
+    if (unknownKeys.length > 0) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "Unknown media fields", { unknownKeys });
+    }
+    if (
+      !body.type ||
+      !["image", "file"].includes(body.type) ||
+      typeof body.path !== "string" ||
+      body.path.trim().length === 0 ||
+      typeof body.threadId !== "string" ||
+      normalizeThreadId(body.threadId).length === 0
+    ) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "Required media fields are invalid");
+    }
+    if (body.threadType !== undefined && !["user", "group"].includes(body.threadType)) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "threadType must be user or group");
+    }
+    if (body.caption !== undefined && typeof body.caption !== "string") {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "caption must be a string");
     }
 
+    // The required-field guard above narrows these values at runtime. Keep local
+    // constants so TypeScript and the dispatcher contract share that invariant.
+    const mediaPath = body.path;
+    const threadId = normalizeThreadId(body.threadId);
+    const mediaType = body.type;
+
     // Safe media path validation
-    const pathCheck = validateSafeMediaPath(body.path);
+    const pathCheck = validateSafeMediaPath(mediaPath);
     if (!pathCheck.allowed) {
-      reply.status(403);
-      return { success: false, error: (pathCheck as { allowed: false; error: string }).error, errorCode: "MEDIA_PATH_BLOCKED" };
+      return sendApiError(reply, 403, "MEDIA_PATH_BLOCKED", "Media path is not allowed");
     }
 
     const threadType = body.threadType || "user";
-    const safeFilename = body.path.split("/").pop() || body.path;
+    const safeFilename = mediaPath.split(/[\\/]/).pop() || mediaPath;
 
     const result = await sendOutbound({
       kind: "media",
-      threadId: normalizeThreadId(body.threadId),
+      threadId,
       threadType: threadType as "user" | "group",
       source: "manual_media",
-      mediaType: body.type,
+      mediaType,
       filePath: pathCheck.resolvedPath,
       filename: safeFilename,
       caption: body.caption,
       metadata: {
         route: "zalo/send-media",
-        mediaType: body.type,
+        mediaType,
         basename: safeFilename,
       },
     });
 
     return {
-      success: result.success || result.dryRun,
+      success: result.success,
       messageId: result.sentMessageId ?? null,
       sentMessageId: result.sentMessageId ?? null,
       decision: result.decision === "allow" ? (result.dryRun ? "dry_run" : "sent") : result.decision,
@@ -568,13 +584,14 @@ export async function zaloRoutes(app: FastifyInstance) {
     return getQRStatus();
   });
 
-  app.post("/zalo/ops/test-dm", async (request) => {
-    const body = request.body as { threadId: string; content?: string; userId?: string };
-    if (!body.threadId) {
-      return { allowed: false, reason: "MISSING_THREAD_ID" };
+  app.post("/zalo/ops/test-dm", async (request, reply) => {
+    const body = request.body as { threadId?: unknown; content?: string; userId?: string } | null | undefined;
+    const threadId = normalizeThreadId(body?.threadId);
+    if (!threadId) {
+      return sendApiError(reply, 400, "VALIDATION_ERROR", "threadId is required");
     }
     const { testDM } = await import("../services/zalo-ops.service.js");
-    return testDM({ threadId: body.threadId, content: body.content }, body.userId);
+    return testDM({ threadId, content: body?.content }, body?.userId);
   });
 
 

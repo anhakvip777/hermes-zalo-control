@@ -1,15 +1,12 @@
 /**
  * Runtime Config Service — DB-stored runtime overrides cho auto-reply config.
  *
- * Cho phép admin toggle dryRun=true/false qua API mà không cần restart.
- * Có xác nhận, audit log, backup tự động trước khi bật live.
+ * Cho phép admin đưa hệ thống về dryRun=true qua API mà không cần restart.
+ * Global live không được hỗ trợ; LiveTestSession là bypass duy nhất theo thread.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { prisma } from "../db.js";
-import { runConfigChecks } from "../config-consistency.js";
 import { config } from "../config.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -72,9 +69,15 @@ export async function initRuntimeConfig(): Promise<void> {
   }
 }
 
-/** Get current effective dryRun (sync — safe for all code paths). */
+/**
+ * Get current effective dryRun (sync — safe for all code paths).
+ *
+ * Global live is intentionally unsupported. A stale runtime row or environment
+ * value of false is configuration evidence only; it is never send authority.
+ * LiveTestSession remains the sole thread-scoped dry-run bypass.
+ */
 export function getCurrentEffectiveDryRun(): boolean {
-  return _cachedDryRun ?? config.autoReply.dryRun;
+  return true;
 }
 
 /** DryRun decision with source tracking */
@@ -98,7 +101,6 @@ export function getEffectiveDryRunInfo(): EffectiveDryRunInfo {
  * Dùng hàm này ở mọi nơi cần biết dryRun thực tế.
  */
 export async function getEffectiveAutoReplyConfig(): Promise<EffectiveAutoReplyConfig> {
-  let dryRun = config.autoReply.dryRun;
   let dryRunSource: "env" | "runtime" = "env";
 
   try {
@@ -106,7 +108,6 @@ export async function getEffectiveAutoReplyConfig(): Promise<EffectiveAutoReplyC
       where: { key: KEY_AUTO_REPLY_DRY_RUN },
     });
     if (runtime) {
-      dryRun = runtime.value === "true";
       dryRunSource = "runtime";
     }
   } catch {
@@ -115,7 +116,7 @@ export async function getEffectiveAutoReplyConfig(): Promise<EffectiveAutoReplyC
 
   return {
     enabled: config.autoReply.enabled,
-    dryRun,
+    dryRun: true,
     allowedThreads: config.autoReply.allowedThreads,
     cooldownSeconds: config.autoReply.cooldownSeconds,
     groupReplyWindowSeconds: config.autoReply.groupReplyWindowSeconds,
@@ -130,7 +131,7 @@ export async function getEffectiveAutoReplyConfig(): Promise<EffectiveAutoReplyC
 export function getEffectiveAutoReplyConfigSync(): EffectiveAutoReplyConfig {
   return {
     enabled: config.autoReply.enabled,
-    dryRun: config.autoReply.dryRun,
+    dryRun: true,
     allowedThreads: config.autoReply.allowedThreads,
     cooldownSeconds: config.autoReply.cooldownSeconds,
     groupReplyWindowSeconds: config.autoReply.groupReplyWindowSeconds,
@@ -163,64 +164,25 @@ export async function setRuntimeConfig(
 ): Promise<SetRuntimeConfigResult> {
   const { dryRun, confirmText, reason, ipAddress, userAgent } = input;
 
-  // ── 1. Validate confirm text ───────────────────────────────────
+  // Global live is intentionally unavailable. Controlled LiveTestSession is
+  // the only supported dry-run bypass and remains scoped by thread/quota/TTL.
   if (dryRun === false) {
-    // Switching to LIVE mode
-    if (confirmText !== "ENABLE LIVE MODE") {
-      return {
-        success: false,
-        error: "Confirmation text must be exactly 'ENABLE LIVE MODE' to enable live mode",
-        errorCode: "BAD_CONFIRM_TEXT",
-      };
-    }
-    if (!reason || reason.trim().length < 10) {
-      return {
-        success: false,
-        error: "Reason is required (minimum 10 characters) to enable live mode",
-        errorCode: "REASON_TOO_SHORT",
-      };
-    }
-
-    // Check config consistency
-    const configCheck = runConfigChecks();
-    if (configCheck.status === "CONFIG_ERROR") {
-      return {
-        success: false,
-        error: `Cannot enable live mode while config has errors: ${configCheck.summary.error} error(s)`,
-        errorCode: "CONFIG_ERROR",
-      };
-    }
-
-    // Check recent backup
-    const hasRecentBackup = await checkRecentBackupInDb();
-    if (!hasRecentBackup) {
-      // Try to create backup automatically
-      const backupName = await createAutoBackup();
-      if (!backupName) {
-        return {
-          success: false,
-          error: "No recent backup found and automatic backup failed — cannot enable live mode safely",
-          errorCode: "NO_BACKUP",
-        };
-      }
-      // Proceed with the auto-created backup
-    }
-  } else {
-    // Switching to DRY RUN mode
-    if (confirmText !== "ENABLE DRY RUN") {
-      return {
-        success: false,
-        error: "Confirmation text must be exactly 'ENABLE DRY RUN' to enable dry-run mode",
-        errorCode: "BAD_CONFIRM_TEXT",
-      };
-    }
+    return {
+      success: false,
+      error: "Global live mode is disabled. Use a controlled live-test session.",
+      errorCode: "GLOBAL_LIVE_DISABLED",
+    };
   }
 
-  // ── 2. Create backup before switching to live ───────────────────
-  let backupName: string | undefined;
-  if (dryRun === false) {
-    backupName = await createAutoBackup() ?? undefined;
+  if (confirmText !== "ENABLE DRY RUN") {
+    return {
+      success: false,
+      error: "Confirmation text must be exactly 'ENABLE DRY RUN' to enable dry-run mode",
+      errorCode: "BAD_CONFIRM_TEXT",
+    };
   }
+
+  const backupName: string | undefined = undefined;
 
   // ── 3. Get current value for audit ────────────────────────────
   let oldValue = String(config.autoReply.dryRun);
@@ -314,59 +276,6 @@ export async function getRuntimeConfigAudit(limit = 20) {
     }));
   } catch {
     return [];
-  }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-async function checkRecentBackupInDb(): Promise<boolean> {
-  const oneDayAgo = new Date(Date.now() - 24 * 3600 * 1000);
-  try {
-    const count = await prisma.runtimeConfigAudit.count({
-      where: {
-        backupName: { not: null },
-        createdAt: { gte: oneDayAgo },
-      },
-    });
-    return count > 0;
-  } catch {
-    return false;
-  }
-}
-
-async function createAutoBackup(): Promise<string | null> {
-  try {
-    const { execSync } = await import("node:child_process");
-    const cwd = resolve(process.cwd(), "packages", "backend");
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[:.]/g, "-")
-      .slice(0, 19);
-    const backupName = `auto-runtime-config-backup-${timestamp}.sqlite`;
-
-    const dbPath = resolve(cwd, "prisma", "dev.db");
-    const backupDir = resolve(cwd, "backups", "system");
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(backupDir, { recursive: true });
-
-    // Simple file copy for SQLite
-    const { copyFileSync } = await import("node:fs");
-    const destPath = resolve(backupDir, backupName);
-    copyFileSync(dbPath, destPath);
-
-    // H1: Backup session from canonical path — not relative cwd/zalo-session
-    const sessionSrc = resolve(config.zalo.sessionDir, "zalo-session.json");
-    if (existsSync(sessionSrc)) {
-      const sessionDest = resolve(backupDir, `${backupName}.session.json`);
-      copyFileSync(sessionSrc, sessionDest);
-    }
-
-    console.log(`[runtime-config] Auto-backup created: ${backupName}`);
-    return backupName;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[runtime-config] Auto-backup failed: ${msg}`);
-    return null;
   }
 }
 

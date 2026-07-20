@@ -12,7 +12,26 @@ import type { MemoryDeps, MessageQuery } from "../services/tools/memory/deps.js"
 import type { ToolContext } from "../services/tool-gateway/types.js";
 
 function ctx(o: Partial<ToolContext> = {}): ToolContext {
-  return { agentName: "hermes", threadId: "t1", threadType: "user", role: "basic_chat", principalId: "p1", senderId: "p1", ...o };
+  return {
+    agentName: "hermes",
+    allowedTools: [
+      "memory.getRecentMessages",
+      "memory.searchMessages",
+      "memory.getThreadHistory",
+      "memory.getOutboundRecords",
+      "memory.getAgentTasks",
+      "rules.explainForMessage",
+      "access.getUserRole",
+      "system.getRuntimeStatus",
+      "memory.retrievalAnswer",
+    ],
+    threadId: "t1",
+    threadType: "user",
+    role: "basic_chat",
+    principalId: "p1",
+    senderId: "p1",
+    ...o,
+  };
 }
 function gw(registry: ToolRegistry, sink: InMemoryToolEvidenceSink) {
   return new ToolGateway({

@@ -147,26 +147,32 @@ export async function getAllHeartbeats(): Promise<{
   staleThresholdSeconds: number;
   items: HeartbeatEntry[];
 }> {
-  // First, mark any stale heartbeats
-  const staleCount = await checkAndMarkStale();
-
+  // Dashboard reads are observational. Stale status is derived below without
+  // mutating persisted producer evidence.
   const rows = await prisma.systemHeartbeat.findMany({
     where: { name: { in: [...HEARTBEAT_KEYS] } },
   });
 
   const now = Date.now();
-  const items: HeartbeatEntry[] = rows.map((row) => ({
-    name: row.name,
-    status: row.status as HeartbeatStatus,
-    lastBeatAt: row.lastBeatAt?.toISOString() ?? null,
-    lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
-    lastErrorAt: row.lastErrorAt?.toISOString() ?? null,
-    lastError: row.lastError,
-    ageSeconds: row.lastBeatAt
-      ? Math.round((now - row.lastBeatAt.getTime()) / 1000)
-      : null,
-    metadata: row.metadata ? safeParseJson(row.metadata) : null,
-  }));
+  const items: HeartbeatEntry[] = rows.map((row) => {
+    const ageSeconds = row.lastBeatAt
+      ? Math.max(0, Math.round((now - row.lastBeatAt.getTime()) / 1000))
+      : null;
+    const persistedStatus = row.status as HeartbeatStatus;
+    const effectiveStatus = persistedStatus === "ok" && ageSeconds !== null && ageSeconds > STALE_THRESHOLD_SECONDS
+      ? "stale"
+      : persistedStatus;
+    return {
+      name: row.name,
+      status: effectiveStatus,
+      lastBeatAt: row.lastBeatAt?.toISOString() ?? null,
+      lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
+      lastErrorAt: row.lastErrorAt?.toISOString() ?? null,
+      lastError: row.lastError,
+      ageSeconds,
+      metadata: row.metadata ? safeParseJson(row.metadata) : null,
+    };
+  });
 
   // Fill in missing keys with default "down" status
   for (const key of HEARTBEAT_KEYS) {
@@ -220,16 +226,20 @@ export async function getHeartbeatSummary(): Promise<Record<string, HeartbeatEnt
   for (const key of HEARTBEAT_KEYS) {
     const row = rows.find((r) => r.name === key);
     if (row) {
+      const ageSeconds = row.lastBeatAt
+        ? Math.max(0, Math.round((now - row.lastBeatAt.getTime()) / 1000))
+        : null;
+      const persistedStatus = row.status as HeartbeatStatus;
       result[key] = {
         name: row.name,
-        status: row.status as HeartbeatStatus,
+        status: persistedStatus === "ok" && ageSeconds !== null && ageSeconds > STALE_THRESHOLD_SECONDS
+          ? "stale"
+          : persistedStatus,
         lastBeatAt: row.lastBeatAt?.toISOString() ?? null,
         lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
         lastErrorAt: row.lastErrorAt?.toISOString() ?? null,
         lastError: row.lastError,
-        ageSeconds: row.lastBeatAt
-          ? Math.round((now - row.lastBeatAt.getTime()) / 1000)
-          : null,
+        ageSeconds,
         metadata: row.metadata ? safeParseJson(row.metadata) : null,
       };
     } else {

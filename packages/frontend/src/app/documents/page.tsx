@@ -3,13 +3,10 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   listDocuments,
-  ingestDocument,
-  getDocument,
   getDocumentMarkdown,
   getDocumentChunks,
+  getDocumentJobs,
   askDocument,
-  reingestDocument,
-  deleteDocument,
   type DocumentOutput,
   type DocumentChunkOutput,
   type AskResult,
@@ -38,23 +35,17 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Ingest form
-  const [ingestPath, setIngestPath] = useState("/tmp/hermes-media/documents/");
-  const [ingesting, setIngesting] = useState(false);
-
   // Detail view
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [chunks, setChunks] = useState<DocumentChunkOutput[]>([]);
   const [jobs, setJobs] = useState<{ id: string; status: string; errorCode?: string | null }[]>([]);
+  const [jobsError, setJobsError] = useState<string | null>(null);
 
   // Ask panel
   const [question, setQuestion] = useState("");
   const [askResult, setAskResult] = useState<AskResult | null>(null);
   const [asking, setAsking] = useState(false);
-
-  // Action states
-  const [actioning, setActioning] = useState<string | null>(null);
 
   const fetchDocs = useCallback(async () => {
     try {
@@ -71,72 +62,32 @@ export default function DocumentsPage() {
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
-  const handleIngest = async () => {
-    if (!ingestPath.trim()) return;
-    setIngesting(true);
-    setError(null);
-    try {
-      await ingestDocument({ path: ingestPath.trim(), source: "manual" });
-      setIngestPath("");
-      fetchDocs();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Ingest failed");
-    } finally {
-      setIngesting(false);
-    }
-  };
-
   const viewDetail = async (docId: string) => {
     if (selectedDoc === docId) {
-      setSelectedDoc(null); setMarkdown(null); setChunks([]); setJobs([]); setAskResult(null);
+      setSelectedDoc(null); setMarkdown(null); setChunks([]); setJobs([]); setJobsError(null); setAskResult(null);
       return;
     }
     setSelectedDoc(docId);
     setAskResult(null);
-    try {
-      const [mdRes, chRes, docRes] = await Promise.all([
-        getDocumentMarkdown(docId).catch(() => ({ data: null })),
-        getDocumentChunks(docId).catch(() => ({ data: [] })),
-        getDocument(docId).catch(() => ({ data: null })),
-      ]);
-      setMarkdown(mdRes.data ?? null);
-      setChunks(chRes.data ?? []);
-      if (docRes.data) fetchJobs(docId);
-    } catch {
-      setMarkdown(null); setChunks([]); setJobs([]);
+    setJobsError(null);
+    const [mdResult, chunksResult, jobsResult] = await Promise.allSettled([
+      getDocumentMarkdown(docId),
+      getDocumentChunks(docId),
+      getDocumentJobs(docId),
+    ]);
+
+    setMarkdown(mdResult.status === "fulfilled" ? mdResult.value.data ?? null : null);
+    setChunks(chunksResult.status === "fulfilled" && Array.isArray(chunksResult.value.data)
+      ? chunksResult.value.data
+      : []);
+    setJobs(jobsResult.status === "fulfilled" && Array.isArray(jobsResult.value.data)
+      ? jobsResult.value.data
+      : []);
+
+    const failures = [mdResult, chunksResult, jobsResult].filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      setJobsError("Một phần chi tiết tài liệu không tải được. Dữ liệu thiếu được hiển thị là UNKNOWN.");
     }
-  };
-
-  const fetchJobs = async (docId: string) => {
-    try {
-      const res = await fetch(`/api/documents/${docId}/jobs`);
-      const json = await res.json();
-      setJobs(json.data ?? []);
-    } catch { setJobs([]); }
-  };
-
-  const handleReingest = async (docId: string) => {
-    if (!confirm("Re-ingest tài liệu này? Job mới sẽ được tạo mà không xóa dữ liệu cũ.")) return;
-    setActioning(docId);
-    try {
-      await reingestDocument(docId);
-      fetchDocs();
-      if (selectedDoc === docId) fetchJobs(docId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Re-ingest failed");
-    } finally { setActioning(null); }
-  };
-
-  const handleDelete = async (docId: string) => {
-    if (!confirm("Xóa tài liệu này? Tất cả chunks và jobs sẽ bị xóa vĩnh viễn.")) return;
-    setActioning(docId);
-    try {
-      await deleteDocument(docId);
-      if (selectedDoc === docId) setSelectedDoc(null);
-      fetchDocs();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
-    } finally { setActioning(null); }
   };
 
   const handleAsk = async () => {
@@ -190,23 +141,9 @@ export default function DocumentsPage() {
 
       {error && <ErrorBanner message={error} />}
 
-      {/* Ingest Panel */}
-      <Card>
-        <h2 className="font-semibold text-slate-100 mb-3">📥 Ingest Document</h2>
-        <div className="flex gap-3">
-          <DarkInput
-            className="flex-1 font-mono"
-            placeholder="File path: /tmp/hermes-media/documents/test.pdf"
-            value={ingestPath}
-            onChange={(e) => setIngestPath(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleIngest()}
-          />
-          <DarkButton variant="primary" size="md" onClick={handleIngest} disabled={ingesting || !ingestPath.trim()}>
-            {ingesting ? "Processing..." : "Ingest"}
-          </DarkButton>
-        </div>
-        <p className="text-xs text-slate-600 mt-2">Safe dir: /tmp/hermes-media/documents/ — chỉ chấp nhận file trong thư mục này</p>
-      </Card>
+      <div className="rounded-lg border border-amber-800 bg-amber-950/30 px-4 py-3 text-sm text-amber-300">
+        Status-only remediation: ingest, re-ingest và delete đang bị vô hiệu hóa. Trang này chỉ đọc dữ liệu tài liệu hiện có.
+      </div>
 
       {/* Documents Table */}
       {loading ? (
@@ -221,7 +158,6 @@ export default function DocumentsPage() {
             <DarkTh>Chunks</DarkTh>
             <DarkTh>Size</DarkTh>
             <DarkTh>Date</DarkTh>
-            <DarkTh>Actions</DarkTh>
           </DarkThead>
           <tbody>
             {docs.map((doc) => (
@@ -257,18 +193,6 @@ export default function DocumentsPage() {
                 </DarkTd>
                 <DarkTd><span className="text-slate-400 text-xs">{formatBytes(doc.sizeBytes)}</span></DarkTd>
                 <DarkTd><span className="text-slate-500 text-xs">{new Date(doc.createdAt).toLocaleString("vi-VN")}</span></DarkTd>
-                <DarkTd>
-                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                    {doc.status === "failed" && (
-                      <DarkButton variant="warn" size="sm" onClick={() => handleReingest(doc.id)} disabled={actioning === doc.id}>
-                        {actioning === doc.id ? "..." : "🔄"}
-                      </DarkButton>
-                    )}
-                    <DarkButton variant="danger" size="sm" onClick={() => handleDelete(doc.id)} disabled={actioning === doc.id}>
-                      🗑️
-                    </DarkButton>
-                  </div>
-                </DarkTd>
               </DarkTr>
             ))}
           </tbody>
@@ -282,14 +206,7 @@ export default function DocumentsPage() {
           <Card>
             <div className="flex justify-between items-center mb-4">
               <h2 className="font-semibold text-slate-100">📋 Document Detail</h2>
-              <div className="flex gap-2">
-                <DarkButton variant="warn" size="sm" onClick={() => handleReingest(selectedDoc)} disabled={actioning === selectedDoc}>
-                  {actioning === selectedDoc ? "..." : "🔄 Re-ingest"}
-                </DarkButton>
-                <DarkButton variant="danger" size="sm" onClick={() => handleDelete(selectedDoc)} disabled={actioning === selectedDoc}>
-                  🗑️ Delete
-                </DarkButton>
-              </div>
+              <span className="text-xs text-slate-500">Read-only</span>
             </div>
 
             {sel?.status === "failed" && (() => {
@@ -312,6 +229,8 @@ export default function DocumentsPage() {
                 <Kv label="Created" value={new Date(sel.createdAt).toLocaleString("vi-VN")} />
               </div>
             )}
+
+            {jobsError && <ErrorBanner message={jobsError} />}
 
             {jobs.length > 0 && (
               <div className="mb-4">

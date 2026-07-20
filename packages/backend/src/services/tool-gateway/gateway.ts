@@ -76,12 +76,12 @@ export class ToolGateway {
     // 1. ── Resolve role/principal (caller-preferred; fallback resolver) ──
     let role: ToolRole = ctx.role ?? DEFAULT_ROLE;
     let principalId: string | null = ctx.principalId ?? null;
-    let principalBlocked = false;
-    if (ctx.role == null) {
+    let principalBlocked = ctx.principalBlocked ?? false;
+    if (ctx.role == null || ctx.principalBlocked == null) {
       const resolved = await this.resolveRole(ctx.senderId, ctx.threadId);
-      role = resolved.role;
-      principalId = resolved.principalId;
-      principalBlocked = resolved.blocked;
+      if (ctx.role == null) role = resolved.role;
+      if (ctx.principalId === undefined) principalId = resolved.principalId;
+      if (ctx.principalBlocked == null) principalBlocked = resolved.blocked;
     }
 
     const kind = def?.kind ?? "read";
@@ -94,6 +94,7 @@ export class ToolGateway {
       deliveryStatus: DeliveryStatus;
       result?: unknown;
       error?: ToolError;
+      publicErrorMessage?: string;
       idempotencyKey?: string | null;
       idempotencyKeySource?: "agent" | "derived" | null;
       links?: AgentToolResult["links"];
@@ -104,37 +105,78 @@ export class ToolGateway {
       // the agent/UI. Never return the raw result across the gateway boundary.
       const redactedResult = params.result === undefined ? undefined : redact(params.result, { allowPhone });
       const resultRedacted = redactToJson(params.result, { allowPhone });
-      const errShape = params.error?.toShape();
-      const errorDetailRedacted = errShape?.detail !== undefined
-        ? redactToJson(errShape.detail, { allowPhone })
-        : null;
+      const rawErrShape = params.error?.toShape();
+      const errShape = rawErrShape
+        ? rawErrShape.code === "provider_error"
+          ? {
+              code: rawErrShape.code,
+              message: params.publicErrorMessage ?? "Tool provider failed",
+              detail: undefined,
+              retryable: rawErrShape.retryable,
+            }
+          : {
+            code: rawErrShape.code,
+            message: redact(rawErrShape.message, { allowPhone: false }) as string,
+            ...(rawErrShape.detail === undefined
+              ? {}
+              : { detail: redact(rawErrShape.detail, { allowPhone: false }) }),
+            retryable: rawErrShape.retryable,
+          }
+        : undefined;
+      const safeLinks: AgentToolResult["links"] = {
+        outboundRecordId: params.links?.outboundRecordId,
+        zaloActionRecordId: params.links?.zaloActionRecordId,
+        scheduleId: params.links?.scheduleId,
+        agentTaskId: ctx.agentTaskId,
+        relatedMessageId: ctx.relatedMessageId,
+      };
+      const links = Object.values(safeLinks).some((value) => value !== undefined)
+        ? safeLinks
+        : undefined;
 
-      const toolCallRecordId = await this.evidence.writeToolCall({
-        agentName,
-        toolName: call.name,
-        kind,
-        threadId: ctx.threadId,
-        threadType: ctx.threadType,
-        principalId,
-        role,
-        executionStatus: params.executionStatus,
-        deliveryStatus: params.deliveryStatus,
-        idempotencyKey: params.idempotencyKey ?? null,
-        idempotencyKeySource: params.idempotencyKeySource ?? null,
-        argsRedacted,
-        resultRedacted,
-        errorCode: errShape?.code ?? null,
-        errorMessage: errShape?.message ?? null,
-        evidence: errorDetailRedacted ? JSON.stringify({ errorDetail: JSON.parse(errorDetailRedacted) }) : null,
-        outboundRecordId: params.links?.outboundRecordId ?? null,
-        zaloActionRecordId: params.links?.zaloActionRecordId ?? null,
-        agentTaskId: params.links?.agentTaskId ?? null,
-        scheduleId: params.links?.scheduleId ?? null,
-        relatedMessageId: ctx.relatedMessageId ?? params.links?.relatedMessageId ?? null,
-        durationMs,
-        startedAt,
-        completedAt,
-      });
+      let toolCallRecordId: string;
+      try {
+        toolCallRecordId = await this.evidence.writeToolCall({
+          agentName,
+          toolName: call.name,
+          kind,
+          threadId: ctx.threadId,
+          threadType: ctx.threadType,
+          principalId,
+          role,
+          executionStatus: params.executionStatus,
+          deliveryStatus: params.deliveryStatus,
+          idempotencyKey: params.idempotencyKey ?? null,
+          idempotencyKeySource: params.idempotencyKeySource ?? null,
+          argsRedacted,
+          resultRedacted,
+          errorCode: errShape?.code ?? null,
+          errorMessage: errShape?.message ?? null,
+          evidence: errShape?.detail === undefined
+            ? null
+            : JSON.stringify({ errorDetail: errShape.detail }),
+          outboundRecordId: links?.outboundRecordId ?? null,
+          zaloActionRecordId: links?.zaloActionRecordId ?? null,
+          agentTaskId: ctx.agentTaskId ?? null,
+          scheduleId: links?.scheduleId ?? null,
+          relatedMessageId: ctx.relatedMessageId ?? null,
+          durationMs,
+          startedAt,
+          completedAt,
+        });
+      } catch {
+        return {
+          toolName: call.name,
+          kind,
+          executionStatus: "failed",
+          deliveryStatus: params.deliveryStatus,
+          error: toolErrors.providerError("Tool evidence persistence failed").toShape(),
+          idempotencyKey: params.idempotencyKey ?? undefined,
+          idempotencyKeySource: params.idempotencyKeySource ?? undefined,
+          links,
+          durationMs,
+        };
+      }
 
       return {
         toolName: call.name,
@@ -146,7 +188,7 @@ export class ToolGateway {
         toolCallRecordId,
         idempotencyKey: params.idempotencyKey ?? undefined,
         idempotencyKeySource: params.idempotencyKeySource ?? undefined,
-        links: params.links,
+        links,
         durationMs,
       };
     };
@@ -160,7 +202,16 @@ export class ToolGateway {
       });
     }
 
-    // 3. ── Blocked principal → blocked ──────────────────────────────
+    // 3. ── Exact caller grant → blocked ─────────────────────────────
+    if (!ctx.allowedTools.includes(call.name)) {
+      return finalize({
+        executionStatus: "blocked",
+        deliveryStatus: "not_applicable",
+        error: toolErrors.blocked("Tool is not included in the exact grant"),
+      });
+    }
+
+    // 4. ── Blocked principal → blocked ──────────────────────────────
     if (principalBlocked) {
       return finalize({
         executionStatus: "blocked",
@@ -169,7 +220,7 @@ export class ToolGateway {
       });
     }
 
-    // 4. ── Permission (min role) ────────────────────────────────────
+    // 5. ── Permission (min role) ────────────────────────────────────
     const perm = checkToolPermission(role, def);
     if (!perm.allowed) {
       return finalize({
@@ -181,7 +232,7 @@ export class ToolGateway {
       });
     }
 
-    // 5. ── Generic dataScope gate (tool re-checks at query level) ───
+    // 6. ── Generic dataScope gate (tool re-checks at query level) ───
     const scope = checkDataScope(role, def.dataScope);
     if (!scope.allowed) {
       return finalize({
@@ -193,7 +244,7 @@ export class ToolGateway {
       });
     }
 
-    // 6. ── Validate args (invalid → blocked, NO execution) ──────────
+    // 7. ── Validate args (invalid → blocked, NO execution) ──────────
     let args: unknown;
     try {
       args = validateArgs(def.argsSchema as any, call.arguments ?? {});
@@ -206,7 +257,7 @@ export class ToolGateway {
       });
     }
 
-    // 7. ── Idempotency (write/outbound only) ────────────────────────
+    // 8. ── Idempotency (write/outbound only) ────────────────────────
     let idempotencyKey: string | null = null;
     let idempotencyKeySource: "agent" | "derived" | null = null;
     if (kind === "write" || kind === "outbound") {
@@ -220,7 +271,18 @@ export class ToolGateway {
         idempotencyKeySource = "derived";
       }
 
-      const prior = await this.evidence.findByIdempotencyKey(idempotencyKey);
+      let prior: Awaited<ReturnType<ToolEvidenceSink["findByIdempotencyKey"]>>;
+      try {
+        prior = await this.evidence.findByIdempotencyKey(idempotencyKey);
+      } catch {
+        return finalize({
+          executionStatus: "failed",
+          deliveryStatus: "not_applicable",
+          error: toolErrors.providerError("Idempotency evidence lookup failed"),
+          idempotencyKey,
+          idempotencyKeySource,
+        });
+      }
       if (prior) {
         let priorResult: unknown = undefined;
         if (prior.resultRedacted) {
@@ -242,7 +304,7 @@ export class ToolGateway {
       }
     }
 
-    // 8. ── dryRun / live decision (write/outbound) ──────────────────
+    // 9. ── dryRun / live decision (write/outbound) ──────────────────
     let dryRun = false;
     let liveAllowed = false;
     if (kind === "write" || kind === "outbound") {
@@ -253,7 +315,7 @@ export class ToolGateway {
       }
     }
 
-    // 9. ── Execute under per-tool timeout ───────────────────────────
+    // 10. ── Execute under per-tool timeout ──────────────────────────
     const timeoutMs = def.timeoutMs ?? this.opts.defaultTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
     try {
       const exec = await this.runWithTimeout(
@@ -281,7 +343,8 @@ export class ToolGateway {
         links: exec.links,
       });
     } catch (err) {
-      const te = err instanceof ToolError ? err : toolErrors.providerError((err as Error)?.message ?? "tool error");
+      const unexpected = !(err instanceof ToolError);
+      const te = unexpected ? toolErrors.providerError("Tool execution failed") : err;
       let deliveryStatus: DeliveryStatus = "not_applicable";
       if (kind === "write" || kind === "outbound") {
         deliveryStatus = dryRun ? "dry_run" : "not_applicable";
@@ -290,6 +353,7 @@ export class ToolGateway {
         executionStatus: executionStatusForError(te.code),
         deliveryStatus,
         error: te,
+        publicErrorMessage: unexpected ? "Tool execution failed" : undefined,
         idempotencyKey,
         idempotencyKeySource,
       });
@@ -366,13 +430,13 @@ export class ToolGateway {
   }
 
   private async resolveRole(senderId: string | null | undefined, threadId: string): Promise<ResolvedRole> {
-    if (this.opts.resolveRole) return this.opts.resolveRole(senderId, threadId);
     try {
+      if (this.opts.resolveRole) return await this.opts.resolveRole(senderId, threadId);
       const { resolvePrincipal, isBlocked } = await import("../principal.service.js");
       const ctx = await resolvePrincipal(senderId ?? null, threadId);
       return { role: ctx.role as ToolRole, principalId: ctx.principal?.principalId ?? null, blocked: isBlocked(ctx.status) };
     } catch {
-      return { role: DEFAULT_ROLE, principalId: null, blocked: false };
+      return { role: DEFAULT_ROLE, principalId: null, blocked: true };
     }
   }
 }

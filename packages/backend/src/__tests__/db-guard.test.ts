@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, beforeEach, describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -9,7 +10,30 @@ const BACKEND_DIR = join(TEST_DIR, "..", "..");
 const ROOT_DIR = join(BACKEND_DIR, "..", "..");
 const SCRIPT = join(BACKEND_DIR, "scripts", "db-guard.mjs");
 const NODE = process.execPath;
-const BACKUP_DIR = join(BACKEND_DIR, "backups", "db");
+const ISOLATION_ROOT = mkdtempSync(join(tmpdir(), "hermes-db-guard-test-"));
+const BACKUP_DIR = join(ISOLATION_ROOT, "backups", "db");
+const SESSION_DIR = join(ISOLATION_ROOT, "zalo-session");
+const TEST_DATABASE_DIR = join(ISOLATION_ROOT, "prisma");
+const TEST_DATABASE_PATH = join(TEST_DATABASE_DIR, "test.db");
+const MISSING_DATABASE_URL = `file:${join(TEST_DATABASE_DIR, "nonexistent.db")}`;
+const ACTIVE_DATABASE_URL = process.env.DATABASE_URL ?? "file:./test.db";
+const ACTIVE_DATABASE_PATH = resolve(BACKEND_DIR, "prisma", ACTIVE_DATABASE_URL.replace(/^file:/, ""));
+mkdirSync(TEST_DATABASE_DIR, { recursive: true });
+copyFileSync(ACTIVE_DATABASE_PATH, TEST_DATABASE_PATH);
+const ISOLATED_ENV = {
+  DATABASE_URL: `file:${TEST_DATABASE_PATH}`,
+  DB_BACKUP_DIR: BACKUP_DIR,
+  ZALO_SESSION_DIR: SESSION_DIR,
+};
+
+beforeEach(() => {
+  rmSync(BACKUP_DIR, { recursive: true, force: true });
+  mkdirSync(BACKUP_DIR, { recursive: true });
+});
+
+afterAll(() => {
+  rmSync(ISOLATION_ROOT, { recursive: true, force: true });
+});
 
 function runGuard(args: string[], env?: Record<string, string>): {
   exitCode: number;
@@ -18,7 +42,7 @@ function runGuard(args: string[], env?: Record<string, string>): {
 } {
   const result = spawnSync(NODE, [SCRIPT, ...args], {
     cwd: BACKEND_DIR,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...ISOLATED_ENV, ...env },
     timeout: 15_000,
   });
   return {
@@ -40,12 +64,23 @@ describe("DB Guard — status", () => {
   });
 
   it("status reports FAIL for non-existent DB", () => {
-    const r = runGuard(["--status"], { DATABASE_URL: "file:./nonexistent.db" });
+    const r = runGuard(["--status"], { DATABASE_URL: MISSING_DATABASE_URL });
     expect(r.stdout).toContain("Database file not found");
   });
 });
 
 describe("DB Guard — backup", () => {
+  it.each(["0", "-1", "1.5", "invalid"])(
+    "rejects an invalid DB_BACKUP_KEEP value (%s) before creating a backup",
+    (keep) => {
+      const r = runGuard(["--backup"], { DB_BACKUP_KEEP: keep });
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("DB_BACKUP_KEEP");
+      expect(readdirSync(BACKUP_DIR)).toHaveLength(0);
+    },
+  );
+
   it("backup creates a file", () => {
     const before = readdirSync(BACKUP_DIR).filter((f) =>
       f.startsWith("dev.db.backup-")
@@ -83,7 +118,7 @@ describe("DB Guard — backup", () => {
   });
 
   it("backup fails if DB doesn't exist", () => {
-    const r = runGuard(["--backup"], { DATABASE_URL: "file:./nonexistent.db" });
+    const r = runGuard(["--backup"], { DATABASE_URL: MISSING_DATABASE_URL });
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Cannot backup");
   });
@@ -117,6 +152,7 @@ describe("DB Guard — script integration", () => {
   it("npm run db:guard works", () => {
     const r = spawnSync("npm", ["run", "db:guard"], {
       cwd: ROOT_DIR,
+      env: { ...process.env, ...ISOLATED_ENV },
       timeout: 30_000,
       shell: true,
     });

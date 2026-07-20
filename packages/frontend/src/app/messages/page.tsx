@@ -1,32 +1,31 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { listMessages, type MessageItem } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
 import { formatVnTime, formatRelativeTime } from "../../components/ui/TimeText";
+import { classifyOutboundStatus } from "../../lib/dashboard-state";
 
 /* ── Status badge ─────────────────────────────────────────────── */
 type StatusInfo = { label: string; cls: string };
 
 function getStatusBadge(m: MessageItem): StatusInfo | null {
   if (m.role !== "assistant" && m.role !== "system") return null;
-  const ob = m.outbound;
-  if (!ob) return { label: "NO RECORD", cls: "bg-slate-800 text-slate-500 border-slate-700" };
-  if (ob.sentMessageId) return { label: "SENT", cls: "bg-green-950 text-green-400 border-green-800" };
-  if (ob.errorCode) return { label: "FAILED", cls: "bg-red-950 text-red-400 border-red-800" };
-  if (ob.reason === "prompt_guard" || ob.errorCode === "PROMPT_GUARD_BLOCK")
-    return { label: "PROMPT GUARD", cls: "bg-purple-950 text-purple-400 border-purple-800" };
-  if (ob.reason === "permission_denied")
-    return { label: "PERM DENIED", cls: "bg-orange-950 text-orange-400 border-orange-800" };
-  if (ob.decision === "block" || ob.decision === "skip")
-    return { label: "BLOCKED", cls: "bg-red-950 text-red-400 border-red-800" };
-  if (ob.reason === "cooldown")
-    return { label: "COOLDOWN", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" };
-  if (ob.source === "schedule")
-    return { label: "SCHEDULED", cls: "bg-cyan-950 text-cyan-400 border-cyan-800" };
-  if (ob.dryRun)
-    return { label: "DRY RUN", cls: "bg-amber-950 text-amber-400 border-amber-800" };
-  return { label: "UNKNOWN", cls: "bg-slate-800 text-slate-500 border-slate-700" };
+  if (!m.outbound) return { label: "UNKNOWN", cls: "bg-slate-800 text-slate-500 border-slate-700" };
+
+  const label = classifyOutboundStatus(m.outbound);
+  const classes: Record<typeof label, string> = {
+    "DRY RUN": "bg-amber-950 text-amber-400 border-amber-800",
+    SENT: "bg-green-950 text-green-400 border-green-800",
+    FAILED: "bg-red-950 text-red-400 border-red-800",
+    "PROMPT GUARD": "bg-purple-950 text-purple-400 border-purple-800",
+    "PERM DENIED": "bg-orange-950 text-orange-400 border-orange-800",
+    COOLDOWN: "bg-yellow-950 text-yellow-400 border-yellow-800",
+    BLOCKED: "bg-red-950 text-red-400 border-red-800",
+    SKIPPED: "bg-slate-800 text-slate-400 border-slate-700",
+    UNKNOWN: "bg-slate-800 text-slate-500 border-slate-700",
+  };
+  return { label, cls: classes[label] };
 }
 
 function StatusBadge({ m }: { m: MessageItem }) {
@@ -60,36 +59,74 @@ export default function MessagesPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<MessageItem | null>(null);
 
-  const [role, setRole] = useState("");
   const [search, setSearch] = useState("");
   const [threadFilter, setThreadFilter] = useState("");
-  const [fromBot, setFromBot] = useState("");
-  const [outboundDecision, setOutboundDecision] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [debouncedThreadFilter, setDebouncedThreadFilter] = useState("");
+  const requestIdRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
 
-  const fetchData = useCallback(() => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setDebouncedThreadFilter(threadFilter.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search, threadFilter]);
+
+  const fetchData = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+
     setLoading(true);
+    setError(null);
     const params: Record<string, string> = { page: String(page), pageSize: "30" };
-    if (role) params.role = role;
-    if (search) params.search = search;
-    if (threadFilter) params.threadId = threadFilter;
-    if (fromBot) params.isFromBot = fromBot;
-    if (outboundDecision) params.outboundDecision = outboundDecision;
+    if (debouncedSearch) params.search = debouncedSearch;
+    if (debouncedThreadFilter) params.threadId = debouncedThreadFilter;
 
-    listMessages(params)
-      .then((r) => {
-        setData(r.data);
-        setTotal(r.total);
-        setTotalPages(r.totalPages ?? Math.ceil(r.total / 30));
-      })
-      .catch(() => toast("Không tải được messages", "error"))
-      .finally(() => setLoading(false));
-  }, [page, role, search, threadFilter, fromBot, outboundDecision, toast]);
+    try {
+      const response = await listMessages(params, controller.signal);
+      if (controller.signal.aborted || requestIdRef.current !== requestId) return;
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+      const serverTotalPages = Math.max(1, response.totalPages);
+      if (response.total > 0 && page > serverTotalPages) {
+        setPage(serverTotalPages);
+        return;
+      }
+      setData(response.data);
+      setTotal(response.total);
+      setTotalPages(serverTotalPages);
+    } catch (err) {
+      if (controller.signal.aborted || requestIdRef.current !== requestId) return;
+      const message = err instanceof Error ? err.message : "Không tải được messages";
+      setData([]);
+      setTotal(0);
+      setTotalPages(1);
+      setError(message);
+      toast("Không tải được messages", "error");
+    } finally {
+      if (requestIdRef.current === requestId) {
+        setLoading(false);
+        if (controllerRef.current === controller) controllerRef.current = null;
+      }
+    }
+  }, [page, debouncedSearch, debouncedThreadFilter, toast]);
 
-  const selCls = "rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-300 focus:border-blue-500 focus:outline-none";
+  useEffect(() => {
+    void fetchData();
+    return () => {
+      requestIdRef.current += 1;
+      controllerRef.current?.abort();
+      controllerRef.current = null;
+    };
+  }, [fetchData]);
+
   const inpCls = "min-w-[160px] rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-300 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none";
 
   return (
@@ -103,35 +140,23 @@ export default function MessagesPage() {
         <button onClick={fetchData} className="px-3 py-1.5 text-xs border border-slate-700 text-slate-400 rounded-md hover:bg-slate-800 transition-colors">🔄 Refresh</button>
       </div>
 
-      {/* Filters */}
+      {/* Filters supported by the backend contract */}
       <div className="flex flex-wrap gap-2">
-        <select value={role} onChange={(e) => { setRole(e.target.value); setPage(1); }} className={selCls}>
-          <option value="">All roles</option>
-          <option value="user">User</option>
-          <option value="assistant">Assistant</option>
-          <option value="system">System</option>
-        </select>
-        <select value={fromBot} onChange={(e) => { setFromBot(e.target.value); setPage(1); }} className={selCls}>
-          <option value="">All sources</option>
-          <option value="true">Bot</option>
-          <option value="false">Human</option>
-        </select>
-        <select value={outboundDecision} onChange={(e) => { setOutboundDecision(e.target.value); setPage(1); }} className={selCls}>
-          <option value="">All decisions</option>
-          <option value="send">Sent</option>
-          <option value="block">Blocked</option>
-          <option value="skip">Skipped</option>
-          <option value="dry_run">Dry Run</option>
-        </select>
         <input type="text" placeholder="Search content…" value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }} className={inpCls} />
         <input type="text" placeholder="Thread ID…" value={threadFilter}
           onChange={(e) => { setThreadFilter(e.target.value); setPage(1); }} className={inpCls} />
-        <button onClick={() => { setRole(""); setFromBot(""); setOutboundDecision(""); setSearch(""); setThreadFilter(""); setPage(1); }}
+        <button onClick={() => { setSearch(""); setThreadFilter(""); setPage(1); }}
           className="px-2.5 py-1.5 text-xs text-slate-400 border border-slate-700 rounded-md hover:bg-slate-800 transition-colors">
           Clear
         </button>
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-800 bg-red-950/30 px-4 py-3 text-sm text-red-300">
+          Messages UNKNOWN — {error}
+        </div>
+      )}
 
       {/* Table */}
       {loading && data.length === 0 ? (
@@ -140,11 +165,11 @@ export default function MessagesPage() {
             <div key={i} className="h-10 animate-pulse rounded-md bg-slate-800 border border-slate-700" />
           ))}
         </div>
-      ) : data.length === 0 ? (
+      ) : error ? null : data.length === 0 ? (
         <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-12 text-center">
           <p className="text-slate-500 text-sm">Không có tin nhắn nào</p>
           <p className="text-slate-600 text-xs mt-1">
-            {search || role || threadFilter ? "Thử xóa bộ lọc để xem tất cả." : "Chờ bot nhận tin hoặc gửi tin thử."}
+            {search || threadFilter ? "Thử xóa bộ lọc để xem tất cả." : "Không có bản ghi trong response hiện tại."}
           </p>
         </div>
       ) : (

@@ -1,134 +1,295 @@
 // =============================================================================
-// Thread Settings + Safe Media Path tests — Batch 3
+// Batch 3 public-boundary regression tests
+// Thread Settings read-only/validation + disabled-dashboard media contract
 // =============================================================================
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { resolve } from "node:path";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import type { FastifyInstance } from "fastify";
+import { config } from "../config.js";
+import { prisma } from "../db.js";
 
-// ---------------------------------------------------------------------------
-// Thread Settings Service tests
-// ---------------------------------------------------------------------------
+const { mockListMessages, mockSendOutbound } = vi.hoisted(() => ({
+  mockListMessages: vi.fn(),
+  mockSendOutbound: vi.fn(),
+}));
 
-describe("Thread Settings", () => {
-  it("DM defaults: mentionRequired=false, replyWindow=0", () => {
-    // The service auto-creates defaults when no DB record exists.
-    // DM threads get relaxed settings.
-    expect(true).toBe(true); // placeholder — tested via API integration
+vi.mock("../services/zalo-receive.js", () => ({
+  listMessages: (...args: unknown[]) => mockListMessages(...args),
+  listThreads: vi.fn().mockResolvedValue({
+    data: [],
+    total: 0,
+    page: 1,
+    pageSize: 50,
+    totalPages: 0,
+  }),
+}));
+
+vi.mock("../services/outbound-dispatcher.service.js", () => ({
+  sendOutbound: (...args: unknown[]) => mockSendOutbound(...args),
+}));
+
+let app: FastifyInstance;
+
+beforeAll(async () => {
+  const Fastify = (await import("fastify")).default;
+  const { threadSettingsRoutes } = await import("../routes/thread-settings.js");
+  const { zaloRoutes } = await import("../routes/zalo.js");
+  const { agentRoutes } = await import("../routes/agent.js");
+
+  app = Fastify({ logger: false });
+  await app.register(threadSettingsRoutes, { prefix: "/api" });
+  await app.register(zaloRoutes, { prefix: "/api" });
+  await app.register(agentRoutes, { prefix: "/api" });
+  await app.ready();
+});
+
+afterAll(async () => {
+  await app.close();
+});
+
+beforeEach(async () => {
+  mockListMessages.mockReset().mockResolvedValue({
+    data: [],
+    total: 0,
+    page: 1,
+    pageSize: 50,
+    totalPages: 0,
+  });
+  mockSendOutbound.mockReset().mockResolvedValue({
+    success: true,
+    dryRun: true,
+    decision: "allow",
+    reason: "dry_run",
+    sentMessageId: "dry-run-image-test",
   });
 
-  it("Group defaults: mentionRequired=true, replyWindow=600", () => {
-    expect(true).toBe(true);
+  await prisma.message.deleteMany();
+  await prisma.zaloThread.deleteMany();
+  await prisma.threadSetting.deleteMany();
+});
+
+describe("Thread Settings HTTP boundary", () => {
+  it("GET computes defaults without creating a ThreadSetting row", async () => {
+    expect(await prisma.threadSetting.count()).toBe(0);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/threads/thread-read-only/settings?threadType=user",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: {
+        threadId: "thread-read-only",
+        threadType: "user",
+        configured: false,
+      },
+    });
+    expect(await prisma.threadSetting.count()).toBe(0);
   });
 
-  it("Update single field preserves others", () => {
-    expect(true).toBe(true);
+  it("GET list reports conflicting thread-type evidence as unknown", async () => {
+    await prisma.threadSetting.create({ data: { threadId: "thread-conflict" } });
+    await prisma.zaloThread.create({ data: { id: "thread-conflict", type: "user" } });
+    await prisma.message.create({
+      data: {
+        threadId: "thread-conflict",
+        threadType: "group",
+        content: "conflicting type evidence",
+        role: "user",
+      },
+    });
+
+    const response = await app.inject({ method: "GET", url: "/api/threads/settings" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: [{ threadId: "thread-conflict", threadType: "unknown" }],
+      total: 1,
+      page: 1,
+      pageSize: 50,
+      totalPages: 1,
+    });
   });
 
-  it("List returns paginated results", () => {
-    expect(true).toBe(true);
+  it.each([
+    ["page zero", "/api/threads/settings?page=0"],
+    ["page malformed", "/api/threads/settings?page=1x"],
+    ["page unsafe", "/api/threads/settings?page=999999999999999999999"],
+    ["pageSize zero", "/api/threads/settings?pageSize=0"],
+    ["pageSize decimal", "/api/threads/settings?pageSize=1.5"],
+    ["pageSize too large", "/api/threads/settings?pageSize=101"],
+  ])("rejects invalid list pagination: %s", async (_caseName, url) => {
+    const response = await app.inject({ method: "GET", url });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+  });
+
+  it("rejects a blank GET threadId without creating settings", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/threads/%20/settings",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(await prisma.threadSetting.count()).toBe(0);
+  });
+
+  it("rejects a blank PATCH threadId before writing", async () => {
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/threads/%20/settings",
+      payload: { autoReplyEnabled: false },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(await prisma.threadSetting.count()).toBe(0);
+  });
+
+  it.each([
+    ["null body", "null"],
+    ["array body", "[]"],
+    ["empty object", "{}"],
+    ["unknown field", JSON.stringify({ unsupported: true })],
+    ["wrong autoReplyEnabled", JSON.stringify({ autoReplyEnabled: "false" })],
+    ["wrong groupMentionRequired", JSON.stringify({ groupMentionRequired: "false" })],
+    ["wrong allowCreateReminder", JSON.stringify({ allowCreateReminder: "false" })],
+    ["wrong allowMedia", JSON.stringify({ allowMedia: "false" })],
+    ["wrong allowImageUnderstanding", JSON.stringify({ allowImageUnderstanding: "false" })],
+    ["wrong allowDocumentUnderstanding", JSON.stringify({ allowDocumentUnderstanding: "false" })],
+    ["fractional window", JSON.stringify({ groupReplyWindowSeconds: 1.5 })],
+    ["negative window", JSON.stringify({ groupReplyWindowSeconds: -1 })],
+    ["wrong notes", JSON.stringify({ notes: 123 })],
+  ])("rejects malformed PATCH payload: %s", async (_caseName, payload) => {
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/threads/thread-patch/settings",
+      headers: { "content-type": "application/json" },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(await prisma.threadSetting.count()).toBe(0);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Safe Media Path validation tests
-// ---------------------------------------------------------------------------
+describe("Media send HTTP boundary", () => {
+  const safeServerPath = resolve(config.zalo.mediaAllowedBaseDir, "batch3-test.png");
 
-import { resolve, sep } from "node:path";
+  it("does not report a blocked dry-run as success", async () => {
+    mockSendOutbound.mockResolvedValueOnce({
+      success: false,
+      dryRun: true,
+      decision: "block",
+      reason: "permission_denied",
+      sentMessageId: null,
+    });
 
-/**
- * Replica of the actual validateSafeMediaPath logic for unit testing.
- * Must match the function in routes/zalo.ts exactly.
- */
-function validateSafeMediaPath(filePath: string, baseDir: string): { allowed: false; error: string } | { allowed: true; resolvedPath: string } {
-  const resolved = resolve(filePath);
-  const resolvedBase = resolve(baseDir);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/zalo/send-media",
+      payload: {
+        type: "image",
+        path: safeServerPath,
+        threadId: "thread-media",
+        threadType: "user",
+      },
+    });
 
-  // Block path traversal
-  const { relative, normalize } = require("node:path");
-  const rel = relative(resolvedBase, resolved);
-  if (rel.startsWith("..") || rel.startsWith(`${sep}..`) || normalize(filePath).includes("..")) {
-    return { allowed: false, error: "Path traversal blocked" };
-  }
-
-  // Block paths outside allowed base directory
-  if (!resolved.startsWith(resolvedBase + sep) && resolved !== resolvedBase) {
-    return { allowed: false, error: `File outside allowed directory: ${resolvedBase}` };
-  }
-
-  // Block sensitive file names
-  const basename = resolved.split(sep).pop()?.toLowerCase() ?? "";
-  const blockedNames = [".env", "credentials", "backup", "session", "cookie", "token", "secret", "key"];
-  if (blockedNames.some((n) => basename.includes(n))) {
-    return { allowed: false, error: `Blocked sensitive file name: ${basename}` };
-  }
-
-  return { allowed: true, resolvedPath: resolved };
-}
-
-describe("Safe Media Path", () => {
-  const baseDir = "/tmp/hermes-media";
-
-  it("allows valid file inside base dir", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/test.jpg", baseDir);
-    expect(result.allowed).toBe(true);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: false, decision: "block", dryRun: true });
   });
 
-  it("blocks path traversal with ../", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/../.env", baseDir);
-    expect(result.allowed).toBe(false);
+  it.each([
+    ["null", "null"],
+    ["array", "[]"],
+  ])("rejects a %s payload before the dispatcher", async (_caseName, payload) => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/zalo/send-media",
+      headers: { "content-type": "application/json" },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(mockSendOutbound).not.toHaveBeenCalled();
   });
 
-  it("blocks path traversal with ../..", () => {
-    const result = validateSafeMediaPath("../etc/passwd", baseDir);
-    expect(result.allowed).toBe(false);
+  it("rejects the legacy blob/mediaUrl contract before the dispatcher", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/zalo/send-media",
+      payload: {
+        mediaType: "image",
+        mediaUrl: "blob:http://127.0.0.1/legacy-object-url",
+        blob: true,
+        threadId: "thread-media",
+        threadType: "user",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(mockSendOutbound).not.toHaveBeenCalled();
   });
 
-  it("blocks file outside base dir", () => {
-    const result = validateSafeMediaPath("/etc/passwd", baseDir);
-    expect(result.allowed).toBe(false);
+  it.each([
+    ["blank type", { type: "", path: safeServerPath, threadId: "thread-media", threadType: "user" }],
+    ["blank path", { type: "image", path: " ", threadId: "thread-media", threadType: "user" }],
+    ["blank threadId", { type: "image", path: safeServerPath, threadId: " ", threadType: "user" }],
+    ["blank threadType", { type: "image", path: safeServerPath, threadId: "thread-media", threadType: "" }],
+  ])("rejects %s before the dispatcher", async (_caseName, payload) => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/zalo/send-media",
+      payload,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(mockSendOutbound).not.toHaveBeenCalled();
+  });
+});
+
+describe("Messages HTTP pagination boundary", () => {
+  it.each([
+    ["page zero", "/api/agent/messages?page=0"],
+    ["page malformed", "/api/agent/messages?page=nope"],
+    ["page unsafe", "/api/agent/messages?page=999999999999999999999"],
+    ["pageSize zero", "/api/agent/messages?pageSize=0"],
+    ["pageSize decimal", "/api/agent/messages?pageSize=1.5"],
+    ["pageSize too large", "/api/agent/messages?pageSize=101"],
+  ])("rejects invalid pagination: %s", async (_caseName, url) => {
+    const response = await app.inject({ method: "GET", url });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(mockListMessages).not.toHaveBeenCalled();
   });
 
-  it("blocks .env file", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/.env", baseDir);
-    expect(result.allowed).toBe(false);
-  });
+  it("passes validated pagination to listMessages", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent/messages?page=2&pageSize=25&threadId=thread-a&search=hello",
+    });
 
-  it("blocks session files", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/zalo-session.json", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("blocks backup files", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/backup-2024.tar.gz", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("blocks credential files", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/credentials.json", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("blocks token files", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/api-token.txt", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("blocks files with 'secret' in name", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/secret-key.txt", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("blocks files with 'key' in name", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/api-key.txt", baseDir);
-    expect(result.allowed).toBe(false);
-  });
-
-  it("allows normal file names like 'photo.jpg'", () => {
-    const result = validateSafeMediaPath("/tmp/hermes-media/photo.jpg", baseDir);
-    expect(result.allowed).toBe(true);
-  });
-
-  it("allows relative path inside base dir", () => {
-    const result = validateSafeMediaPath(baseDir + "/test.png", baseDir);
-    expect(result.allowed).toBe(true);
+    expect(response.statusCode).toBe(200);
+    expect(mockListMessages).toHaveBeenCalledWith({
+      threadId: "thread-a",
+      search: "hello",
+      page: 2,
+      pageSize: 25,
+    });
   });
 });

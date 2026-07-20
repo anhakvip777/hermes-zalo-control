@@ -176,10 +176,40 @@ export async function internalRoutes(app: FastifyInstance) {
     //    (runs in backend process — has Zalo session)
     try {
       const { handleIncomingMessage } = await import("../services/incoming-dispatcher.service.js");
+      const { resolveLastBatchMessageIdentity } = await import("../services/message-batch.service.js");
 
       const messageIds = messages.map((m) => String(m.messageId ?? ""));
+      const metadata = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+        ? body.metadata as Record<string, unknown>
+        : {};
+      const canonicalMessageCount = metadata.messageCount;
+      if (
+        typeof canonicalMessageCount !== "number" ||
+        !Number.isInteger(canonicalMessageCount) ||
+        canonicalMessageCount < 1 ||
+        canonicalMessageCount !== messages.length
+      ) {
+        return reply.status(409).send({
+          ok: false,
+          error: "BATCH_MESSAGE_COUNT_MISMATCH",
+          message: "Canonical batch count does not match the messages array.",
+        });
+      }
+      const identity = await resolveLastBatchMessageIdentity(
+        messageIds,
+        body.threadId as string,
+        canonicalMessageCount,
+      );
+      if (!identity) {
+        return reply.status(409).send({
+          ok: false,
+          error: "BATCH_MESSAGE_ID_UNRESOLVED",
+          message: "The last batch message has no matching internal record.",
+        });
+      }
       const syntheticMsg = {
-        zaloMessageId: messageIds[messageIds.length - 1] ?? null,
+        zaloMessageId: identity.zaloMessageId,
+        dbMessageId: identity.dbMessageId,
         threadId: body.threadId as string,
         threadType: threadType as "user" | "group",
         senderId: (body.senderId as string) ?? "",
@@ -187,10 +217,10 @@ export async function internalRoutes(app: FastifyInstance) {
         messageType: "text",
         rawMetadata: JSON.stringify({
           source: "message_batch",
-          batchId: (body.metadata as Record<string, unknown>)?.["batchId"] ?? null,
+          batchId: metadata.batchId ?? null,
           messageIds,
           messageCount: messages.length,
-          ...(body.metadata as Record<string, unknown> ?? {}),
+          ...metadata,
         }),
         mentions: undefined,
       };

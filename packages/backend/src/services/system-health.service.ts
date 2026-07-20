@@ -15,6 +15,7 @@ import { readLockFile, checkProcessLock } from "../process-lock.js";
 import { config } from "../config.js";
 import { getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 import { getHeartbeatSummary, type HeartbeatEntry } from "./heartbeat.service.js";
+import { BACKUPS_DIR, resolveSqliteDatabasePath } from "../backend-paths.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ export interface HealthSnapshot {
   };
   db: {
     ok: boolean;
-    path: string;
+    path: string | null;
     sizeBytes: number;
     criticalTables: Record<string, number | null>;
   };
@@ -99,10 +100,9 @@ export interface HealthSnapshot {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function getDbPath(): string {
-  const url = process.env.DATABASE_URL || "file:./dev.db";
-  const m = url.match(/^file:(.+)$/);
-  return m?.[1] ? resolve(process.cwd(), "prisma", m[1]) : resolve(process.cwd(), "prisma", "dev.db");
+function getDbPath(): string | null {
+  const url = process.env.DATABASE_URL ?? "file:./dev.db";
+  return resolveSqliteDatabasePath(url);
 }
 
 function hoursAgo(isoString: string | null): number | null {
@@ -112,16 +112,14 @@ function hoursAgo(isoString: string | null): number | null {
   return Math.round((now - then) / (3600 * 1000) * 10) / 10;
 }
 
-function mask(value: string | undefined): string {
-  if (!value) return "missing";
-  if (value.length <= 8) return "***";
-  return value.slice(0, 4) + "***" + value.slice(-4);
-}
-
 // ── Sub-collectors ───────────────────────────────────────────────────
 
 async function collectDb(): Promise<HealthSnapshot["db"]> {
   const dbPath = getDbPath();
+  if (dbPath === null) {
+    return { ok: false, path: null, sizeBytes: 0, criticalTables: {} };
+  }
+
   const exists = existsSync(dbPath);
   const sizeBytes = exists ? statSync(dbPath).size : 0;
 
@@ -228,12 +226,12 @@ async function collectWorker(): Promise<HealthSnapshot["worker"]> {
 }
 
 function collectBackup(): HealthSnapshot["backup"] {
-  const backupsDir = resolve(process.cwd(), "backups", "system");
+  const backupsDir = resolve(BACKUPS_DIR, "system");
 
   try {
     if (!existsSync(backupsDir)) {
       // also check old path
-      const dbBackupsDir = resolve(process.cwd(), "backups", "db");
+      const dbBackupsDir = resolve(BACKUPS_DIR, "db");
       if (existsSync(dbBackupsDir)) {
         const files = readdirSync(dbBackupsDir).filter(f => f.endsWith(".sqlite") || f.endsWith(".db"));
         files.sort().reverse(); // newest first by name convention

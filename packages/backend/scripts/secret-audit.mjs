@@ -196,8 +196,7 @@ function auditGitignore() {
 }
 
 function maskSecret(value) {
-  if (!value || value.length <= 8) return "***";
-  return value.slice(0, 4) + "***" + value.slice(-4);
+  return value ? "[REDACTED]" : "missing";
 }
 
 function main() {

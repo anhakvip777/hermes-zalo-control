@@ -75,11 +75,11 @@ export default function RetrievalTestPage() {
       query: query.trim(),
       requesterThreadId: requesterThreadId.trim(),
       requesterThreadType,
+      targetThreadId: targetThreadId.trim() || requesterThreadId.trim(),
+      targetThreadType: targetThreadType || requesterThreadType,
       includeAttachments,
       role,
     };
-    if (targetThreadId.trim()) input.targetThreadId = targetThreadId.trim();
-    if (targetThreadType) input.targetThreadType = targetThreadType;
     if (dateFrom.trim()) input.dateFrom = dateFrom.trim();
     if (dateTo.trim()) input.dateTo = dateTo.trim();
 

@@ -58,12 +58,22 @@ export function checkDataScope(role: ToolRole, scope: DataScope | undefined): Pe
 }
 
 /**
- * Build the list of tool names a role is granted, given the registered tools.
- * The Bridge owns this — the agent never sets its own allowedTools.
- * (Thread/runtime nuances can be layered in later phases.)
+ * Build the exact read-only grant from configured names, registered tools,
+ * role, and coarse data scope. Missing configuration fails closed.
  */
-export function buildAllowedTools(role: ToolRole, defs: ToolDefinition[]): string[] {
+export function buildAllowedTools(
+  role: ToolRole,
+  defs: ToolDefinition[],
+  configuredNames: readonly string[] = [],
+): string[] {
+  const configured = new Set(configuredNames);
   return defs
-    .filter((d) => checkToolPermission(role, d).allowed && checkDataScope(role, d.dataScope).allowed)
+    .filter(
+      (d) =>
+        configured.has(d.name) &&
+        d.kind === "read" &&
+        checkToolPermission(role, d).allowed &&
+        checkDataScope(role, d.dataScope).allowed,
+    )
     .map((d) => d.name);
 }

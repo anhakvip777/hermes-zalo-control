@@ -115,6 +115,26 @@ describe("U1 — listMessages outbound enrichment", () => {
     expect(result.data[0].outbound!.decision).toBe("allow");
   });
 
+  it("fails closed when multiple outbound records share the same content hash", async () => {
+    const threadId = "thread-u1-ambiguous";
+    const content = "Repeated bot reply";
+
+    await createMessage({ threadId, role: "assistant", content, isFromBot: true });
+    await createOutboundForMessage(threadId, content, {
+      dryRun: true,
+      sentMessageId: "dry-run-one",
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+    });
+    await createOutboundForMessage(threadId, content, {
+      dryRun: false,
+      sentMessageId: "provider-two",
+      createdAt: new Date("2026-01-01T00:00:02.000Z"),
+    });
+
+    const result = await listMessages({ pageSize: 10 });
+    expect(result.data[0]!.outbound).toBeNull();
+  });
+
   it("maps dryRun correctly", async () => {
     const threadId = "thread-u1-dry";
     const content = "Dry run reply";

@@ -48,12 +48,13 @@ export interface AgentResponse {
 
 /**
  * An agent adapter. `run` is called once per loop round with the accumulated
- * tool results so far. It must NEVER call zca-js / getApi / sendMessage — it
- * only returns text and/or tool calls; the Bridge executes tools via the gateway.
+ * tool results so far. It must NEVER call zca-js / getApi / sendMessage. Adapter
+ * output is untrusted; AgentBridge validates it before reading any fields or
+ * executing tools.
  */
 export interface AgentAdapter {
   readonly name: string;
-  run(request: AgentRequest, priorToolResults: AgentToolResult[]): Promise<AgentResponse>;
+  run(request: AgentRequest, priorToolResults: AgentToolResult[]): Promise<unknown>;
 }
 
 export interface AgentBridgeResult {

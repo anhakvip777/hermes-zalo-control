@@ -12,9 +12,12 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   flagEnabled: false,
+  bridgeEnabled: false,
+  autoReplyEnabled: false,
   effectiveDryRun: true,
   allowed: true,
   liveForThread: false,
+  principalFailure: false,
   answer: null as null | Record<string, unknown>,
   answerCalls: 0,
   lastInput: null as null | Record<string, unknown>,
@@ -25,9 +28,16 @@ vi.mock("../config.js", async (io) => {
   return {
     config: {
       ...a.config,
-      autoReply: { ...a.config.autoReply, enabled: false }, // stays OFF
+      autoReply: {
+        ...a.config.autoReply,
+        get enabled() { return h.autoReplyEnabled; },
+      },
       retrieval: {
         get dispatcherDryRunEnabled() { return h.flagEnabled; },
+      },
+      hermesAgentBridge: {
+        ...a.config.hermesAgentBridge,
+        get enabled() { return h.bridgeEnabled; },
       },
     },
   };
@@ -46,6 +56,17 @@ vi.mock("../services/allowlist.service.js", async (io) => {
 vi.mock("../services/live-test.service.js", async (io) => {
   const a = await io<typeof import("../services/live-test.service.js")>();
   return { ...a, shouldSendLiveForThread: async () => ({ live: h.liveForThread }) };
+});
+
+vi.mock("../services/principal.service.js", async (io) => {
+  const a = await io<typeof import("../services/principal.service.js")>();
+  return {
+    ...a,
+    resolvePrincipal: async (...args: Parameters<typeof a.resolvePrincipal>) => {
+      if (h.principalFailure) throw new Error("raw principal DB failure");
+      return a.resolvePrincipal(...args);
+    },
+  };
 });
 
 vi.mock("../services/retrieval-answer.service.js", async (io) => {
@@ -116,9 +137,12 @@ beforeEach(async () => {
   await clearAllCooldowns();
   currentInboundId = `in-${++inboundSeq}`;
   h.flagEnabled = false;
+  h.bridgeEnabled = false;
+  h.autoReplyEnabled = false;
   h.effectiveDryRun = true;
   h.allowed = true;
   h.liveForThread = false;
+  h.principalFailure = false;
   h.answer = null;
   h.answerCalls = 0;
   h.lastInput = null;
@@ -126,6 +150,26 @@ beforeEach(async () => {
 afterAll(async () => { await cleanDatabase(); });
 
 describe("Phase 3.5E — retrieval dispatch (dryRun-only)", () => {
+  it("structured mode owns retrieval intents and fails closed before retrieval without an internal message id", async () => {
+    h.flagEnabled = true;
+    h.bridgeEnabled = true;
+    h.autoReplyEnabled = true;
+    const { config: importedConfig } = await import("../config.js");
+    expect(importedConfig.hermesAgentBridge.enabled).toBe(true);
+    expect(importedConfig.autoReply.enabled).toBe(true);
+
+    const r = await handleIncomingMessage(
+      inbound("gửi tôi thực đơn cửa hàng B", { dbMessageId: undefined }),
+    );
+
+    expect(r).toEqual({
+      dispatched: false,
+      reason: "agent_bridge_internal_message_id_missing",
+    });
+    expect(h.answerCalls).toBe(0);
+    expect(await prisma.outboundRecord.count()).toBe(0);
+  });
+
   it("flag OFF → retrieval branch does not run (falls through to auto_reply_disabled)", async () => {
     h.flagEnabled = false;
     const r = await handleIncomingMessage(inbound("gửi tôi thực đơn cửa hàng B"));
@@ -219,6 +263,18 @@ describe("Phase 3.5E — retrieval dispatch (dryRun-only)", () => {
     expect(r.dispatched).toBe(false);
     expect(r.reason).toBe("retrieval_unavailable");
     expect(await prisma.outboundRecord.count()).toBe(0);
+  });
+
+  it("principal resolution failure → fail closed with no retrieval or outbound", async () => {
+    h.flagEnabled = true;
+    h.principalFailure = true;
+
+    const r = await handleIncomingMessage(inbound("gửi tôi thực đơn của cửa hàng B"));
+
+    expect(r).toEqual({ dispatched: false, reason: "principal_resolution_failed" });
+    expect(h.answerCalls).toBe(0);
+    expect(await prisma.outboundRecord.count()).toBe(0);
+    expect(await prisma.agentTask.count()).toBe(0);
   });
 
   it("hard dryRun guard: effective dryRun false → abort, no send, answerRetrieval not called", async () => {

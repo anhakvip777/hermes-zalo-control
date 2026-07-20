@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { resolveSqliteDatabasePath } from "../backend-paths.js";
+import { prisma } from "../db.js";
 import { getPublicHealth, getHealthSnapshot } from "../services/system-health.service.js";
 
 describe("System Health — public health", () => {
@@ -58,9 +60,32 @@ describe("System Health — full snapshot", () => {
     const snapshot = await getHealthSnapshot();
     // DB exists on this machine
     expect(snapshot.db.ok).toBe(true);
+    expect(snapshot.db.path).toBe(resolveSqliteDatabasePath(process.env.DATABASE_URL ?? "file:./dev.db"));
     expect(snapshot.db.sizeBytes).toBeGreaterThan(0);
     // critical tables at minimum should have Message
     expect(snapshot.db.criticalTables).toHaveProperty("Message");
+  });
+
+  it("reports an explicitly unsupported DATABASE_URL as unavailable without querying SQLite", async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+    const queryRawSpy = vi.spyOn(prisma, "$queryRawUnsafe");
+    process.env.DATABASE_URL = "postgresql://localhost/hermes";
+
+    try {
+      const snapshot = await getHealthSnapshot();
+
+      expect(snapshot.db).toEqual({
+        ok: false,
+        path: null,
+        sizeBytes: 0,
+        criticalTables: {},
+      });
+      expect(queryRawSpy).not.toHaveBeenCalled();
+    } finally {
+      queryRawSpy.mockRestore();
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDatabaseUrl;
+    }
   });
 
   it("autoReply section has correct types", async () => {
@@ -89,7 +114,8 @@ describe("System Health — full snapshot", () => {
   it("backup section has backup count", async () => {
     const snapshot = await getHealthSnapshot();
     expect(typeof snapshot.backup.backupCount).toBe("number");
-    expect([null, "number"]).toContain(typeof snapshot.backup.latestBackupAgeHours);
+    const ageHours = snapshot.backup.latestBackupAgeHours;
+    expect(ageHours === null || typeof ageHours === "number").toBe(true);
   });
 
   it("messages section has inbound/outbound counts", async () => {

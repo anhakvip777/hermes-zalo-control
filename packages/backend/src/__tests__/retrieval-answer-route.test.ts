@@ -98,6 +98,39 @@ describe("POST /api/agent/tools/retrieval-answer", () => {
     expect(json.evidence[0].source).toBe("attachment");
   });
 
+  it("auth + role form_only is denied before search", async () => {
+    await seedMenu();
+    const res = await app.inject({
+      method: "POST", url: ROUTE, headers: { authorization: AUTH },
+      payload: { ...menuBody, role: "form_only" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const json = res.json();
+    expect(json.status).toBe("permission_denied");
+    expect(json.evidence).toEqual([]);
+  });
+
+  it("auth + admin with omitted target stays in requester thread", async () => {
+    await seedMenu();
+    await prisma.message.create({
+      data: {
+        id: "mm-other", zaloMessageId: "zz-other", threadId: "group-B", threadType: "group",
+        content: "cửa hàng B: kết quả mới hơn nhưng sai thread", isFromBot: false,
+        messageType: "text", receivedAt: new Date(Date.now() + 10_000),
+      },
+    });
+
+    const res = await app.inject({
+      method: "POST", url: ROUTE, payload: menuBody, headers: { authorization: AUTH },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const json = res.json();
+    expect(json.status).toBe("found");
+    expect(json.evidence.every((item: { threadId: string }) => item.threadId === "group-A")).toBe(true);
+  });
+
   it("auth + role basic_chat + target other thread → permission_denied", async () => {
     await seedMenu();
     const res = await app.inject({

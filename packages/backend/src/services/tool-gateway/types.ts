@@ -73,6 +73,8 @@ export interface AgentToolCall {
 export interface ToolContext {
   /** Adapter id. Gateway falls back to "hermes" when omitted. */
   agentName?: string;
+  /** Exact caller-owned grant. The gateway independently enforces membership. */
+  readonly allowedTools: readonly string[];
   threadId: string;
   threadType: "user" | "group";
   /** Canonical sender id (for principal resolution / evidence). */
@@ -81,6 +83,10 @@ export interface ToolContext {
   role?: ToolRole;
   /** Caller-resolved principal id — preferred over a gateway lookup. */
   principalId?: string | null;
+  /** Trusted caller assertion; absent means the gateway resolves blocked status. */
+  readonly principalBlocked?: boolean;
+  /** Exact AgentTask.id owned by the dispatcher (for evidence linking). */
+  agentTaskId?: string;
   /** The inbound message id this tool call relates to (for evidence linking). */
   relatedMessageId?: string;
   /** Free-form metadata carried into evidence. */

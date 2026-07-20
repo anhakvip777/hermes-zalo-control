@@ -26,7 +26,16 @@ function cfg(over: Partial<WebConfig> = {}): WebConfig {
   };
 }
 function ctx(o: Partial<ToolContext> = {}): ToolContext {
-  return { agentName: "hermes", threadId: "t1", threadType: "user", role: "admin", principalId: "p1", senderId: "p1", ...o };
+  return {
+    agentName: "hermes",
+    allowedTools: ["web.search", "web.fetchPage"],
+    threadId: "t1",
+    threadType: "user",
+    role: "admin",
+    principalId: "p1",
+    senderId: "p1",
+    ...o,
+  };
 }
 function makeGateway(registry: ToolRegistry, sink: InMemoryToolEvidenceSink) {
   return new ToolGateway({

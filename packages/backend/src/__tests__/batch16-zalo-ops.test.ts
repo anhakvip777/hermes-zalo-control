@@ -83,8 +83,7 @@ const mockGateway = vi.hoisted(() => ({
   startLogin: vi.fn(async () => ({ status: "connected" })),
   logout: vi.fn(async () => {}),
   getApi: vi.fn(() => null),
-  // listenerActive must be true when connected=true for heartbeat to show "ok"
-  listenerActive: true,
+  isListenerActive: vi.fn(() => true),
   // ZR2: reconnect mutex + backup-restore signaling
   isReconnectInProgress: vi.fn(() => false),
   beginReconnect: vi.fn(() => true),
@@ -137,6 +136,7 @@ vi.mock("../services/heartbeat.service.js", () => ({
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => false),
   statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
+  readdirSync: vi.fn(() => []),
   readFileSync: vi.fn(() => "{}"),
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -287,6 +287,59 @@ describe("Batch 16 — Zalo Ops Dashboard", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain("THREAD_NOT_ALLOWED");
+  });
+
+  it("8b. testDM fails closed when allowedThreads is empty without writing evidence", async () => {
+    const { getCurrentEffectiveDryRun, getAllRuntimeSettings } = await import("../services/runtime-config.service.js");
+    (getCurrentEffectiveDryRun as any).mockReturnValue(true);
+    (getAllRuntimeSettings as any).mockResolvedValue([
+      { key: "autoReply.allowedThreads", value: JSON.stringify([]) },
+    ]);
+
+    const { prisma } = await import("../db.js");
+    const { testDM } = await import("../services/zalo-ops.service.js");
+    const result = await testDM({ threadId: "thread-123" }, "admin");
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("THREAD_NOT_ALLOWED");
+    expect(prisma.agentTask.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it("8c. testDM rejects an absent threadId before reading settings or writing evidence", async () => {
+    const { getCurrentEffectiveDryRun, getAllRuntimeSettings } = await import("../services/runtime-config.service.js");
+    (getCurrentEffectiveDryRun as any).mockReturnValue(true);
+    (getAllRuntimeSettings as any).mockResolvedValue([
+      { key: "autoReply.allowedThreads", value: JSON.stringify(["thread-123"]) },
+    ]);
+
+    const { prisma } = await import("../db.js");
+    const { testDM } = await import("../services/zalo-ops.service.js");
+    const result = await testDM({ threadId: "" }, "admin");
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("MISSING_THREAD_ID");
+    expect(getAllRuntimeSettings).not.toHaveBeenCalled();
+    expect(prisma.agentTask.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it("8d. testDM rejects a whitespace-only threadId before reading settings or writing evidence", async () => {
+    const { getCurrentEffectiveDryRun, getAllRuntimeSettings } = await import("../services/runtime-config.service.js");
+    (getCurrentEffectiveDryRun as any).mockReturnValue(true);
+    (getAllRuntimeSettings as any).mockResolvedValue([
+      { key: "autoReply.allowedThreads", value: JSON.stringify(["thread-123"]) },
+    ]);
+
+    const { prisma } = await import("../db.js");
+    const { testDM } = await import("../services/zalo-ops.service.js");
+    const result = await testDM({ threadId: "   \t" }, "admin");
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("MISSING_THREAD_ID");
+    expect(getAllRuntimeSettings).not.toHaveBeenCalled();
+    expect(prisma.agentTask.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
   // ── Test 9: Test DM allowed in dryRun creates audit only ──

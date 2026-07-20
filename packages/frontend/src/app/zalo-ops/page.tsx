@@ -1,26 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
-  getZaloOpsStatus,
-  reconnectZalo,
-  disconnectZalo,
-  getZaloQRStatus,
-  testDM,
   getRecentEvents,
-  type ZaloOpsStatus,
-  type QRStatusOutput,
-  type TestDMResult,
   type RecentEventsResponse,
 } from "../../lib/api-client";
-import { ZaloLoginCard } from "../../components/zalo-login-card";
 import { formatVnTime } from "../../components/ui/TimeText";
-
-type ActionStatus =
-  | { type: "idle" }
-  | { type: "loading"; message: string }
-  | { type: "ok"; message: string }
-  | { type: "err"; message: string };
+import { useOperationalStatus } from "../../components/operational-status-provider";
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 function Card({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) {
@@ -87,104 +73,53 @@ function ConnectionDetailBadge({ detail }: { detail: string | undefined }) {
 
 /* ── Page ─────────────────────────────────────────────────────── */
 export default function ZaloOpsPage() {
-  const [status, setStatus] = useState<ZaloOpsStatus | null>(null);
+  const { zalo, refresh: refreshOperational } = useOperationalStatus();
+  const status = zalo.status === "ready" ? zalo.data : null;
   const [events, setEvents] = useState<RecentEventsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [action, setAction] = useState<ActionStatus>({ type: "idle" });
-  const [qr, setQr] = useState<QRStatusOutput | null>(null);
-  const [testThreadId, setTestThreadId] = useState("");
-  const [testContent, setTestContent] = useState("");
-  const [testResult, setTestResult] = useState<TestDMResult | null>(null);
-
-  const fetchStatus = useCallback(async () => {
-    try { setStatus(await getZaloOpsStatus()); } catch { /* ignore */ }
-  }, []);
+  const [eventsLoading, setEventsLoading] = useState(true);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+  const eventsInFlight = useRef(false);
+  const eventsController = useRef<AbortController | null>(null);
 
   const fetchEvents = useCallback(async () => {
-    try { setEvents(await getRecentEvents()); } catch { /* ignore */ }
+    if (eventsInFlight.current) return;
+    eventsInFlight.current = true;
+    setEventsError(null);
+    const controller = new AbortController();
+    eventsController.current = controller;
+    try {
+      const nextEvents = await getRecentEvents(controller.signal);
+      if (!controller.signal.aborted) setEvents(nextEvents);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setEvents(null);
+        setEventsError(err instanceof Error ? err.message : "Không thể tải recent events");
+      }
+    } finally {
+      if (eventsController.current === controller) eventsController.current = null;
+      eventsInFlight.current = false;
+      setEventsLoading(false);
+    }
   }, []);
 
-  const fetchAll = useCallback(() => {
-    Promise.all([fetchStatus(), fetchEvents()]).finally(() => setLoading(false));
-  }, [fetchStatus, fetchEvents]);
+  const refreshAll = useCallback(() => {
+    void refreshOperational();
+    void fetchEvents();
+  }, [refreshOperational, fetchEvents]);
 
   useEffect(() => {
-    fetchAll();
-    const t = setInterval(fetchAll, 10_000);
-    return () => clearInterval(t);
-  }, [fetchAll]);
+    void fetchEvents();
+    const timer = window.setInterval(() => void fetchEvents(), 30_000);
+    return () => {
+      window.clearInterval(timer);
+      eventsController.current?.abort();
+    };
+  }, [fetchEvents]);
 
-  const doReconnect = async () => {
-    // ZR2: guard against double-submit — refuse if a reconnect (or any action) is mid-flight.
-    if (action.type === "loading") return;
-    const detail = status?.connectionDetail;
-    const loadingMsg =
-      detail === "backup_available" ? "Đang khôi phục session từ backup…" :
-      detail === "qr_required" ? "Đang tạo QR đăng nhập Zalo…" :
-      "Đang kết nối lại Zalo…";
-    setAction({ type: "loading", message: loadingMsg });
-    try {
-      const r = await reconnectZalo();
-      setAction(r.success ? { type: "ok", message: r.message } : { type: "err", message: r.message });
-      fetchStatus();
-    } catch (e: unknown) {
-      setAction({ type: "err", message: e instanceof Error ? e.message : "Reconnect failed" });
-    }
-  };
-
-  const doDisconnect = async () => {
-    if (!confirm("⚠️ Ngắt kết nối Zalo? Listener sẽ dừng. OK?")) return;
-    setAction({ type: "loading", message: "Đang ngắt kết nối…" });
-    try {
-      const r = await disconnectZalo();
-      setAction(r.success ? { type: "ok", message: "Đã ngắt kết nối" } : { type: "err", message: r.status });
-      fetchStatus();
-    } catch (e: unknown) {
-      setAction({ type: "err", message: e instanceof Error ? e.message : "Disconnect failed" });
-    }
-  };
-
-  const doCheckQR = async () => {
-    setAction({ type: "loading", message: "Đang kiểm tra QR…" });
-    try {
-      const q = await getZaloQRStatus();
-      setQr(q);
-      setAction({ type: "ok", message: q.status });
-    } catch (e: unknown) {
-      setAction({ type: "err", message: e instanceof Error ? e.message : "QR check failed" });
-    }
-  };
-
-  const doTestDM = async () => {
-    if (!testThreadId.trim()) { setTestResult({ allowed: false, reason: "Missing threadId" }); return; }
-    setAction({ type: "loading", message: "Đang test DM…" });
-    try {
-      const r = await testDM(testThreadId.trim(), testContent || undefined);
-      setTestResult(r);
-      setAction(r.allowed ? { type: "ok", message: `Cho phép — taskId: ${r.agentTaskId ?? "—"}` } : { type: "err", message: r.reason ?? "Blocked" });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Test DM failed";
-      setTestResult({ allowed: false, reason: msg });
-      setAction({ type: "err", message: msg });
-    }
-  };
-
-  if (loading && !status) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-xl font-bold text-slate-100">Zalo Operations</h1>
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-28 animate-pulse rounded-lg bg-slate-800 border border-slate-700" />
-          ))}
-        </div>
-      </div>
-    );
+  if (zalo.status === "loading" && eventsLoading) {
+    return <div className="space-y-4"><h1 className="text-xl font-bold text-slate-100">Zalo Operations</h1><p className="text-sm text-slate-500">Đang tải trạng thái…</p></div>;
   }
 
-  const inp = "flex-1 min-w-[160px] rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none";
-  const btnPrimary = "px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-md transition-colors";
-  const btnDanger = "px-3 py-1.5 bg-red-700 hover:bg-red-600 text-white text-xs font-medium rounded-md transition-colors";
   const btnSecondary = "px-3 py-1.5 border border-slate-700 text-slate-300 hover:bg-slate-700 text-xs rounded-md transition-colors";
 
   return (
@@ -193,58 +128,36 @@ export default function ZaloOpsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-100">Zalo Operations</h1>
-          <p className="text-xs text-slate-500 mt-0.5">Connection status, session, heartbeats, test DM.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Status-only connection, session, heartbeat and recent-event evidence.</p>
         </div>
-        <button onClick={fetchAll} className={btnSecondary}>🔄 Refresh</button>
+        <button onClick={refreshAll} className={btnSecondary}>🔄 Refresh</button>
       </div>
 
-      {/* Action feedback */}
-      {action.type !== "idle" && (
-        <div className={`rounded-md border px-4 py-2.5 text-sm flex items-center justify-between ${
-          action.type === "loading" ? "border-blue-800 bg-blue-950/40 text-blue-400" :
-          action.type === "ok" ? "border-green-800 bg-green-950/40 text-green-400" :
-          "border-red-800 bg-red-950/40 text-red-400"
-        }`}>
-          <span>{action.message}</span>
-          {action.type !== "loading" && (
-            <button onClick={() => setAction({ type: "idle" })} className="text-slate-600 hover:text-slate-400 ml-3">×</button>
-          )}
-        </div>
-      )}
+      {zalo.status === "unknown" && <div className="rounded-md border border-red-800 bg-red-950/40 px-4 py-2.5 text-sm text-red-300">Zalo runtime UNKNOWN — {zalo.error}</div>}
+      {eventsError && <div className="rounded-md border border-red-800 bg-red-950/40 px-4 py-2.5 text-sm text-red-300">Recent events UNKNOWN — {eventsError}</div>}
+      <div className="rounded-md border border-blue-800 bg-blue-950/30 px-4 py-2.5 text-sm text-blue-300">Zalo operations đang ở chế độ status-only. QR, reconnect, disconnect và test-DM không được gọi từ dashboard remediation.</div>
 
-      {/* QR warning */}
-      {status?.session.qrAvailable && (
-        <div className="rounded-md border border-yellow-800 bg-yellow-950/40 px-4 py-3 text-sm text-yellow-400 flex items-center gap-2">
-          <span className="text-lg">⚠</span>
-          <div>
-            <strong>QR Login required</strong> — session đã hết hạn hoặc cần đăng nhập lại.
-            <button onClick={doCheckQR} className="ml-3 underline text-yellow-300 text-xs hover:text-yellow-100">Kiểm tra QR →</button>
-          </div>
-        </div>
-      )}
+      {/* Runtime status is unknown until a complete response exists. */}
+      {!status && <div className="rounded-md border border-slate-700 bg-slate-900/50 px-4 py-3 text-sm text-slate-400">Runtime status UNKNOWN — không suy luận disconnected, dry-run hoặc empty events.</div>}
 
-      {/* Zalo Login Card — shown when disconnected */}
-      {!status?.connected && (
-        <ZaloLoginCard onConnected={fetchAll} backupAvailable={status?.session.backupAvailable ?? false} />
-      )}
+      {status?.session.qrAvailable && <div className="rounded-md border border-yellow-800 bg-yellow-950/40 px-4 py-3 text-sm text-yellow-400">QR metadata có sẵn từ backend nhưng không có thao tác quét QR trên trang này.</div>}
+
+      {/* No login card or mutation controls in remediation. */}
+
 
       {/* Connection */}
       <Card title="Connection">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mb-4">
           <Stat label="Status" value={
-            <span className={status?.connected ? "text-green-400 font-semibold" : "text-red-400 font-semibold"}>
-              {status?.connected ? "● Connected" : "○ Disconnected"}
+            <span className={status ? (status.connected ? "text-green-400 font-semibold" : "text-slate-400 font-semibold") : "text-slate-400 font-semibold"}>
+              {status ? (status.connected ? "● Connected" : "○ Disconnected") : "? Unknown"}
             </span>
           } />
           <Stat label="Listener" value={
-            status?.listenerActive
-              ? <span className="text-green-400">● Active</span>
-              : <span className="text-red-400">○ Stopped</span>
+            status ? (status.listenerActive ? <span className="text-green-400">● Active</span> : <span className="text-slate-400">○ Stopped</span>) : <span className="text-slate-400">? Unknown</span>
           } />
           <Stat label="Dry Run" value={
-            status?.dryRun
-              ? <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-amber-950 text-amber-400 border-amber-800">🛡 ON</span>
-              : <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-red-950 text-red-400 border-red-800">⚡ OFF</span>
+            status ? (status.dryRun ? <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-amber-950 text-amber-400 border-amber-800">🛡 ON</span> : <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-red-950 text-red-400 border-red-800">⚡ OFF</span>) : <span className="text-slate-400">? Unknown</span>
           } />
           <Stat label="Connection Detail" value={<ConnectionDetailBadge detail={status?.connectionDetail} />} />
           <Stat label="Bot UID" value={<code className="font-mono text-[11px] text-blue-400">{status?.selfUserId ?? "—"}</code>} />
@@ -260,47 +173,12 @@ export default function ZaloOpsPage() {
 
       {/* Session */}
       <Card title="Session">
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
-          <Stat label="File" value={
-            status?.session.exists
-              ? <span className="text-green-400">● Present</span>
-              : <span className="text-red-400">○ Missing</span>
-          } />
-          <Stat label="Age" value={status?.session.age ?? "—"} />
-          <Stat label="QR Available" value={status?.session.qrAvailable ? <span className="text-yellow-400">⚠ Yes</span> : "No"} />
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <Stat label="File" value={status ? (status.session.exists ? <span className="text-green-400">● Present</span> : <span className="text-slate-400">? Unknown / missing</span>) : "? Unknown"} />
+          <Stat label="Age" value={status?.session.age ?? "? Unknown"} />
+          <Stat label="QR Metadata" value={status ? (status.session.qrAvailable ? <span className="text-yellow-400">Available</span> : "Not available") : "? Unknown"} />
         </div>
-        {status?.session.backupAvailable && !status?.session.exists && (
-          <div className="rounded-md border border-cyan-800 bg-cyan-950/30 px-3 py-2 text-xs text-cyan-400 mb-3">
-            ⟲ Có backup session khả dụng — bấm <strong>Khôi phục từ backup</strong> để kết nối lại mà không cần quét QR.
-          </div>
-        )}
-        {status?.session.warning && (
-          <div className="rounded-md border border-yellow-800 bg-yellow-950/30 px-3 py-2 text-xs text-yellow-400 mb-3">
-            ⚠ {status.session.warning}
-          </div>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={doReconnect}
-            disabled={action.type === "loading" || status?.connectionDetail === "reconnect_in_progress"}
-            className={`${btnPrimary} disabled:opacity-50 disabled:cursor-not-allowed`}
-          >
-            {status?.connectionDetail === "reconnect_in_progress"
-              ? "⏳ Đang kết nối lại…"
-              : status?.connectionDetail === "backup_available"
-                ? "⟲ Khôi phục từ backup"
-                : status?.connectionDetail === "qr_required" || status?.connectionDetail === "restore_failed"
-                  ? "▣ Tạo QR đăng nhập Zalo"
-                  : "🔄 Reconnect"}
-          </button>
-          <button onClick={doDisconnect} className={btnDanger}>○ Disconnect</button>
-          <button onClick={doCheckQR} className={btnSecondary}>📱 Check QR</button>
-        </div>
-        {qr && (
-          <div className="mt-3 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-slate-400">
-            QR: <strong className="text-slate-300">{qr.status}</strong> — {qr.message}
-          </div>
-        )}
+        {status?.session.warning && <div className="mt-3 rounded-md border border-yellow-800 bg-yellow-950/30 px-3 py-2 text-xs text-yellow-400">⚠ {status.session.warning}</div>}
       </Card>
 
       {/* Heartbeats */}
@@ -313,36 +191,28 @@ export default function ZaloOpsPage() {
               <Hb label="Message Pipeline" status={status.heartbeats.messagePipeline.status} ageSeconds={status.heartbeats.messagePipeline.ageSeconds} />
             </>
           ) : (
-            <p className="text-slate-600 text-xs col-span-3">Loading…</p>
+            <p className="text-slate-400 text-xs col-span-3">UNKNOWN — chưa có heartbeat response hợp lệ.</p>
           )}
         </div>
       </Card>
 
       {/* Allowed Threads */}
       <Card title="Allowed Threads">
-        {status?.allowedThreads && status.allowedThreads.length > 0 ? (
+        {!status ? (
+          <p className="text-xs text-slate-400">? UNKNOWN — chưa có runtime response hợp lệ.</p>
+        ) : status.allowedThreads.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {status.allowedThreads.map((t) => (
               <code key={t} className="rounded-md bg-slate-900 border border-slate-700 px-2 py-1 text-[11px] font-mono text-blue-400">{t}</code>
             ))}
           </div>
         ) : (
-          <p className="text-xs text-slate-600">Chưa cấu hình thread nào.</p>
+          <p className="text-xs text-slate-600">Response hợp lệ: chưa cấu hình thread nào.</p>
         )}
       </Card>
 
-      {/* Test DM */}
-      <Card title="Test DM (dry-run only)">
-        <div className="flex flex-wrap gap-2 mb-3">
-          <input type="text" placeholder="Thread ID" value={testThreadId} onChange={(e) => setTestThreadId(e.target.value)} className={inp} />
-          <input type="text" placeholder="Content (optional)" value={testContent} onChange={(e) => setTestContent(e.target.value)} className={inp} />
-          <button onClick={doTestDM} className="px-4 py-1.5 bg-violet-700 hover:bg-violet-600 text-white text-xs font-medium rounded-md transition-colors">🧪 Test</button>
-        </div>
-        {testResult && (
-          <div className={`rounded-md border px-3 py-2 text-xs ${testResult.allowed ? "border-green-800 bg-green-950/30 text-green-400" : "border-red-800 bg-red-950/30 text-red-400"}`}>
-            {testResult.allowed ? `✅ Allowed — taskId: ${testResult.agentTaskId ?? "—"}` : `🚫 ${testResult.reason}`}
-          </div>
-        )}
+      <Card title="Test DM">
+        <p className="text-sm text-slate-400">Test DM đã bị vô hiệu hóa trong remediation dashboard. Không có request test hoặc outbound action nào được thực hiện.</p>
       </Card>
 
       {/* Recent Events */}
@@ -350,7 +220,7 @@ export default function ZaloOpsPage() {
         <div className="space-y-4">
           {/* Inbound */}
           <div>
-            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-semibold mb-2">Inbound ({events?.inbound.length ?? 0})</p>
+            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-semibold mb-2">Inbound ({events ? events.inbound.length : "UNKNOWN"})</p>
             <div className="max-h-44 overflow-y-auto space-y-1">
               {events?.inbound.map((ev, i) => (
                 <div key={i} className="flex items-start gap-2 rounded-md bg-slate-900 border border-slate-700/50 px-2.5 py-1.5 text-xs">
@@ -359,12 +229,12 @@ export default function ZaloOpsPage() {
                   <span className="text-slate-400 truncate">{ev.senderName}: {ev.content}</span>
                 </div>
               ))}
-              {(!events || events.inbound.length === 0) && <p className="text-xs text-slate-600 px-1">Không có tin đến gần đây</p>}
+              {!events ? <p className="text-xs text-slate-400 px-1">? Unknown — không có dữ liệu events</p> : events.inbound.length === 0 && <p className="text-xs text-slate-600 px-1">Không có tin đến gần đây</p>}
             </div>
           </div>
           {/* Outbound */}
           <div>
-            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-semibold mb-2">Outbound ({events?.outbound.length ?? 0})</p>
+            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-semibold mb-2">Outbound ({events ? events.outbound.length : "UNKNOWN"})</p>
             <div className="max-h-44 overflow-y-auto space-y-1">
               {events?.outbound.map((ev, i) => (
                 <div key={i} className="flex items-start gap-2 rounded-md bg-slate-900 border border-slate-700/50 px-2.5 py-1.5 text-xs">
@@ -374,12 +244,12 @@ export default function ZaloOpsPage() {
                   {ev.errorCode && <span className="text-red-400 shrink-0 font-medium">{ev.errorCode}</span>}
                 </div>
               ))}
-              {(!events || events.outbound.length === 0) && <p className="text-xs text-slate-600 px-1">Không có outbound gần đây</p>}
+              {!events ? <p className="text-xs text-slate-400 px-1">? Unknown — không có dữ liệu events</p> : events.outbound.length === 0 && <p className="text-xs text-slate-600 px-1">Không có outbound gần đây</p>}
             </div>
           </div>
           {/* Errors */}
           <div>
-            <p className="text-[10px] text-red-700 uppercase tracking-widest font-semibold mb-2">Errors ({events?.errors.length ?? 0})</p>
+            <p className="text-[10px] text-red-700 uppercase tracking-widest font-semibold mb-2">Errors ({events ? events.errors.length : "UNKNOWN"})</p>
             <div className="max-h-36 overflow-y-auto space-y-1">
               {events?.errors.map((ev, i) => (
                 <div key={i} className="flex items-start gap-2 rounded-md bg-red-950/20 border border-red-800/40 px-2.5 py-1.5 text-xs">
@@ -387,7 +257,7 @@ export default function ZaloOpsPage() {
                   <span className="text-red-400 truncate">{ev.detail}</span>
                 </div>
               ))}
-              {(!events || events.errors.length === 0) && <p className="text-xs text-slate-600 px-1">✨ No recent errors</p>}
+              {!events ? <p className="text-xs text-slate-400 px-1">? Unknown — không có dữ liệu errors</p> : events.errors.length === 0 && <p className="text-xs text-slate-600 px-1">✨ No recent errors</p>}
             </div>
           </div>
         </div>

@@ -10,6 +10,8 @@
  *
  * Env vars:
  *   SYSTEM_BACKUP_KEEP=10        Number of backups to retain
+ *   SYSTEM_BACKUP_ROOT=<path>    Override backup root (tests)
+ *   ZALO_SESSION_DIR=<path>      Override session directory (tests)
  *   DATABASE_URL=file:./dev.db    DB path
  */
 
@@ -17,15 +19,29 @@ import {
   existsSync, statSync, mkdirSync, copyFileSync, readdirSync,
   unlinkSync, rmdirSync, readFileSync, writeFileSync,
 } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname, join, isAbsolute, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..");
+loadEnv();
 const PRISMA_DIR = resolve(PROJECT_ROOT, "prisma");
-const SESSION_DIR = resolve(PROJECT_ROOT, "zalo-session");
-const BACKUP_ROOT = resolve(PROJECT_ROOT, "backups", "system");
+
+function resolveConfiguredPath(value, fallback) {
+  const configured = typeof value === "string" ? value.trim() : "";
+  if (!configured) return fallback;
+  return isAbsolute(configured) ? resolve(configured) : resolve(PROJECT_ROOT, configured);
+}
+
+const SESSION_DIR = resolveConfiguredPath(
+  process.env.ZALO_SESSION_DIR,
+  resolve(PROJECT_ROOT, "zalo-session"),
+);
+const BACKUP_ROOT = resolveConfiguredPath(
+  process.env.SYSTEM_BACKUP_ROOT,
+  resolve(PROJECT_ROOT, "backups", "system"),
+);
 
 const DB_PATH = (() => {
   const url = process.env.DATABASE_URL || "file:./dev.db";
@@ -41,6 +57,11 @@ function green(s) { return `\x1b[32m${s}\x1b[0m`; }
 function red(s) { return `\x1b[31m${s}\x1b[0m`; }
 function yellow(s) { return `\x1b[33m${s}\x1b[0m`; }
 function fmtBytes(b) { return b < 1024 ? `${b}B` : b < 1048576 ? `${(b/1024).toFixed(1)}KB` : `${(b/1048576).toFixed(1)}MB`; }
+
+function readRetentionCount(envName, fallback) {
+  const value = Number(process.env[envName] ?? fallback);
+  return Number.isInteger(value) && value >= 1 ? value : null;
+}
 
 function loadEnv() {
   const p = resolve(PROJECT_ROOT, ".env");
@@ -89,8 +110,21 @@ function getGitCommit() {
   catch { return "unknown"; }
 }
 
+function resolveBackupDir(name) {
+  if (typeof name !== "string" || !name.startsWith("backup-") || basename(name) !== name) {
+    return null;
+  }
+  return join(BACKUP_ROOT, name);
+}
+
 // --- Create backup ---
 function createBackup(reason = "manual") {
+  const keep = readRetentionCount("SYSTEM_BACKUP_KEEP", 10);
+  if (keep === null) {
+    console.log(red("[backup] ERROR: SYSTEM_BACKUP_KEEP must be an integer >= 1"));
+    return { ok: false };
+  }
+
   const ts = new Date().toISOString().replace(/[-:]/g, "").replace(/\./g, "").slice(0, 17);
   const name = `backup-${ts}`;
   const dir = join(BACKUP_ROOT, name);
@@ -129,7 +163,6 @@ function createBackup(reason = "manual") {
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf-8");
 
   // Retention
-  const keep = parseInt(process.env.SYSTEM_BACKUP_KEEP || "10", 10);
   const dirs = listBackups();
   for (let i = keep; i < dirs.length; i++) {
     const old = join(BACKUP_ROOT, dirs[i]);
@@ -179,8 +212,13 @@ function listBackupsDetailed() {
 
 // --- Verify ---
 function verifyBackup(name) {
-  const dir = join(BACKUP_ROOT, name);
+  const dir = resolveBackupDir(name);
   const errors = [];
+
+  if (!dir) {
+    console.log(red(`[backup] invalid backup name: ${name}`));
+    return { ok: false, errors: ["invalid backup name"] };
+  }
 
   if (!existsSync(dir)) {
     console.log(red(`[backup] ${name} not found`));
@@ -234,13 +272,13 @@ function verifyBackup(name) {
 
 // --- Restore ---
 function restoreBackup(name) {
-  const dir = join(BACKUP_ROOT, name);
-
   const verify = verifyBackup(name);
   if (!verify.ok) {
     console.log(red("[backup] Restore aborted: backup verification failed"));
     return { ok: false };
   }
+  const dir = resolveBackupDir(name);
+  if (!dir) return { ok: false };
 
   console.log(yellow("[backup] Creating pre-restore safety backup..."));
   const safety = createBackup("pre-restore");
@@ -271,7 +309,6 @@ function restoreBackup(name) {
 // --- Main ---
 
 async function main() {
-  loadEnv();
   const args = process.argv.slice(2);
   const cmd = args[0];
 

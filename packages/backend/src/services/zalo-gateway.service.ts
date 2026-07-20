@@ -691,6 +691,11 @@ export class ZaloGatewayService extends EventEmitter {
 
         const saved = await saveIncomingMessage(msg, this.status.selfUserId);
         if (!saved.saved) return; // dedup or anti-loop
+        if (!saved.dbMessageId) {
+          console.error("[listener] inbound save returned no internal message id — dropped");
+          return;
+        }
+        msg.dbMessageId = saved.dbMessageId;
 
         // Dispatch to Hermes for auto-reply (safe: catches all errors)
         try {

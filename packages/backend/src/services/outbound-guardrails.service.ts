@@ -263,6 +263,7 @@ export interface OutboundIdempotencyRow {
 /** Look up an existing OutboundRecord by its idempotency key. */
 export async function findOutboundByIdempotencyKey(
   idempotencyKey: string,
+  options: { throwOnError?: boolean } = {},
 ): Promise<OutboundIdempotencyRow | null> {
   try {
     const { prisma } = await import("../db.js");
@@ -271,7 +272,8 @@ export async function findOutboundByIdempotencyKey(
       select: { id: true, decision: true, dryRun: true, sentMessageId: true, reason: true },
     });
     return row ?? null;
-  } catch {
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return null;
   }
 }
@@ -318,6 +320,7 @@ export async function reserveOutboundRecord(input: ReserveOutboundInput): Promis
 export async function updateOutboundRecordById(
   id: string,
   patch: { sentMessageId?: string; decision?: "allow" | "skip" | "block"; reason?: string; errorCode?: string | null },
+  options: { throwOnError?: boolean } = {},
 ): Promise<void> {
   try {
     const { prisma } = await import("../db.js");
@@ -331,6 +334,7 @@ export async function updateOutboundRecordById(
       },
     });
   } catch (err: unknown) {
+    if (options.throwOnError) throw err;
     console.error(`[outbound] Failed to update OutboundRecord ${id}: ${(err as Error).message}`);
   }
 }

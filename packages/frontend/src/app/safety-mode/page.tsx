@@ -3,12 +3,10 @@
 import { useEffect, useState } from "react";
 import {
   getRuntimeConfig,
-  setAutoReplyDryRun,
   type RuntimeConfigResponse,
   getHeartbeats,
   type HeartbeatsResponse,
   getErrorSummary,
-  triggerTestAlert,
   type ErrorSummaryResponse,
 } from "../../lib/api-client";
 import { useToast } from "../../components/toast";
@@ -16,16 +14,9 @@ import {
   Card,
   PageHeader,
   LoadingSpinner,
-  EmptyState,
   ErrorBanner,
-  WarnBanner,
-  DarkButton,
-  DarkInput,
-  DarkModal,
   StatCard,
-  Kv,
   StatusPill,
-  SeverityPill,
   SectionLabel,
 } from "../../components/ui/dark";
 
@@ -33,52 +24,23 @@ export default function SafetyModePage() {
   const [data, setData] = useState<RuntimeConfigResponse | null>(null);
   const [heartbeats, setHeartbeats] = useState<HeartbeatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState<"live" | "dry" | null>(null);
-  const [confirmText, setConfirmText] = useState("");
-  const [reason, setReason] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
 
   const fetchData = () => {
     setLoading(true);
+    setError(null);
     Promise.all([getRuntimeConfig(), getHeartbeats()])
       .then(([config, hb]) => { setData(config); setHeartbeats(hb); })
-      .catch(() => toast("Không tải được cấu hình runtime", "error"))
+      .catch((err) => { setData(null); setHeartbeats(null); setError(err instanceof Error ? err.message : "Không tải được cấu hình runtime"); toast("Không tải được cấu hình runtime", "error"); })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 15_000);
-    return () => clearInterval(interval);
   }, []);
 
-  const isDryRun = data?.effective?.dryRun ?? true;
-
-  const handleToggle = async () => {
-    if (!showModal) return;
-    const dryRun = showModal === "dry";
-    setSubmitting(true);
-    try {
-      const result = await setAutoReplyDryRun({ dryRun, confirmText, reason });
-      if (result.success) {
-        toast(
-          dryRun ? "✅ Đã bật chế độ DRY RUN an toàn" : "⚠️ ĐÃ BẬT LIVE MODE — bot sẽ gửi tin thật!",
-          dryRun ? "success" : "error",
-        );
-        setShowModal(null);
-        setConfirmText("");
-        setReason("");
-        fetchData();
-      } else {
-        toast(result.error ?? "Lỗi không xác định", "error");
-      }
-    } catch {
-      toast("Toggle thất bại", "error");
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const isDryRun = data?.effective?.dryRun;
 
   if (loading && !data) return <LoadingSpinner />;
 
@@ -86,9 +48,10 @@ export default function SafetyModePage() {
     <div className="space-y-6">
       <PageHeader
         title="🛡️ Safety Mode"
-        subtitle="Kiểm soát chế độ gửi tin thật / dry-run của bot Zalo."
+        subtitle="Trạng thái runtime ở chế độ chỉ đọc trong remediation dashboard."
         onRefresh={fetchData}
       />
+      {error && <ErrorBanner message={error} />}
 
       {/* Status card */}
       <Card>
@@ -99,63 +62,53 @@ export default function SafetyModePage() {
               Nguồn: {data?.effective?.dryRunSource === "runtime" ? "Runtime (DB override)" : "Biến môi trường (.env)"}
             </p>
           </div>
-          <StatusPill variant={isDryRun ? "dry-run" : "sent"} pulse={!isDryRun}>
-            {isDryRun ? "🟢 DRY RUN" : "🔴 LIVE MODE"}
+          <StatusPill variant={isDryRun === undefined ? "warn" : isDryRun ? "dry-run" : "sent"} pulse={isDryRun === false}>
+            {isDryRun === undefined ? "? UNKNOWN" : isDryRun ? "🟢 DRY RUN" : "🔴 LIVE MODE"}
           </StatusPill>
         </div>
         <div className="grid grid-cols-3 gap-4 mt-6">
-          <StatCard label="Allowed threads" value={data?.effective?.allowedThreads?.length ?? 0} />
-          <StatCard label="Cooldown (s)" value={data?.effective?.cooldownSeconds ?? 0} />
-          <StatCard label="Audit records" value={data?.recentAudit?.length ?? 0} />
+          <StatCard label="Allowed threads" value={data ? data.effective.allowedThreads.length : "UNKNOWN"} />
+          <StatCard label="Cooldown (s)" value={data ? data.effective.cooldownSeconds : "UNKNOWN"} />
+          <StatCard label="Audit records" value={data ? data.recentAudit.length : "UNKNOWN"} />
         </div>
       </Card>
 
-      {/* Toggle buttons */}
-      <div className="grid grid-cols-2 gap-4">
-        <button
-          onClick={() => { setShowModal("dry"); setConfirmText(""); setReason(""); }}
-          disabled={isDryRun}
-          className="rounded-xl border border-green-700/60 bg-green-900/20 px-6 py-5 text-green-300 font-semibold
-                     hover:bg-green-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-left"
-        >
-          🔒 Chuyển sang DRY RUN
-          <p className="text-xs font-normal text-green-500/80 mt-1">An toàn — bot không gửi tin thật</p>
-        </button>
-        <button
-          onClick={() => { setShowModal("live"); setConfirmText(""); setReason(""); }}
-          disabled={!isDryRun}
-          className="rounded-xl border border-red-700/60 bg-red-900/20 px-6 py-5 text-red-300 font-semibold
-                     hover:bg-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-left"
-        >
-          ⚠️ Bật LIVE MODE
-          <p className="text-xs font-normal text-red-500/80 mt-1">Nguy hiểm — bot sẽ gửi tin thật!</p>
-        </button>
+      <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-4 py-3 text-sm text-slate-400">
+        Global LIVE và Test Alert đã bị gỡ khỏi dashboard remediation. Chỉ hiển thị trạng thái và audit; global live bị backend từ chối.
       </div>
 
       {/* Audit history */}
       <Card>
         <h2 className="text-lg font-semibold text-slate-100 mb-4">📋 Lịch sử thay đổi</h2>
-        {data?.recentAudit?.length ? (
+        {!data ? (
+          <p className="text-sm text-slate-400">Audit UNKNOWN — chưa có runtime response hợp lệ.</p>
+        ) : data.recentAudit.length ? (
           <div className="space-y-2">
-            {data.recentAudit.slice(0, 10).map((a) => (
-              <div key={a.id} className="flex items-center justify-between rounded-lg bg-slate-700/40 border border-slate-700 p-3 text-sm">
-                <div>
-                  <span className="font-mono text-xs text-slate-500">{new Date(a.createdAt).toLocaleString("vi-VN")}</span>
-                  <p className="mt-1 text-slate-300">
-                    <span className="font-bold">{a.oldValue === "true" ? "DRY" : "LIVE"}</span>
-                    {" → "}
-                    <span className={`font-bold ${a.newValue === "true" ? "text-green-400" : "text-red-400"}`}>
-                      {a.newValue === "true" ? "DRY" : "LIVE"}
-                    </span>
-                    {a.reason && <span className="text-slate-500"> — {a.reason.slice(0, 60)}</span>}
-                  </p>
+            {data.recentAudit.slice(0, 10).map((a) => {
+              const isDryRunAudit = a.key === "autoReply.dryRun";
+              const oldLabel = isDryRunAudit
+                ? a.oldValue === null ? "UNSET" : a.oldValue === "true" ? "DRY RUN" : a.oldValue === "false" ? "GLOBAL LIVE (blocked)" : "UNKNOWN"
+                : a.oldValue ?? "UNSET";
+              const newLabel = isDryRunAudit
+                ? a.newValue === "true" ? "DRY RUN" : a.newValue === "false" ? "GLOBAL LIVE (blocked)" : "UNKNOWN"
+                : a.newValue;
+              return (
+                <div key={a.id} className="flex items-center justify-between rounded-lg bg-slate-700/40 border border-slate-700 p-3 text-sm">
+                  <div>
+                    <span className="font-mono text-xs text-slate-500">{new Date(a.createdAt).toLocaleString("vi-VN")}</span>
+                    <p className="mt-1 text-slate-300">
+                      <code className="text-xs text-blue-300">{a.key}</code>{" · "}
+                      <span>{oldLabel}</span>{" → "}<span>{newLabel}</span>
+                      {a.reason && <span className="text-slate-500"> — {a.reason.slice(0, 60)}</span>}
+                    </p>
+                  </div>
+                  {a.backupName && <span className="text-xs text-slate-500">💾 backup</span>}
                 </div>
-                {a.backupName && <span className="text-xs text-slate-500">💾 backup</span>}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
-          <p className="text-sm text-slate-500">Chưa có thay đổi nào.</p>
+          <p className="text-sm text-slate-500">Response hợp lệ: chưa có thay đổi nào.</p>
         )}
       </Card>
 
@@ -165,7 +118,9 @@ export default function SafetyModePage() {
         <p className="text-xs text-slate-500 mb-4">
           Stale threshold: {heartbeats?.staleThresholdSeconds ?? 90}s — Tổng: {heartbeats?.status ?? "—"}
         </p>
-        {heartbeats?.items?.length ? (
+        {!heartbeats ? (
+          <p className="text-sm text-slate-400">Heartbeats UNKNOWN — chưa có response hợp lệ.</p>
+        ) : heartbeats.items.length ? (
           <div className="grid grid-cols-2 gap-2">
             {heartbeats.items.map((hb) => {
               const variant = hb.status === "ok" ? "active" : hb.status === "stale" ? "warn" : "failed";
@@ -195,60 +150,12 @@ export default function SafetyModePage() {
             })}
           </div>
         ) : (
-          <p className="text-sm text-slate-500">Chưa có heartbeat nào.</p>
+          <p className="text-sm text-slate-500">Response hợp lệ: chưa có heartbeat nào.</p>
         )}
       </Card>
 
       <ErrorSummaryCard />
 
-      {/* Modal */}
-      {showModal && (
-        <DarkModal onClose={() => setShowModal(null)}>
-          <h2 className={`text-xl font-bold ${showModal === "live" ? "text-red-400" : "text-green-400"}`}>
-            {showModal === "live" ? "⚠️ BẬT LIVE MODE" : "🔒 Bật Dry Run"}
-          </h2>
-          <p className="mt-2 text-sm text-slate-400">
-            {showModal === "live"
-              ? "Bot sẽ gửi tin nhắn THẬT tới người dùng Zalo. Hành động này được audit và backup tự động."
-              : "Bot sẽ chỉ xử lý nội bộ, không gửi tin thật ra Zalo."}
-          </p>
-          <div className="mt-4 space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1">
-                Gõ xác nhận:{" "}
-                <code className="bg-slate-800 px-1 rounded text-slate-400">
-                  {showModal === "live" ? "ENABLE LIVE MODE" : "ENABLE DRY RUN"}
-                </code>
-              </label>
-              <DarkInput
-                value={confirmText}
-                onChange={(e) => setConfirmText(e.target.value)}
-                placeholder={showModal === "live" ? "ENABLE LIVE MODE" : "ENABLE DRY RUN"}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1">
-                Lý do {showModal === "live" ? "(tối thiểu 10 ký tự)" : "(tuỳ chọn)"}
-              </label>
-              <DarkInput
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                placeholder="Ví dụ: Kiểm tra DM thread trước khi mở rộng"
-              />
-            </div>
-          </div>
-          <div className="mt-6 flex gap-3 justify-end">
-            <DarkButton variant="ghost" onClick={() => setShowModal(null)}>Huỷ</DarkButton>
-            <DarkButton
-              variant={showModal === "live" ? "danger" : "success"}
-              onClick={handleToggle}
-              disabled={submitting || !confirmText || (showModal === "live" && reason.length < 10)}
-            >
-              {submitting ? "Đang xử lý..." : showModal === "live" ? "Xác nhận BẬT LIVE" : "Xác nhận Dry Run"}
-            </DarkButton>
-          </div>
-        </DarkModal>
-      )}
     </div>
   );
 }
@@ -257,31 +164,24 @@ export default function SafetyModePage() {
 function ErrorSummaryCard() {
   const [data, setData] = useState<ErrorSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [alerting, setAlerting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
 
   const fetchData = () => {
+    setError(null);
     getErrorSummary(24)
       .then(setData)
-      .catch(() => toast("Không tải được error summary", "error"))
+      .catch((err) => {
+        setData(null);
+        setError(err instanceof Error ? err.message : "Không tải được error summary");
+        toast("Không tải được error summary", "error");
+      })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30_000);
-    return () => clearInterval(interval);
   }, []);
-
-  const handleTestAlert = async () => {
-    setAlerting(true);
-    try {
-      const result = await triggerTestAlert();
-      if (result.dryRun) toast("✅ Test alert (dry-run) đã được lưu. Không gửi tin nhắn thật.", "success");
-      else toast("⚠️ Test alert đã gửi thật!", "error");
-    } catch { toast("Test alert thất bại", "error"); }
-    finally { setAlerting(false); }
-  };
 
   const statusVariant =
     data?.status === "error" ? "failed" : data?.status === "warn" ? "warn" : "active";
@@ -290,15 +190,12 @@ function ErrorSummaryCard() {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-slate-100">📊 Error Summary (24h)</h2>
-        <div className="flex items-center gap-2">
-          {data && <StatusPill variant={statusVariant as "failed" | "warn" | "active"}>{data.status.toUpperCase()}</StatusPill>}
-          <DarkButton variant="ghost" size="sm" onClick={handleTestAlert} disabled={alerting}>
-            {alerting ? "Đang gửi..." : "🧪 Test Alert"}
-          </DarkButton>
-        </div>
+        {data && <StatusPill variant={statusVariant as "failed" | "warn" | "active"}>{data.status.toUpperCase()}</StatusPill>}
       </div>
 
-      {loading && !data ? (
+      {error ? (
+        <p className="text-sm text-red-300">Error summary UNKNOWN — {error}</p>
+      ) : loading && !data ? (
         <p className="text-sm text-slate-500">Đang tải error summary...</p>
       ) : data ? (
         <>

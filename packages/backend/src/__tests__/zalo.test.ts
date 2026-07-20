@@ -1,13 +1,14 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockMessageSender } from "../services/message-sender.js";
 import { ZaloMessageSender, rateLimiter } from "../services/zalo-message-sender.js";
 import { ZaloGatewayService, quarantineSessionFile } from "../services/zalo-gateway.service.js";
-import { normalizeMessage, dedupKey, saveIncomingMessage, listMessages, listThreads } from "../services/zalo-receive.js";
+import { normalizeMessage, dedupKey, saveIncomingMessage, listMessages, listThreads, type NormalizedMessage } from "../services/zalo-receive.js";
 import { cleanDatabase } from "./shared-setup.js";
 import * as settingsService from "../services/settings.service.js";
+import { prisma } from "../db.js";
 
 beforeAll(async () => {
   await cleanDatabase();
@@ -56,12 +57,61 @@ describe("ZaloGatewayService — status", () => {
     expect(status.connectionStatus).toBe("disconnected");
   });
 
-  it("emits status events on logout", async () => {
+  it("emits status events on logout without touching the configured session", async () => {
     const gw = new ZaloGatewayService();
+    const testDir = join(tmpdir(), "zalo-logout-test-" + Date.now());
+    (gw as any).sessionDir = testDir;
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(join(testDir, "zalo-session.json"), JSON.stringify({ credentials: { cookie: "test" } }));
     const events: unknown[] = [];
     gw.on("status", (s) => events.push(s));
-    await gw.logout();
-    expect(events.length).toBeGreaterThanOrEqual(1);
+
+    try {
+      await gw.logout();
+      expect(events.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("attaches the saved internal Message.id before inbound dispatch", async () => {
+    const gateway = new ZaloGatewayService();
+    const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+    const listener = {
+      on: vi.fn((event: string, handler: (...args: any[]) => Promise<void> | void) => {
+        handlers.set(event, handler);
+      }),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    (gateway as any).api = { listener };
+
+    const normalized: NormalizedMessage = makeNorm({ zaloMessageId: "zalo-listener-1" });
+    const receiveModule = await import("../services/zalo-receive.js");
+    const dispatcherModule = await import("../services/incoming-dispatcher.service.js");
+    const normalizeSpy = vi.spyOn(receiveModule, "normalizeMessage").mockReturnValue(normalized);
+    const saveSpy = vi.spyOn(receiveModule, "saveIncomingMessage").mockResolvedValue({
+      saved: true,
+      dbMessageId: "message-db-listener-1",
+    });
+    const dispatchSpy = vi.spyOn(dispatcherModule, "handleIncomingMessage").mockResolvedValue({
+      dispatched: true,
+    });
+
+    try {
+      await (gateway as any).startListener();
+      await handlers.get("message")!({ isSelf: false });
+
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      expect(normalized.dbMessageId).toBe("message-db-listener-1");
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ dbMessageId: "message-db-listener-1" }),
+        null,
+      );
+    } finally {
+      normalizeSpy.mockRestore();
+      saveSpy.mockRestore();
+      dispatchSpy.mockRestore();
+    }
   });
 });
 
@@ -143,10 +193,83 @@ describe("saveIncomingMessage — dedup", () => {
     const msg = makeNorm({ senderId: "user-1", zaloMessageId: "zmid-dup-1" });
     const r1 = await saveIncomingMessage(msg, null);
     expect(r1.saved).toBe(true);
+    expect(r1.dbMessageId).toBeTruthy();
 
     const r2 = await saveIncomingMessage(msg, null);
     expect(r2.saved).toBe(false);
     expect(r2.reason).toContain("dedup");
+    expect(r2.dbMessageId).toBe(r1.dbMessageId);
+  });
+
+  it("returns the same internal Message.id for fallback-key duplicates", async () => {
+    const msg = makeNorm({
+      zaloMessageId: "",
+      threadId: "fallback-id-thread",
+      senderId: "fallback-id-sender",
+      content: "fallback id content",
+    });
+
+    const first = await saveIncomingMessage(msg, null);
+    const duplicate = await saveIncomingMessage(msg, null);
+
+    expect(first.saved).toBe(true);
+    expect(first.dbMessageId).toBeTruthy();
+    expect(duplicate.saved).toBe(false);
+    expect(duplicate.reason).toContain("dedup");
+    expect(duplicate.dbMessageId).toBe(first.dbMessageId);
+  });
+
+  it("serializes concurrent identical Zalo events so only one is newly saved", async () => {
+    const msg = makeNorm({
+      zaloMessageId: "zmid-concurrent-internal-id",
+      threadId: "concurrent-id-thread",
+      senderId: "concurrent-id-sender",
+      content: "concurrent id content",
+    });
+    const [first, second] = await Promise.all([
+      saveIncomingMessage(msg, null),
+      saveIncomingMessage(msg, null),
+    ]);
+
+    expect([first.saved, second.saved].sort()).toEqual([false, true]);
+    expect(first.dbMessageId).toBeTruthy();
+    expect(second.dbMessageId).toBe(first.dbMessageId);
+    expect(await prisma.message.count({
+      where: { zaloMessageId: "zmid-concurrent-internal-id" },
+    })).toBe(1);
+  });
+
+  it("accepts a later legitimate fallback message after the bounded dedup window", async () => {
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const msg = makeNorm({
+      zaloMessageId: "",
+      threadId: "fallback-window-thread",
+      senderId: "fallback-window-sender",
+      content: "same legitimate content",
+    });
+
+    try {
+      const first = await saveIncomingMessage(msg, null);
+      const immediateDuplicate = await saveIncomingMessage(msg, null);
+      now += 5 * 60_000;
+      const laterMessage = await saveIncomingMessage(msg, null);
+
+      expect(first.saved).toBe(true);
+      expect(immediateDuplicate.saved).toBe(false);
+      expect(immediateDuplicate.dbMessageId).toBe(first.dbMessageId);
+      expect(laterMessage.saved).toBe(true);
+      expect(laterMessage.dbMessageId).toBeTruthy();
+      expect(laterMessage.dbMessageId).not.toBe(first.dbMessageId);
+      expect(await prisma.message.count({
+        where: {
+          threadId: "fallback-window-thread",
+          senderId: "fallback-window-sender",
+        },
+      })).toBe(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 
@@ -347,11 +470,9 @@ describe("H1 — Session persistence", () => {
     }
   });
 
-  it("F3: runtime-config backup resolves canonical config.zalo.sessionDir", () => {
-    // Verify the backup code uses config.zalo.sessionDir, not cwd/zalo-session
+  it("F3: runtime-config no longer creates session backups", () => {
     const src = readFileSync(join(__dirname, "..", "services", "runtime-config.service.ts"), "utf-8");
-    expect(src).toMatch(/config\.zalo\.sessionDir/);
-    expect(src).not.toMatch(/resolve\(cwd,\s*"zalo-session"/);
+    expect(src).not.toMatch(/copyFileSync|zalo-session\.json|backup-restore/);
   });
 
   it("F4: NO_SESSION_FILE path includes guidance log", () => {
@@ -423,70 +544,94 @@ function makeNorm(overrides: Partial<{
 // ZaloGatewayService — QR login flow (ZALO-WEB-LOGIN)
 // ═══════════════════════════════════════════════════════════════════
 describe("ZaloGatewayService — QR login flow", () => {
-  it("start login when disconnected returns connecting status", async () => {
+  function makeIsolatedGateway() {
     const gw = new ZaloGatewayService();
-    // In dry-run mode (test env), startLogin returns connected immediately
-    const result = await gw.startLogin();
-    expect(["connecting", "connected"]).toContain(result.status);
+    const testDir = join(tmpdir(), "zalo-login-test-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    (gw as any).sessionDir = testDir;
+    return { gw, testDir };
+  }
+
+  it("start login when disconnected returns connecting status without reading configured session backups", async () => {
+    const { gw, testDir } = makeIsolatedGateway();
+    mkdirSync(testDir, { recursive: true });
+    vi.spyOn(gw, "restoreSession").mockResolvedValue(false);
+    vi.spyOn(gw as any, "runLoginInBackground").mockResolvedValue(undefined);
+
+    try {
+      const result = await gw.startLogin();
+      expect(result.status).toBe("connecting");
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it("start login when already connected returns already_connected", async () => {
-    const gw = new ZaloGatewayService();
+    const { gw, testDir } = makeIsolatedGateway();
     // Simulate already connected
     (gw as any).status = { ...gw.getStatus(), connected: true, connectionStatus: "connected" };
     (gw as any).api = {};
-    const result = await gw.startLogin();
-    expect(result.status).toBe("already_connected");
+    try {
+      const result = await gw.startLogin();
+      expect(result.status).toBe("already_connected");
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it("login status reflects disconnected when not started", () => {
-    const gw = new ZaloGatewayService();
+    const { gw } = makeIsolatedGateway();
     const status = gw.getStatus();
     expect(status.connected).toBe(false);
     expect(status.connectionStatus).toBe("disconnected");
   });
 
   it("qrAvailable is false when no qr-current.png exists", () => {
-    const gw = new ZaloGatewayService();
-    // Ensure QR file does not exist (may be left from previous run)
-    const sessionDir = (gw as any).sessionDir as string;
-    const qrPath = join(sessionDir, "qr-current.png");
-    try { rmSync(qrPath); } catch { /* already gone */ }
-    const status = gw.getStatus();
-    // No QR file → qrAvailable = false
-    expect(status.qrAvailable).toBe(false);
+    const { gw, testDir } = makeIsolatedGateway();
+    try {
+      const status = gw.getStatus();
+      expect(status.qrAvailable).toBe(false);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it("qrAvailable is true when qr-current.png exists and is large enough", () => {
-    const gw = new ZaloGatewayService();
-    const sessionDir = (gw as any).sessionDir as string;
-    mkdirSync(sessionDir, { recursive: true });
-    const qrPath = join(sessionDir, "qr-current.png");
-    // Write a fake QR file > 500 bytes
+    const { gw, testDir } = makeIsolatedGateway();
+    mkdirSync(testDir, { recursive: true });
+    const qrPath = join(testDir, "qr-current.png");
     writeFileSync(qrPath, Buffer.alloc(1000, 0xff));
-    const status = gw.getStatus();
-    expect(status.qrAvailable).toBe(true);
-    // Cleanup
-    try { rmSync(qrPath); } catch {}
+    try {
+      const status = gw.getStatus();
+      expect(status.qrAvailable).toBe(true);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it("cancelLogin cancels pending login and removes qr file", () => {
-    const gw = new ZaloGatewayService();
-    const sessionDir = (gw as any).sessionDir as string;
-    mkdirSync(sessionDir, { recursive: true });
-    const qrPath = join(sessionDir, "qr-current.png");
+    const { gw, testDir } = makeIsolatedGateway();
+    mkdirSync(testDir, { recursive: true });
+    const qrPath = join(testDir, "qr-current.png");
     writeFileSync(qrPath, Buffer.alloc(1000, 0xff));
     (gw as any).loginInProgress = true;
-    const result = gw.cancelLogin();
-    expect(result.cancelled).toBe(true);
-    expect((gw as any).loginInProgress).toBe(false);
-    expect(existsSync(qrPath)).toBe(false);
+    try {
+      const result = gw.cancelLogin();
+      expect(result.cancelled).toBe(true);
+      expect((gw as any).loginInProgress).toBe(false);
+      expect(existsSync(qrPath)).toBe(false);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it("cancelLogin no-op when not in progress", () => {
-    const gw = new ZaloGatewayService();
-    const result = gw.cancelLogin();
-    expect(result.cancelled).toBe(false);
-    expect(result.message).toContain("No login");
+    const { gw, testDir } = makeIsolatedGateway();
+    try {
+      const result = gw.cancelLogin();
+      expect(result.cancelled).toBe(false);
+      expect(result.message).toContain("No login");
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });

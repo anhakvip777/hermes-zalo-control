@@ -9,6 +9,7 @@ import {
 } from "../services/runtime-config.service.js";
 import { getAllHeartbeats } from "../services/heartbeat.service.js";
 import { adminAuth } from "../middleware/auth.js";
+import { sendApiError } from "../http/api-error.js";
 
 export async function systemRoutes(app: FastifyInstance) {
   // ── GET /api/system/config-check — admin-only ──────────────────────
@@ -59,11 +60,7 @@ export async function systemRoutes(app: FastifyInstance) {
       const userAgent = (req.headers["user-agent"] as string) ?? undefined;
 
       if (typeof dryRun !== "boolean") {
-        return reply.status(400).send({
-          success: false,
-          error: "dryRun (boolean) is required",
-          errorCode: "MISSING_DRYRUN",
-        });
+        return sendApiError(reply, 400, "MISSING_DRYRUN", "dryRun (boolean) is required");
       }
 
       const result = await setRuntimeConfig({
@@ -77,10 +74,15 @@ export async function systemRoutes(app: FastifyInstance) {
       if (!result.success) {
         const code = result.errorCode === "BAD_CONFIRM_TEXT" || result.errorCode === "REASON_TOO_SHORT"
           ? 400
-          : result.errorCode === "CONFIG_ERROR" || result.errorCode === "NO_BACKUP"
+          : result.errorCode === "GLOBAL_LIVE_DISABLED" || result.errorCode === "CONFIG_ERROR" || result.errorCode === "NO_BACKUP"
             ? 409
             : 500;
-        return reply.status(code).send(result);
+        return sendApiError(
+          reply,
+          code,
+          result.errorCode ?? "RUNTIME_CONFIG_FAILED",
+          result.error ?? "Runtime configuration update failed",
+        );
       }
 
       return reply.send(result);
@@ -280,21 +282,26 @@ export async function systemRoutes(app: FastifyInstance) {
     { preHandler: [adminAuth] },
     async (req: FastifyRequest, reply: FastifyReply) => {
       try {
-        const body = req.body as Record<string, unknown>;
+        const body = (req.body ?? {}) as Record<string, unknown>;
         const { startLiveTest } = await import("../services/live-test.service.js");
         const result = await startLiveTest({
           threadId: body?.threadId as string ?? "",
-          maxMessages: typeof body?.maxMessages === "number" ? body.maxMessages : 1,
-          ttlSeconds: typeof body?.ttlSeconds === "number" ? body.ttlSeconds : 120,
+          maxMessages: (body.maxMessages === undefined ? 1 : body.maxMessages) as number,
+          ttlSeconds: (body.ttlSeconds === undefined ? 120 : body.ttlSeconds) as number,
           confirmText: (body?.confirmText as string) ?? "",
           reason: (body?.reason as string) ?? "",
           createdBy: (body?.createdBy as string) ?? "admin",
         });
         if (!result.success) {
-          const code = result.errorCode === "BAD_CONFIRM" || result.errorCode === "REASON_TOO_SHORT" || result.errorCode === "INVALID_MAX_MESSAGES" || result.errorCode === "INVALID_TTL"
-            ? 400 : result.errorCode === "NOT_READY" || result.errorCode === "THREAD_NOT_ALLOWED" || result.errorCode === "GROUP_NOT_ALLOWED" || result.errorCode === "SESSION_EXISTS" || result.errorCode === "ALREADY_LIVE"
+          const code = result.errorCode === "BAD_CONFIRM" || result.errorCode === "REASON_TOO_SHORT" || result.errorCode === "INVALID_THREAD_ID" || result.errorCode === "INVALID_MAX_MESSAGES" || result.errorCode === "INVALID_TTL"
+            ? 400 : result.errorCode === "NOT_READY" || result.errorCode === "THREAD_NOT_ALLOWED" || result.errorCode === "GROUP_NOT_ALLOWED" || result.errorCode === "THREAD_UNVERIFIED" || result.errorCode === "THREAD_TYPE_CONFLICT" || result.errorCode === "SESSION_EXISTS" || result.errorCode === "ALREADY_LIVE"
             ? 409 : 500;
-          return reply.status(code).send(result);
+          return sendApiError(
+            reply,
+            code,
+            result.errorCode ?? "LIVE_TEST_START_FAILED",
+            result.error ?? "Controlled live test could not start",
+          );
         }
         return reply.send(result);
       } catch (err: unknown) {

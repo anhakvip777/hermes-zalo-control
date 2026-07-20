@@ -37,13 +37,16 @@ import { prisma } from "../db.js";
 const TEST_THREAD_IDS = [
   "thread-test-1", "thread-test-2", "thread-test-3",
   "thread-limit-1", "thread-chars-1", "thread-overdue-1",
-  "thread-claim-1", "thread-complete-1",
+  "thread-claim-1", "thread-complete-1", "thread-batch-identity",
 ];
 
 describe("Message Batching — Service", () => {
   beforeEach(async () => {
     await prisma.messageBatch.deleteMany({
       where: { threadId: { in: TEST_THREAD_IDS } },
+    });
+    await prisma.message.deleteMany({
+      where: { zaloMessageId: { in: ["batch-zalo-earlier", "batch-zalo-last"] } },
     });
   });
 
@@ -95,6 +98,64 @@ describe("Message Batching — Service", () => {
     expect(r2!.isNew).toBe(false);
     expect(r2!.messageCount).toBe(2);
     expect(r2!.combinedText).toBe("first message\nsecond message");
+  });
+
+  it("resolves the last external batch ID to its exact internal Message.id", async () => {
+    await prisma.message.create({
+      data: {
+        id: "batch-db-last",
+        zaloMessageId: "batch-zalo-last",
+        threadId: "thread-batch-identity",
+        threadType: "user",
+        content: "last batched message",
+        isFromBot: false,
+        messageType: "text",
+        role: "user",
+        receivedAt: new Date(),
+      },
+    });
+
+    const resolver = (batchService as unknown as {
+      resolveLastBatchMessageIdentity?: (
+        messageIds: readonly string[],
+        threadId: string,
+        expectedMessageCount: number,
+      ) => Promise<{ zaloMessageId: string; dbMessageId: string } | null>;
+    }).resolveLastBatchMessageIdentity;
+
+    expect(resolver).toBeTypeOf("function");
+    await expect(resolver!(["batch-zalo-earlier", "batch-zalo-last"], "thread-batch-identity", 2))
+      .resolves.toEqual({ zaloMessageId: "batch-zalo-last", dbMessageId: "batch-db-last" });
+  });
+
+  it("fails closed when the last batch message is missing or belongs to another thread", async () => {
+    await prisma.message.create({
+      data: {
+        id: "batch-db-last",
+        zaloMessageId: "batch-zalo-last",
+        threadId: "thread-batch-identity",
+        threadType: "user",
+        content: "last batched message",
+        isFromBot: false,
+        messageType: "text",
+        role: "user",
+        receivedAt: new Date(),
+      },
+    });
+
+    const resolver = (batchService as unknown as {
+      resolveLastBatchMessageIdentity?: (
+        messageIds: readonly string[],
+        threadId: string,
+        expectedMessageCount: number,
+      ) => Promise<{ zaloMessageId: string; dbMessageId: string } | null>;
+    }).resolveLastBatchMessageIdentity;
+
+    expect(resolver).toBeTypeOf("function");
+    await expect(resolver!(["missing-zalo-id"], "thread-batch-identity", 1)).resolves.toBeNull();
+    await expect(resolver!(["batch-zalo-last"], "other-thread", 1)).resolves.toBeNull();
+    await expect(resolver!(["batch-zalo-last", ""], "thread-batch-identity", 2)).resolves.toBeNull();
+    await expect(resolver!(["batch-zalo-last"], "thread-batch-identity", 2)).resolves.toBeNull();
   });
 
   it("addToBatch marks ready when max messages reached", async () => {

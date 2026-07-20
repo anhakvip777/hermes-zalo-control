@@ -24,6 +24,35 @@ export interface BatchResult {
   /** If isReady, the batch should be processed immediately. */
 }
 
+export interface BatchMessageIdentity {
+  zaloMessageId: string;
+  dbMessageId: string;
+}
+
+/** Resolve the last external batch ID to the exact persisted internal Message.id. */
+export async function resolveLastBatchMessageIdentity(
+  messageIds: readonly string[],
+  threadId: string,
+  expectedMessageCount: number,
+): Promise<BatchMessageIdentity | null> {
+  if (
+    !Number.isInteger(expectedMessageCount) ||
+    expectedMessageCount < 1 ||
+    messageIds.length !== expectedMessageCount
+  ) {
+    return null;
+  }
+  const zaloMessageId = messageIds[messageIds.length - 1]?.trim();
+  if (!zaloMessageId || !threadId) return null;
+
+  const row = await prisma.message.findUnique({
+    where: { zaloMessageId },
+    select: { id: true, threadId: true },
+  });
+  if (!row || row.threadId !== threadId) return null;
+  return { zaloMessageId, dbMessageId: row.id };
+}
+
 /**
  * Try to add a message to an existing batch, or create a new one.
  * Returns the batch status — if isReady=true, the caller should process immediately.

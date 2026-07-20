@@ -12,6 +12,8 @@ import { createHash } from "node:crypto";
 
 export interface NormalizedMessage {
   zaloMessageId: string | null;
+  /** Transient internal Message.id, attached after persistence; never from Zalo. */
+  dbMessageId?: string;
   threadId: string;
   threadType: "user" | "group";
   threadName?: string;
@@ -287,23 +289,77 @@ export function dedupKey(msg: NormalizedMessage): string {
   return `fallback:${msg.threadId}:${msg.senderId}:${hash}`;
 }
 
-const recentDedupKeys = new Set<string>();
+export const FALLBACK_DEDUP_WINDOW_MS = 60_000;
+
+interface SaveIncomingMessageResult {
+  saved: boolean;
+  reason?: string;
+  dbMessageId?: string;
+}
+
+interface RecentDedupEntry {
+  dbMessageId: string;
+  expiresAt: number;
+}
+
+const recentDedupEntries = new Map<string, RecentDedupEntry>();
+const pendingDedupSaves = new Map<string, Promise<SaveIncomingMessageResult>>();
 const DEDUP_MAX_SIZE = 10000;
 
 export async function saveIncomingMessage(
   msg: NormalizedMessage,
   selfUserId: string | null,
-): Promise<{ saved: boolean; reason?: string }> {
+): Promise<SaveIncomingMessageResult> {
   // Anti-loop: skip if from self
   if (selfUserId && msg.senderId === selfUserId) {
     return { saved: false, reason: "anti-loop: isSelf" };
   }
 
-  // Dedup check
   const key = dedupKey(msg);
-  if (recentDedupKeys.has(key)) {
-    return { saved: false, reason: "dedup: duplicate" };
+  const pending = pendingDedupSaves.get(key);
+  if (pending) {
+    const first = await pending;
+    return {
+      saved: false,
+      reason: "dedup: concurrent duplicate",
+      dbMessageId: first.dbMessageId,
+    };
   }
+
+  const operation = saveIncomingMessageUnlocked(msg, key);
+  pendingDedupSaves.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (pendingDedupSaves.get(key) === operation) {
+      pendingDedupSaves.delete(key);
+    }
+  }
+}
+
+async function saveIncomingMessageUnlocked(
+  msg: NormalizedMessage,
+  key: string,
+): Promise<SaveIncomingMessageResult> {
+  const recent = recentDedupEntries.get(key);
+  const recentIsActive = !!recent && (
+    !!msg.zaloMessageId || Date.now() <= recent.expiresAt
+  );
+  if (recent && recentIsActive) {
+    const existing = msg.zaloMessageId
+      ? await prisma.message.findUnique({
+          where: { zaloMessageId: msg.zaloMessageId },
+          select: { id: true },
+        })
+      : await prisma.message.findUnique({
+          where: { id: recent.dbMessageId },
+          select: { id: true },
+        });
+    if (existing) {
+      return { saved: false, reason: "dedup: duplicate", dbMessageId: existing.id };
+    }
+  }
+  if (recent) recentDedupEntries.delete(key);
 
   // Try dedup by DB zaloMessageId if present
   if (msg.zaloMessageId) {
@@ -312,19 +368,21 @@ export async function saveIncomingMessage(
       select: { id: true },
     });
     if (existing) {
-      recentDedupKeys.add(key);
-      return { saved: false, reason: "dedup: existing zaloMessageId in DB" };
+      return {
+        saved: false,
+        reason: "dedup: existing zaloMessageId in DB",
+        dbMessageId: existing.id,
+      };
     }
   }
 
   // Prune in-memory dedup set
-  if (recentDedupKeys.size > DEDUP_MAX_SIZE) {
-    for (const k of recentDedupKeys) {
-      recentDedupKeys.delete(k);
-      if (recentDedupKeys.size <= DEDUP_MAX_SIZE / 2) break;
+  if (recentDedupEntries.size > DEDUP_MAX_SIZE) {
+    for (const k of recentDedupEntries.keys()) {
+      recentDedupEntries.delete(k);
+      if (recentDedupEntries.size <= DEDUP_MAX_SIZE / 2) break;
     }
   }
-  recentDedupKeys.add(key);
 
   // Save message
   const messageIdForDb = msg.zaloMessageId || null;
@@ -340,23 +398,36 @@ export async function saveIncomingMessage(
   const safeMetadata =
     typeof msg.rawMetadata === "string" ? (redact(msg.rawMetadata) as string) : msg.rawMetadata;
 
-  const savedMessage = await prisma.message.upsert({
-    where: messageIdForDb ? { zaloMessageId: messageIdForDb } : { id: `dedup-${key}` },
-    update: {},
-    create: {
-      zaloMessageId: messageIdForDb,
-      threadId: msg.threadId,
-      threadType: msg.threadType,
-      senderId: msg.senderId || null,
-      senderName: msg.senderName || null,
-      content: safeContent,
-      isFromBot: false,
-      messageType: msg.messageType,
-      role: "user",
-      metadata: safeMetadata,
-      receivedAt: new Date(),
-    },
-    select: { id: true },
+  const createData = {
+    zaloMessageId: messageIdForDb,
+    threadId: msg.threadId,
+    threadType: msg.threadType,
+    senderId: msg.senderId || null,
+    senderName: msg.senderName || null,
+    content: safeContent,
+    isFromBot: false,
+    messageType: msg.messageType,
+    role: "user",
+    metadata: safeMetadata,
+    receivedAt: new Date(),
+  };
+  const savedMessage = messageIdForDb
+    ? await prisma.message.upsert({
+        where: { zaloMessageId: messageIdForDb },
+        update: {},
+        create: createData,
+        select: { id: true },
+      })
+    : await prisma.message.create({
+        data: createData,
+        select: { id: true },
+      });
+
+  recentDedupEntries.set(key, {
+    dbMessageId: savedMessage.id,
+    expiresAt: messageIdForDb
+      ? Number.POSITIVE_INFINITY
+      : Date.now() + FALLBACK_DEDUP_WINDOW_MS,
   });
 
   // ── Phase 3.5A: index inbound media as an Attachment (pending extraction) ──
@@ -407,7 +478,7 @@ export async function saveIncomingMessage(
     },
   });
 
-  return { saved: true };
+  return { saved: true, dbMessageId: savedMessage.id };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -474,9 +545,11 @@ export async function listMessages(opts: {
   });
 
   // Build hash → record map for O(1) lookup
-  const outboundByHash = new Map<string, typeof outboundRecords[0]>();
+  const outboundByHash = new Map<string, Array<(typeof outboundRecords)[number]>>();
   for (const rec of outboundRecords) {
-    outboundByHash.set(rec.contentHash, rec);
+    const matches = outboundByHash.get(rec.contentHash) ?? [];
+    matches.push(rec);
+    outboundByHash.set(rec.contentHash, matches);
   }
 
   // Fallback: match by threadId + closest timestamp (within 10s)
@@ -485,13 +558,18 @@ export async function listMessages(opts: {
       (r) => r.threadId === threadId && Math.abs(r.createdAt.getTime() - messageTime.getTime()) < 10_000,
     );
     if (candidates.length === 0) return null;
-    // Pick the closest
+    // Pick the closest only when there is a unique nearest record. A tie is
+    // ambiguous evidence and must remain UNKNOWN rather than choosing one.
     candidates.sort(
       (a, b) =>
         Math.abs(a.createdAt.getTime() - messageTime.getTime()) -
         Math.abs(b.createdAt.getTime() - messageTime.getTime()),
     );
-    return candidates[0];
+    const nearestDistance = Math.abs(candidates[0]!.createdAt.getTime() - messageTime.getTime());
+    const nearest = candidates.filter(
+      (candidate) => Math.abs(candidate.createdAt.getTime() - messageTime.getTime()) === nearestDistance,
+    );
+    return nearest.length === 1 ? nearest[0]! : null;
   }
 
   const enriched = data.map((m) => {
@@ -503,7 +581,10 @@ export async function listMessages(opts: {
       const hash = createHash("sha256")
         .update(`${m.threadId}:${m.content}`)
         .digest("hex");
-      const matched = outboundByHash.get(hash) ?? findOutboundFallback(m.threadId, m.receivedAt);
+      const hashMatches = outboundByHash.get(hash);
+      const matched = hashMatches && hashMatches.length > 1
+        ? null
+        : hashMatches?.[0] ?? findOutboundFallback(m.threadId, m.receivedAt);
       if (matched) {
         outbound = {
           id: matched.id,

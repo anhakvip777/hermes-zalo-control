@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { config } from "../config.js";
 import { runConfigChecks } from "../config-consistency.js";
 
 const originalEnv = { ...process.env };
@@ -106,5 +109,41 @@ describe("Config Consistency — secrets masked", () => {
     const json = JSON.stringify(result);
     expect(json).not.toContain("sensitive-123");
     expect(json).not.toContain("supersecret99");
+  });
+
+  it("does not expose API-key prefix or suffix fragments", () => {
+    const mutableVision = config.vision as typeof config.vision & {
+      enabled: boolean;
+      model: string;
+    };
+    const originalEnabled = mutableVision.enabled;
+    const originalModel = mutableVision.model;
+    mutableVision.enabled = true;
+    mutableVision.model = "synthetic-vision-model";
+    process.env.CHIASEGPU_API_KEY = "PREF1234-middle-secret-SUFF5678";
+    try {
+      const result = runConfigChecks();
+      const check = result.checks.find((item) => item.name === "vision.apiKey");
+
+      expect(check?.severity).toBe("PASS");
+      expect(check?.message).toContain("[REDACTED]");
+      expect(check?.message).not.toContain("PREF");
+      expect(check?.message).not.toContain("5678");
+      expect(check?.message).not.toContain("prefix:");
+    } finally {
+      mutableVision.enabled = originalEnabled;
+      mutableVision.model = originalModel;
+    }
+  });
+
+  it("secret audit fully redacts findings instead of printing fragments", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "../../scripts/secret-audit.mjs"),
+      "utf8",
+    );
+
+    expect(source).toContain('return value ? "[REDACTED]" : "missing";');
+    expect(source).not.toContain("value.slice(0, 4)");
+    expect(source).not.toContain("value.slice(-4)");
   });
 });

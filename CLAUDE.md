@@ -294,6 +294,21 @@ External agent frameworks may be inspected or used only when:
 
 ---
 
+## Compact Instructions
+
+Khi compact thủ công hoặc tự động, hãy ưu tiên giữ lại:
+
+- kiến trúc hiện tại và kiến trúc mục tiêu của hệ thống;
+- thiết kế database: Prisma models, relations, constraints và migrations;
+- danh sách chính xác các file đã tạo, sửa hoặc xóa trong session;
+- các quyết định quan trọng và lý do;
+- tiến độ QA, bằng chứng PASS/FAIL, blocker và việc còn lại;
+- mọi safety invariant: không live, không bypass Tool Gateway/OutboundDispatcher, không phá dữ liệu.
+
+Không rút gọn các mục trên thành mô tả chung nếu tên model, migration, file hoặc quyết định cụ thể đang có trong context.
+
+---
+
 # SESSION HANDOFF — Retrieval Answer feature (3.5A → 3.5D) + Track 1 prep
 
 > Appended as a session handoff summary. Repo synced at `origin/master = bb794f8`.
@@ -589,3 +604,185 @@ Verified with synthetic inbound against isolated `test.db` and per-command env o
 
 Next step is **audit/plan only** for `limited local dry-run with real listener`. That step is not started and
 requires separate explicit approval before any Zalo reconnect/QR/listener work.
+
+---
+
+<!-- Historical checkpoint. Not a standing instruction. Reconstructed on 2026-07-15 from current working-tree inspection, HANDOVER.md, and workflow artifact wb2pi9p6b. Do not treat status or next steps below as current without fresh verification and explicit authorization. -->
+
+# CHECKPOINT — 2026-07-15 — Dashboard remediation handoff
+
+## Scope and overall state
+
+- Repository snapshot: `E:\BridgeZalo\repo`.
+- Branch snapshot: `master`, ahead of `origin/master` by 2 commits.
+- Dashboard remediation is partially implemented in the dirty working tree. It is **not verified complete**.
+- This checkpoint records work reconstructed from the prior locked session and fast-handoff workflow. Current session performed inspection and documentation only; it did not implement code fixes.
+- Workflow `wb2pi9p6b` completed implementation and review phases, but review result was `FAIL`.
+- No current `PASS` claim is allowed. Historical test/typecheck results below are context only and cannot certify current working-tree safety.
+
+## Completed implementation observed in working tree
+
+These items mean code or tests are present in the working tree. They do not mean runtime behavior is fully verified.
+
+### Backend
+
+- Basic Auth handling was hardened toward strict UTF-8 parsing, malformed-header rejection, consistent 401 responses, and challenge headers.
+- Protected `GET /api/admin/session` was added for frontend auth probing.
+- Canonical API error helper `sendApiError()` was added and used by several touched routes.
+- Duplicate route-local Zalo auth checks/hooks were removed in favor of the app-level protected boundary.
+- Zalo Ops GET was changed to avoid heartbeat writes and use the gateway listener state.
+- Live-test status reads were changed toward non-persisting expiry checks.
+- Thread settings gained a read-only lookup path and DTO thread-type enrichment.
+- `live-test.service.ts` now rejects an empty `allowedThreads` list with `THREAD_NOT_ALLOWED` before thread verification/session creation.
+- A global `dryRun=false` transition guard was added in the touched runtime-config path.
+
+### Frontend
+
+- In-memory admin credential handling, `AuthProvider`, `AuthGate`, dashboard shell, and operational status provider were added.
+- API access was centralized toward same-origin `apiFetch()` with auth/error parsing and payload validation.
+- Thread settings page was changed to read-only and uses validated `getThreadSettings()`.
+- Media send page was changed to a disabled/status-only notice.
+- Zalo Ops and Production Readiness pages were changed toward status-only behavior; QR/reconnect/disconnect/test-DM and live-test controls were removed from those rewritten page surfaces.
+- Safety Mode was changed toward explicit error/unknown states and no global-live control.
+- Additional dashboard routes were changed toward truthful error/unknown rendering.
+- `dashboard-state.ts` and `operational-status-provider.tsx` exist in the working tree.
+
+### Tests and support files
+
+- New or changed test/support files include:
+  - `packages/backend/src/__tests__/outbound-global-live-guard.test.ts`
+  - `packages/frontend/src/lib/admin-auth.test.ts`
+  - `packages/frontend/src/lib/api-client.test.ts`
+  - `packages/frontend/src/lib/dashboard-state.test.ts`
+  - `packages/frontend/src/lib/dashboard-state.ts`
+  - `packages/backend/src/test-env.ts`
+  - `packages/backend/src/http/`
+- `HANDOVER.md` and `review-diff.txt` are untracked working-tree artifacts. Inspect before staging or deleting; do not broadly stage them.
+
+## Current status by area
+
+| Area | Status | Current boundary |
+|---|---|---|
+| Basic Auth/admin session/API errors | Partial | Implementation present; no fresh final typecheck, build, full test, or browser QA after all edits. |
+| Frontend auth/dashboard shell | Partial | Auth components and shell present; auth race and stale-401 invalidation remain unresolved per handoff. |
+| Global live guard | Partial | Guard/test changes present; current runtime behavior still needs fresh verification. |
+| `LiveTestSession` allowlist | Partial | `live-test.service.ts` fails closed for empty allowlist; `zalo-ops.service.ts:testDM` still fails open for empty allowlist. |
+| Zalo Ops | Blocked | `testDM` can still pass with empty allowlist; frontend validator can accept unknown status fields. |
+| Production readiness | Blocked | Unknown/incomplete dependency handling and fail-closed contract still need review and tests. |
+| `startLiveTest()` | Blocked | Verified `ZaloThread` existence/type and missing/conflicting evidence rejection still need confirmation. |
+| Backend thread settings | Blocked | PATCH validates only some fields; boolean, notes, non-finite number, and thread ID validation remain incomplete. |
+| Frontend thread-settings validator | Blocked | Invalid timestamps, extra keys, and pagination consistency are not strictly rejected. |
+| Frontend error-summary validator | Blocked | Invalid timestamps, empty required strings, negative/non-finite `windowHours`, and extra keys can pass. |
+| Zalo status validator | Blocked | `connectionDetail` and `session.warning` remain permissive; unknown backend state may avoid explicit `UNKNOWN`. |
+| Root dashboard and `/messages` | Incomplete | Truth-model remediation remains unfinished: supported filters, error state, and contradictory outbound labels need review. |
+| `/retrieval-test` and rewritten status pages | Partial | Recent edits exist; final source review and browser QA remain pending. |
+| Operational polling | Blocked | Overlap guard, abort/cancellation, and logout/unmount cleanup are not verified complete. |
+| Test coverage | Partial | Focused tests exist, but auth race, readiness unknown, thread evidence, media payload, and truth-classifier coverage remain unconfirmed. |
+| Repository state | Dirty | Fresh status showed 38 modified tracked entries and grouped untracked entries; another expanded status counted 21 untracked paths. Counts are snapshots and must be refreshed. |
+| Runtime DB/session state | Unknown | No schema/migration path is visible in the inspected tracked diff; this does not prove runtime DB/session state was untouched. |
+
+## Review blockers from workflow `wb2pi9p6b`
+
+Review phase returned `FAIL`. Required fixes:
+
+1. `packages/backend/src/services/zalo-ops.service.ts:467`
+   - Replace the fail-open empty-list condition in `testDM`.
+   - Reject when `allowedThreads.length === 0` or `threadId` is absent.
+   - Add a test proving no task or audit record is created.
+2. `packages/backend/src/routes/thread-settings.ts:126-160`
+   - Validate every declared field type, including booleans and `notes`.
+   - Reject non-finite numeric values and invalid `threadId`.
+   - Add malformed-field tests.
+3. `packages/frontend/src/lib/api-client.ts:967-1007`
+   - Make Zalo status validation strict enough that unknown state becomes explicit `UNKNOWN`, not an accepted arbitrary string.
+4. `packages/frontend/src/lib/api-client.ts:454-477`
+   - Tighten ErrorSummary validation: bounded finite numbers, non-empty required strings, valid timestamps, exact allowed keys, and tests for malformed values.
+5. `packages/frontend/src/lib/api-client.ts:386-410`
+   - Tighten thread-settings validation: valid timestamps, exact keys, and pagination consistency.
+
+## Remaining work for next session
+
+1. Reconfirm repository root, branch, `HEAD`, upstream, staged files, untracked paths, and `git diff --check`. Do not trust checkpoint counts or hashes.
+2. Inspect test/build/browser scripts before running them. Stop if any path can contact real Zalo, use live credentials, send outbound traffic, mutate a non-isolated DB/session, or deploy.
+3. Preserve dirty worktree. Do not `reset`, `clean`, `stash`, restore, checkout, rebase, force-push, or broadly stage files.
+4. Fix and test the five review blockers above, starting with fail-closed `testDM` and backend thread-settings validation.
+5. Review readiness unknown/incomplete behavior and `startLiveTest()` thread evidence fail-closed behavior.
+6. Resolve or explicitly document `apiFetch()` stale-401 and `AuthProvider` out-of-order login races.
+7. Add the missing `/zalo/send-media` null-body guard if source review confirms it remains applicable.
+8. Finish root dashboard and `/messages` truth-model remediation; review `/retrieval-test`, Safety Mode, Zalo Ops, and Production Readiness source after large rewrites.
+9. Verify operational polling cancellation, in-flight protection, and logout/unmount cleanup.
+10. Run fresh checks from `E:\BridgeZalo\repo`: focused tests, shared/backend/frontend typechecks, backend/frontend builds, full tests when safe, and browser QA in a non-live isolated environment.
+11. Record command, working directory, tree identity, exit code, and observed side effects. Treat any failed, stale, missing, or inconclusive check as `BLOCKED`.
+
+## Important decisions and reasons
+
+- **Keep Basic Auth stateless and credentials memory-only.** Avoid password persistence, storage leakage, and cross-origin credential flow while limiting architecture changes.
+- **Keep dangerous dashboard surfaces status-only, read-only, or disabled.** Fail closed instead of exposing controls or false-safe state before capability review and evidence are complete.
+- **Keep `OutboundDispatcher.sendOutbound()` as the sole outbound door.** Centralize permission, dry-run/live gating, cooldown, and evidence instead of creating bypass paths.
+- **Keep global live disabled; use only controlled live-test flow when separately approved.** Prevent accidental global live behavior and limit any exception to thread/quota/TTL/readiness gates.
+- **Use canonical API errors while retaining legacy frontend parsing during transition.** Permit backend/frontend rollout or rollback without requiring lockstep deployment.
+- **Do not add schema/migration, upload workaround, or browser blob workaround in this remediation.** Keep data/runtime risk and scope bounded; defer capability redesign to a separately approved phase.
+- **Do not treat historical PASS output as current verification.** Later edits changed the tree and the final workflow review failed.
+
+## Verification evidence and limits
+
+Historical workflow output reported:
+
+- Backend `batch18-live-test.test.ts`: 24 passed in implementation phase.
+- Backend `batch18` plus `batch16-zalo-ops`: 36 passed in review phase.
+- Frontend API-client tests: 7 passed.
+- Frontend and backend typechecks: exit 0.
+- Focused `git diff --check`: exit 0.
+- `jsdom` invocation failed because the dependency was missing.
+
+Current verification limits:
+
+- No fresh final typecheck after all current edits.
+- No fresh backend build.
+- No fresh frontend build.
+- No full test suite.
+- No final browser QA.
+- No fresh rerun after the review `FAIL`.
+- No current PASS claim.
+
+## Safety state at checkpoint
+
+- Recorded inspection evidence shows no live/Zalo/QR/reconnect/send operation in this scope. This does not prove absence outside recorded evidence.
+- No DB/data/session mutation command is recorded in this inspection scope. Runtime DB/session state remains `Unknown`.
+- No secret value is included in this checkpoint. This does not prove that no credential, token, password, or sensitive data was accessed elsewhere; never print such values while inspecting history.
+- Do not execute live, QR, reconnect, send, deployment, migration, DB reset, credential/session changes, or other runtime mutation during verification. Open those scopes only after explicit user authorization, sandbox review, and rollback planning.
+- Do not commit or push this remediation unless separately requested. Branch already contains 2 commits ahead of upstream; this checkpoint does not authorize publishing them.
+- This checkpoint is historical documentation, not a command to execute automatically. All next steps require fresh inspection and the repository safety rules above.
+
+## Data-quality warnings
+
+- `HANDOVER.md` reports older counts (18 tracked and 5 untracked), while fresh status output reports broader current changes. Use refreshed status, not handoff counts.
+- `HANDOVER.md` says no test files were created or modified, but current status shows modified tests and new test files. Treat that handoff statement as stale.
+- `HANDOVER.md` says `dashboard-state.ts` was not created, but it exists in the current working tree. Use current source state.
+- An older `git diff --check` reported an EOF blank-line warning; fresh check exited 0. Do not repeat the old warning as current.
+- All branch, commit, file-count, and working-tree claims here are snapshots from 2026-07-15 and must be refreshed before relying on them.
+
+---
+
+# CHECKPOINT END — remediation remains incomplete and unverified
+
+---
+
+# CURRENT VERIFICATION POINTER — 2026-07-20 20:05 UTC+7
+
+The historical checkpoints above are intentionally preserved as an audit record.
+For the current worktree, use HANDOVER.md Section 9 and
+`docs/batch5-checkpoint-manifest-2026-07-20.md` as the authoritative fresh
+verification checkpoint. They record Batch 4.5 review/checkpoint readiness,
+Batch 5 structured read-only dry-run E2E, full test/typecheck/build, strict-config
+positive/negative cases, isolated backend startup, fresh Browser QA, exact file
+inventory, cleanup, runtime DB hash and quarantine boundaries. The Decision Lock
+remains in force: no global live, no real Zalo send, no schema/migration or
+runtime DB/session/backup/secret changes, and no commit/push without separate
+confirmation.
+
+Latest refresh (20:05 UTC+7): backend 84 files / 1336 tests, shared 6 tests and frontend 106
+tests passed; typecheck/build passed; isolated backend and Browser QA stayed
+dry-run/read-only; inventory is 83 tracked modified, 0 staged, 38 untracked
+checkpoint inputs and 10 quarantined worktree roots. Runtime `dev.db` SHA-256
+remains `36216E4786EF437833D2BFBF398BFD1F53B4BB4A0F49EF5155DF8286A30736E9`.

@@ -1,22 +1,24 @@
 // =============================================================================
-// Production Readiness Service — gate check before going live
+// Production Readiness Service — fail-closed gate before controlled live tests
 // =============================================================================
 
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
+import { runConfigChecks } from "../config-consistency.js";
 import { prisma } from "../db.js";
-import { runConfigChecks, type ConfigCheckResult } from "../config-consistency.js";
-import { getCurrentEffectiveDryRun, getAllRuntimeSettings } from "./runtime-config.service.js";
-import { getHeartbeatSummary, type HeartbeatEntry } from "./heartbeat.service.js";
+import { checkProcessLock, readLockFile } from "../process-lock.js";
 import { getThreadReviewSummary } from "./allowed-thread-review.service.js";
-import { readLockFile, checkProcessLock } from "../process-lock.js";
+import { getHeartbeatSummary } from "./heartbeat.service.js";
+import { getAllRuntimeSettings, getCurrentEffectiveDryRun } from "./runtime-config.service.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
 export type CheckSeverity = "critical" | "high" | "medium" | "low";
-export type CheckStatus = "pass" | "warn" | "fail";
+export type CheckStatus = "pass" | "warn" | "fail" | "unknown";
 export type Verdict = "READY_FOR_LIVE" | "WARNING_ONLY" | "NOT_READY";
+export type DataQuality = "complete" | "incomplete";
 
 export interface ReadinessCheck {
   id: string;
@@ -32,19 +34,111 @@ export interface ReadinessSummary {
   pass: number;
   warn: number;
   fail: number;
+  unknown: number;
   criticalFail: number;
   highFail: number;
 }
 
 export interface ReadinessResult {
   verdict: Verdict;
-  score: number;
+  score: number | null;
+  dataQuality: DataQuality;
   timestamp: string;
   checks: ReadinessCheck[];
   summary: ReadinessSummary;
 }
 
+interface RequiredCheckDefinition {
+  id: string;
+  label: string;
+  category: string;
+  severity: CheckSeverity;
+}
+
+const CATEGORY_ORDER = [
+  "Zalo",
+  "Safety",
+  "Config",
+  "Health",
+  "Backup",
+  "Security",
+  "Rules",
+  "Documents",
+  "Errors",
+] as const;
+
+export const REQUIRED_READINESS_CHECK_IDS = [
+  "zalo.connected",
+  "zalo.listener",
+  "zalo.messagePipeline",
+  "safety.dryRun",
+  "safety.allowedThreads",
+  "safety.groupRisk",
+  "config.status",
+  "config.strictErrors",
+  "health.backend",
+  "health.worker",
+  "health.processLock",
+  "health.db",
+  "backup.recent",
+  "backup.dbSize",
+  "backup.session",
+  "security.adminPassword",
+  "rules.status",
+  "docs.status",
+  "errors.agentTasks",
+  "errors.executions",
+  "errors.heartbeats",
+] as const;
+
+const REQUIRED_CHECKS: RequiredCheckDefinition[] = [
+  { id: REQUIRED_READINESS_CHECK_IDS[0], label: "Zalo connected", category: "Zalo", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[1], label: "Listener active", category: "Zalo", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[2], label: "Message pipeline heartbeat", category: "Zalo", severity: "medium" },
+  { id: REQUIRED_READINESS_CHECK_IDS[3], label: "Dry-run mode active", category: "Safety", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[4], label: "Allowed threads configured", category: "Safety", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[5], label: "Allowlist thread risk", category: "Safety", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[6], label: "Configuration status", category: "Config", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[7], label: "Strict config errors", category: "Config", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[8], label: "Backend heartbeat", category: "Health", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[9], label: "Schedule worker heartbeat", category: "Health", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[10], label: "Process lock", category: "Health", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[11], label: "Database accessible", category: "Health", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[12], label: "Recent backup exists", category: "Backup", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[13], label: "Database size", category: "Backup", severity: "low" },
+  { id: REQUIRED_READINESS_CHECK_IDS[14], label: "Zalo session persistence", category: "Backup", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[15], label: "Admin password", category: "Security", severity: "critical" },
+  { id: REQUIRED_READINESS_CHECK_IDS[16], label: "Rule configuration", category: "Rules", severity: "medium" },
+  { id: REQUIRED_READINESS_CHECK_IDS[17], label: "Document service status", category: "Documents", severity: "medium" },
+  { id: REQUIRED_READINESS_CHECK_IDS[18], label: "Failed agent tasks (24h)", category: "Errors", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[19], label: "Failed schedule executions (24h)", category: "Errors", severity: "high" },
+  { id: REQUIRED_READINESS_CHECK_IDS[20], label: "Critical heartbeat state", category: "Errors", severity: "critical" },
+];
+
+const BACKEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const REPO_ROOT = resolve(BACKEND_ROOT, "../..");
+
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function addCheck(
+  checks: ReadinessCheck[],
+  check: ReadinessCheck,
+): void {
+  checks.push(check);
+}
+
+function addUnknown(
+  checks: ReadinessCheck[],
+  definition: RequiredCheckDefinition,
+  message: string,
+): void {
+  addCheck(checks, {
+    ...definition,
+    status: "unknown",
+    message,
+    action: "Restore the missing dependency or evidence, then refresh readiness.",
+  });
+}
 
 function isPlaceholder(value: string | undefined): boolean {
   if (!value) return true;
@@ -56,708 +150,529 @@ function isPlaceholder(value: string | undefined): boolean {
 function hoursAgo(isoString: string | null): number | null {
   if (!isoString) return null;
   const then = new Date(isoString).getTime();
+  if (!Number.isFinite(then)) return null;
   return Math.round((Date.now() - then) / (3600 * 1000) * 10) / 10;
 }
 
 function maskSessionPath(path: string): string {
-  const parts = path.split("/");
-  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : path;
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : `…/${parts.join("/")}`;
 }
 
-// ── Zalo Checks ──────────────────────────────────────────────────────
+function resolveConfiguredDatabasePath(): string | null {
+  const match = config.database.url.match(/^file:(.+)$/);
+  if (!match?.[1]) return null;
+
+  const configuredPath = decodeURIComponent(match[1]);
+  if (configuredPath === ":memory:") return null;
+  if (isAbsolute(configuredPath)) return resolve(configuredPath);
+
+  // Prisma resolves relative SQLite URLs from the directory containing schema.prisma.
+  return resolve(BACKEND_ROOT, "prisma", configuredPath);
+}
+
+function stableSortChecks(checks: ReadinessCheck[]): ReadinessCheck[] {
+  const categoryRank = new Map(CATEGORY_ORDER.map((category, index) => [category, index]));
+  return [...checks].sort((a, b) => {
+    const categoryDiff = (categoryRank.get(a.category as typeof CATEGORY_ORDER[number]) ?? 999) -
+      (categoryRank.get(b.category as typeof CATEGORY_ORDER[number]) ?? 999);
+    return categoryDiff || a.id.localeCompare(b.id);
+  });
+}
+
+function normalizeRequiredChecks(checks: ReadinessCheck[]): ReadinessCheck[] {
+  const definitions = new Map(REQUIRED_CHECKS.map((definition) => [definition.id, definition]));
+  const grouped = new Map<string, ReadinessCheck[]>();
+
+  for (const check of checks) {
+    const entries = grouped.get(check.id) ?? [];
+    entries.push(check);
+    grouped.set(check.id, entries);
+  }
+
+  const normalized: ReadinessCheck[] = [];
+  for (const [id, entries] of grouped) {
+    if (entries.length === 1) {
+      normalized.push(entries[0]!);
+      continue;
+    }
+
+    const first = entries[0]!;
+    const definition = definitions.get(id) ?? first;
+    normalized.push({
+      id,
+      label: definition.label,
+      category: definition.category,
+      severity: definition.severity,
+      status: "unknown",
+      message: `Readiness contract produced ${entries.length} conflicting results for this check.`,
+      action: "Resolve the duplicate readiness evidence before any controlled live test.",
+    });
+  }
+
+  const present = new Set(normalized.map((check) => check.id));
+  for (const definition of REQUIRED_CHECKS) {
+    if (!present.has(definition.id)) {
+      addUnknown(normalized, definition, "Required readiness evidence was not produced.");
+    }
+  }
+
+  return stableSortChecks(normalized);
+}
+
+function heartbeatCheck(
+  id: string,
+  label: string,
+  category: string,
+  severity: CheckSeverity,
+  heartbeat: { status: string; ageSeconds: number | null; lastBeatAt?: string | null } | undefined,
+): ReadinessCheck {
+  if (!heartbeat || !heartbeat.lastBeatAt) {
+    return { id, label, category, severity, status: "unknown", message: "No heartbeat evidence is available." };
+  }
+  if (heartbeat.status === "ok") {
+    return { id, label, category, severity, status: "pass", message: `Heartbeat OK (${heartbeat.ageSeconds ?? "unknown"}s ago).` };
+  }
+  if (heartbeat.status === "stale") {
+    return { id, label, category, severity, status: "warn", message: `Heartbeat is stale (${heartbeat.ageSeconds ?? "unknown"}s old).` };
+  }
+  if (heartbeat.status === "down") {
+    return { id, label, category, severity, status: "fail", message: "Heartbeat reports the component is down." };
+  }
+  return { id, label, category, severity, status: "unknown", message: `Unrecognized heartbeat status: ${heartbeat.status}.` };
+}
+
+// ── Check groups ─────────────────────────────────────────────────────
 
 async function checkZaloGroup(checks: ReadinessCheck[]): Promise<void> {
-  // Zalo connected?
   try {
     const { getZaloGateway } = await import("./zalo-gateway.service.js");
-    const gw = getZaloGateway();
-    const gs = gw.getStatus();
+    const gateway = getZaloGateway();
+    const status = gateway.getStatus();
 
-    if (gs.connected) {
-      checks.push({
-        id: "zalo.connected", label: "Zalo connected",
-        category: "Zalo", status: "pass", severity: "critical",
-        message: `Connected as ${gs.selfDisplayName ?? gs.selfUserId ?? "unknown"}`,
-      });
-    } else {
-      checks.push({
-        id: "zalo.connected", label: "Zalo connected",
-        category: "Zalo", status: "fail", severity: "critical",
-        message: gs.lastError ? `Disconnected: ${gs.lastError}` : "Disconnected",
-        action: "Reconnect via /zalo-ops or scan QR code.",
-      });
-    }
-
-    // Listener active?
-    const listenerActive = (gw as any).listenerActive ?? gs.connected;
-    if (listenerActive) {
-      checks.push({
-        id: "zalo.listener", label: "Listener active",
-        category: "Zalo", status: "pass", severity: "high",
-        message: "Listener is active and receiving messages.",
-      });
-    } else if (gs.connected) {
-      checks.push({
-        id: "zalo.listener", label: "Listener active",
-        category: "Zalo", status: "fail", severity: "high",
-        message: "Zalo connected but listener not active. Messages won't be received.",
-        action: "Try reconnecting via /zalo-ops.",
-      });
-    } else {
-      checks.push({
-        id: "zalo.listener", label: "Listener active",
-        category: "Zalo", status: "fail", severity: "high",
-        message: "Listener not active (Zalo disconnected).",
-      });
-    }
-  } catch {
-    checks.push({
-      id: "zalo.connected", label: "Zalo connected",
-      category: "Zalo", status: "fail", severity: "critical",
-      message: "Zalo gateway not initialized.",
+    addCheck(checks, {
+      id: "zalo.connected",
+      label: "Zalo connected",
+      category: "Zalo",
+      status: status.connected ? "pass" : "fail",
+      severity: "critical",
+      message: status.connected
+        ? `Connected as ${status.selfDisplayName ?? status.selfUserId ?? "unidentified account"}.`
+        : status.lastError ? `Disconnected: ${status.lastError}` : "Zalo is disconnected.",
+      ...(!status.connected && { action: "Reconnect only in a separately approved operational scope." }),
     });
+
+    const listenerActive = gateway.isListenerActive();
+    addCheck(checks, {
+      id: "zalo.listener",
+      label: "Listener active",
+      category: "Zalo",
+      status: listenerActive ? "pass" : "fail",
+      severity: "high",
+      message: listenerActive
+        ? "Listener reports active."
+        : status.connected ? "Zalo is connected but the listener is inactive." : "Listener is inactive while Zalo is disconnected.",
+    });
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[0]!, "Zalo gateway status could not be read.");
+    addUnknown(checks, REQUIRED_CHECKS[1]!, "Zalo listener status could not be read.");
   }
 
-  // Message pipeline heartbeat
-  const hbSummary = await getHeartbeatSummary();
-  const pipelineHb = hbSummary["messagePipeline"];
-  if (pipelineHb && pipelineHb.status === "ok") {
-    checks.push({
-      id: "zalo.messagePipeline", label: "Message pipeline heartbeat",
-      category: "Zalo", status: "pass", severity: "medium",
-      message: `Pipeline heartbeat OK (${pipelineHb.ageSeconds}s ago).`,
-    });
-  } else if (pipelineHb && pipelineHb.status === "stale") {
-    checks.push({
-      id: "zalo.messagePipeline", label: "Message pipeline heartbeat",
-      category: "Zalo", status: "warn", severity: "medium",
-      message: `Pipeline heartbeat stale (${pipelineHb.ageSeconds}s old). May be normal if no recent messages.`,
-    });
-  } else {
-    checks.push({
-      id: "zalo.messagePipeline", label: "Message pipeline heartbeat",
-      category: "Zalo", status: "warn", severity: "low",
-      message: "No pipeline heartbeat recorded. May be normal if no messages yet.",
-    });
+  try {
+    const heartbeats = await getHeartbeatSummary();
+    addCheck(checks, heartbeatCheck(
+      "zalo.messagePipeline",
+      "Message pipeline heartbeat",
+      "Zalo",
+      "medium",
+      heartbeats.messagePipeline,
+    ));
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[2]!, "Message pipeline heartbeat could not be read.");
   }
 }
-
-// ── Safety Checks ────────────────────────────────────────────────────
 
 async function checkSafetyGroup(checks: ReadinessCheck[]): Promise<void> {
   const dryRun = getCurrentEffectiveDryRun();
-
-  // Dry-run status
-  if (dryRun) {
-    checks.push({
-      id: "safety.dryRun", label: "Dry-run mode active",
-      category: "Safety", status: "pass", severity: "high",
-      message: "✅ Currently in dry-run mode — no real messages sent.",
-    });
-  } else {
-    checks.push({
-      id: "safety.dryRun", label: "Dry-run mode",
-      category: "Safety", status: "fail", severity: "critical",
-      message: "⚠️ LIVE mode — real messages are being sent.",
-      action: "Verify this is intentional. Switch back to dry-run via Safety Mode if testing.",
-    });
-  }
-
-  // Safety Mode confirm gate exists
-  checks.push({
-    id: "safety.confirmGate", label: "Live switch requires confirm",
-    category: "Safety", status: "pass", severity: "high",
-    message: "Switching from dryRun to live requires Safety Mode confirmation text.",
+  addCheck(checks, {
+    id: "safety.dryRun",
+    label: "Dry-run mode active",
+    category: "Safety",
+    status: dryRun ? "pass" : "fail",
+    severity: "critical",
+    message: dryRun
+      ? "Effective auto-reply dry-run is enabled."
+      : "Effective auto-reply dry-run is disabled; global live is unsupported.",
+    ...(!dryRun && { action: "Restore dry-run. Global live is disabled; only LiveTestSession may bypass it." }),
   });
 
-  // Allowed threads
-  const settingsArr = await getAllRuntimeSettings();
-  const allowedSetting = settingsArr.find((s: any) => s.key === "autoReply.allowedThreads");
-  const allowedThreads: string[] = allowedSetting?.value
-    ? (() => { try { const v = JSON.parse(allowedSetting.value); return Array.isArray(v) ? v : []; } catch { return []; } })()
-    : config.autoReply.allowedThreads;
+  try {
+    const settings = await getAllRuntimeSettings();
+    const allowedSetting = settings.find((setting) => setting.key === "autoReply.allowedThreads");
+    let allowedThreads = config.autoReply.allowedThreads;
 
-  if (allowedThreads.length === 0) {
-    checks.push({
-      id: "safety.allowedThreads", label: "Allowed threads configured",
-      category: "Safety", status: "fail", severity: "critical",
-      message: "Auto-reply enabled but allowedThreads is EMPTY — nobody will receive replies.",
-      action: "Add at least one thread ID via /thread-settings or Runtime Control.",
-    });
-  } else {
-    checks.push({
-      id: "safety.allowedThreads", label: "Allowed threads configured",
-      category: "Safety", status: "pass", severity: "high",
-      message: `${allowedThreads.length} allowed thread(s): ${allowedThreads.join(", ")}`,
-    });
+    if (allowedSetting) {
+      try {
+        const parsed = JSON.parse(allowedSetting.value);
+        if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+          throw new Error("invalid allowedThreads payload");
+        }
+        allowedThreads = parsed;
+      } catch {
+        addUnknown(checks, REQUIRED_CHECKS[4]!, "Runtime allowedThreads evidence is malformed.");
+        allowedThreads = [];
+      }
+    }
+
+    if (!checks.some((check) => check.id === "safety.allowedThreads")) {
+      addCheck(checks, {
+        id: "safety.allowedThreads",
+        label: "Allowed threads configured",
+        category: "Safety",
+        status: allowedThreads.length > 0 ? "pass" : "fail",
+        severity: "critical",
+        message: allowedThreads.length > 0
+          ? `${allowedThreads.length} thread(s) are allowlisted.`
+          : "No thread is allowlisted for controlled replies.",
+        ...(allowedThreads.length === 0 && { action: "Review and explicitly configure the allowlist before a controlled test." }),
+      });
+    }
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[4]!, "Allowed-thread settings could not be read.");
   }
 
-  // Group risk check
   try {
     const review = await getThreadReviewSummary();
-    if (review.highRiskCount > 0) {
-      const severity: CheckSeverity = dryRun ? "medium" : "high";
-      const status: CheckStatus = dryRun ? "warn" : "fail";
-      checks.push({
-        id: "safety.groupRisk", label: "High-risk threads in allowlist",
-        category: "Safety", status, severity,
-        message: `${review.highRiskCount} high-risk thread(s) detected. Groups should have mentionRequired=true.${dryRun ? " (Safe: dry-run mode active)" : " ⚠️ RISKY in live mode!"}`,
-        action: "Review high-risk threads at /thread-review. Enable groupMentionRequired for groups.",
-      });
-    } else if (review.groupCount > 0) {
-      checks.push({
-        id: "safety.groupRisk", label: "No high-risk threads",
-        category: "Safety", status: "pass", severity: "medium",
-        message: `${review.groupCount} group(s) in allowlist, all low-risk.`,
-      });
-    } else {
-      checks.push({
-        id: "safety.groupRisk", label: "No groups in allowlist",
-        category: "Safety", status: "pass", severity: "low",
-        message: "No groups in allowlist — only DM threads (safest configuration).",
-      });
-    }
+    const status: CheckStatus = review.unknownCount > 0
+      ? "unknown"
+      : review.highRiskCount > 0
+        ? "fail"
+        : "pass";
+    addCheck(checks, {
+      id: "safety.groupRisk",
+      label: "Allowlist thread risk",
+      category: "Safety",
+      status,
+      severity: "high",
+      message: review.unknownCount > 0
+        ? `${review.unknownCount} allowlisted thread(s) have unknown type or risk evidence.`
+        : review.highRiskCount > 0
+          ? `${review.highRiskCount} high-risk allowlisted thread(s) were detected.`
+          : `${review.totalThreads} allowlisted thread(s) reviewed; no high-risk thread detected.`,
+    });
   } catch {
-    checks.push({
-      id: "safety.groupRisk", label: "Group risk check",
-      category: "Safety", status: "warn", severity: "medium",
-      message: "Could not run group risk check (service unavailable).",
-    });
+    addUnknown(checks, REQUIRED_CHECKS[5]!, "Allowlist risk review could not be completed.");
   }
 }
 
-// ── Config Checks ────────────────────────────────────────────────────
+async function checkConfigGroup(checks: ReadinessCheck[]): Promise<void> {
+  try {
+    const result = runConfigChecks();
+    const status: CheckStatus = result.status === "CONFIG_OK"
+      ? "pass"
+      : result.status === "CONFIG_WARN" ? "warn" : "fail";
+    addCheck(checks, {
+      id: "config.status",
+      label: "Configuration status",
+      category: "Config",
+      status,
+      severity: "critical",
+      message: `${result.status} — ${result.summary.pass} pass, ${result.summary.warn} warn, ${result.summary.error} error.`,
+    });
 
-function checkConfigGroup(checks: ReadinessCheck[], configResult: ConfigCheckResult): void {
-  if (configResult.status === "CONFIG_OK") {
-    checks.push({
-      id: "config.status", label: "Configuration status",
-      category: "Config", status: "pass", severity: "high",
-      message: `CONFIG_OK — ${configResult.summary.pass} pass, ${configResult.summary.warn} warn, ${configResult.summary.error} error.`,
+    const strictErrors = result.checks.filter((check) => !check.safe && check.severity === "ERROR");
+    addCheck(checks, {
+      id: "config.strictErrors",
+      label: "Strict config errors",
+      category: "Config",
+      status: strictErrors.length > 0 ? "fail" : "pass",
+      severity: "critical",
+      message: strictErrors.length > 0
+        ? `${strictErrors.length} strict configuration error(s): ${strictErrors.map((check) => check.name).join(", ")}.`
+        : "No strict configuration error was detected.",
     });
-  } else if (configResult.status === "CONFIG_WARN") {
-    checks.push({
-      id: "config.status", label: "Configuration status",
-      category: "Config", status: "warn", severity: "high",
-      message: `CONFIG_WARN — ${configResult.summary.pass} pass, ${configResult.summary.warn} warn, ${configResult.summary.error} error.`,
-    });
-  } else {
-    checks.push({
-      id: "config.status", label: "Configuration status",
-      category: "Config", status: "fail", severity: "critical",
-      message: `CONFIG_ERROR — ${configResult.summary.error} error(s). Some errors may not block startup (STRICT_CHECK disabled).`,
-      action: "Fix config errors in .env or Runtime Settings. Run /api/system/config-check for details.",
-    });
-  }
-
-  // Check for STRICT errors
-  const strictErrors = configResult.checks.filter(c => !c.safe && c.severity === "ERROR");
-  if (strictErrors.length > 0) {
-    checks.push({
-      id: "config.strictErrors", label: "Strict config errors",
-      category: "Config", status: "fail", severity: "critical",
-      message: `${strictErrors.length} strict error(s): ${strictErrors.map(c => c.name).join(", ")}`,
-      action: "Fix these errors before going live.",
-    });
-  } else {
-    checks.push({
-      id: "config.strictErrors", label: "No strict config errors",
-      category: "Config", status: "pass", severity: "high",
-      message: "No STRICT-level config errors detected.",
-    });
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[6]!, "Configuration checks could not be executed.");
+    addUnknown(checks, REQUIRED_CHECKS[7]!, "Strict configuration evidence is unavailable.");
   }
 }
-
-// ── Health Checks ────────────────────────────────────────────────────
 
 async function checkHealthGroup(checks: ReadinessCheck[]): Promise<void> {
-  // Backend health — heartbeat
-  const hbSummary = await getHeartbeatSummary();
-  const backendHb = hbSummary["backend"];
-
-  if (backendHb && backendHb.status === "ok") {
-    checks.push({
-      id: "health.backend", label: "Backend healthy",
-      category: "Health", status: "pass", severity: "critical",
-      message: `Backend heartbeat OK (${backendHb.ageSeconds}s ago).`,
-    });
-  } else {
-    checks.push({
-      id: "health.backend", label: "Backend healthy",
-      category: "Health", status: "fail", severity: "critical",
-      message: backendHb ? `Backend heartbeat ${backendHb.status} (${backendHb.ageSeconds}s old).` : "No backend heartbeat.",
-      action: "Check if backend process is running and healthy.",
-    });
+  try {
+    const heartbeats = await getHeartbeatSummary();
+    addCheck(checks, heartbeatCheck("health.backend", "Backend heartbeat", "Health", "critical", heartbeats.backend));
+    addCheck(checks, heartbeatCheck("health.worker", "Schedule worker heartbeat", "Health", "high", heartbeats.schedulerWorker));
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[8]!, "Backend heartbeat could not be read.");
+    addUnknown(checks, REQUIRED_CHECKS[9]!, "Schedule worker heartbeat could not be read.");
   }
 
-  // Worker heartbeat
-  const workerHb = hbSummary["schedulerWorker"];
-  if (workerHb && workerHb.status === "ok") {
-    checks.push({
-      id: "health.worker", label: "Schedule worker active",
-      category: "Health", status: "pass", severity: "high",
-      message: `Worker heartbeat OK (${workerHb.ageSeconds}s ago).`,
-    });
-  } else {
-    checks.push({
-      id: "health.worker", label: "Schedule worker active",
-      category: "Health", status: workerHb?.status === "stale" ? "warn" : "fail",
-      severity: "high",
-      message: workerHb ? `Worker heartbeat ${workerHb.status}.` : "No worker heartbeat.",
-      action: "Scheduled messages won't send without an active worker. Check PM2 status.",
-    });
+  try {
+    const lockCheck = checkProcessLock();
+    const lockInfo = readLockFile();
+    const isOwner = lockInfo !== null && lockInfo.pid === process.pid;
+
+    if (lockCheck.locked && !lockCheck.stale && isOwner) {
+      addCheck(checks, {
+        id: "health.processLock", label: "Process lock", category: "Health",
+        status: "pass", severity: "critical",
+        message: `This process owns the lock (PID ${process.pid}).`,
+      });
+    } else if (lockCheck.locked && !lockCheck.stale) {
+      addCheck(checks, {
+        id: "health.processLock", label: "Process lock", category: "Health",
+        status: "fail", severity: "critical",
+        message: `Another process owns the lock (PID ${lockCheck.info?.pid ?? "unknown"}).`,
+      });
+    } else if (lockCheck.stale) {
+      addCheck(checks, {
+        id: "health.processLock", label: "Process lock", category: "Health",
+        status: "warn", severity: "critical",
+        message: "The process lock evidence is stale.",
+      });
+    } else {
+      addUnknown(checks, REQUIRED_CHECKS[10]!, "No active process-lock ownership evidence is available.");
+    }
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[10]!, "Process-lock evidence could not be read.");
   }
 
-  // Process lock
-  const lockCheck = checkProcessLock();
-  const lockInfo = readLockFile();
-  const isOwner = lockInfo !== null && lockInfo.pid === process.pid;
-
-  if (lockCheck.locked && !lockCheck.stale && isOwner) {
-    checks.push({
-      id: "health.processLock", label: "Process lock owner",
-      category: "Health", status: "pass", severity: "critical",
-      message: `This process is the lock owner (PID ${process.pid}). No dual-instance conflict.`,
-    });
-  } else if (lockCheck.locked && !lockCheck.stale && !isOwner) {
-    checks.push({
-      id: "health.processLock", label: "Process lock conflict",
-      category: "Health", status: "fail", severity: "critical",
-      message: `Another process holds the lock (PID ${lockCheck.info?.pid ?? "unknown"}). Dual-instance DETECTED!`,
-      action: "Stop the duplicate backend instance immediately.",
-    });
-  } else if (lockCheck.stale) {
-    checks.push({
-      id: "health.processLock", label: "Process lock stale",
-      category: "Health", status: "pass", severity: "medium",
-      message: "Lock was stale, this instance claimed it normally.",
-    });
-  } else {
-    checks.push({
-      id: "health.processLock", label: "Process lock",
-      category: "Health", status: "pass", severity: "low",
-      message: "Process lock not held. Single instance assumed.",
-    });
-  }
-
-  // DB health
   try {
     await prisma.$queryRaw`SELECT 1`;
-    checks.push({
-      id: "health.db", label: "Database accessible",
-      category: "Health", status: "pass", severity: "critical",
-      message: "Database connection OK.",
+    addCheck(checks, {
+      id: "health.db", label: "Database accessible", category: "Health",
+      status: "pass", severity: "critical", message: "Database query completed successfully.",
     });
   } catch {
-    checks.push({
-      id: "health.db", label: "Database accessible",
-      category: "Health", status: "fail", severity: "critical",
-      message: "Database connection FAILED. Backend cannot function without DB.",
-      action: "Check database file and connection.",
-    });
+    addUnknown(checks, REQUIRED_CHECKS[11]!, "Database accessibility could not be measured.");
   }
 }
-
-// ── Backup Checks ────────────────────────────────────────────────────
 
 async function checkBackupGroup(checks: ReadinessCheck[]): Promise<void> {
-  const { existsSync: ex, statSync: st, readdirSync: rd } = await import("node:fs");
-  const backupsDir = resolve(process.cwd(), "backups", "system");
+  const backupDirectories = [
+    resolve(BACKEND_ROOT, "backups", "system"),
+    resolve(BACKEND_ROOT, "backups", "db"),
+    resolve(REPO_ROOT, "backups", "system"),
+    resolve(REPO_ROOT, "backups", "db"),
+  ];
   let latestAt: string | null = null;
   let backupCount = 0;
+  let scanFailed = false;
 
-  // Check backups/system dir first, then backups/db
-  for (const dir of [backupsDir, resolve(process.cwd(), "backups", "db")]) {
+  for (const directory of backupDirectories) {
     try {
-      if (ex(dir)) {
-        const files = rd(dir).filter((f: string) =>
-          f.endsWith(".sqlite") || f.endsWith(".db") || f.endsWith(".sqlite3") ||
-          (ex(resolve(dir, f)) && st(resolve(dir, f)).isDirectory())
-        );
-        backupCount += files.length;
-        for (const f of files) {
-          try {
-            const p = resolve(dir, f);
-            const s = st(p);
-            if (!latestAt || s.mtime.toISOString() > latestAt) {
-              latestAt = s.mtime.toISOString();
-            }
-          } catch { /* skip */ }
+      if (!existsSync(directory)) continue;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const entryPath = resolve(directory, entry.name);
+        if (entry.isFile() && /\.(sqlite|sqlite3|db)$/i.test(entry.name)) {
+          const modifiedAt = statSync(entryPath).mtime.toISOString();
+          backupCount++;
+          if (!latestAt || modifiedAt > latestAt) latestAt = modifiedAt;
+          continue;
+        }
+        if (!entry.isDirectory()) continue;
+
+        const nestedDatabaseFiles = readdirSync(entryPath, { withFileTypes: true })
+          .filter((nested) => nested.isFile() && /\.(sqlite|sqlite3|db)$/i.test(nested.name));
+        for (const nested of nestedDatabaseFiles) {
+          const modifiedAt = statSync(resolve(entryPath, nested.name)).mtime.toISOString();
+          backupCount++;
+          if (!latestAt || modifiedAt > latestAt) latestAt = modifiedAt;
         }
       }
-    } catch { /* skip */ }
-  }
-
-  // Also check backup-* directories at project root
-  try {
-    const rootDir = resolve(process.cwd());
-    const { readdirSync: rd } = require("fs") as typeof import("fs");
-    const rootDirs = rd(rootDir, { withFileTypes: true })
-      .filter((d: any) => d.isDirectory() && d.name.startsWith("backup-"));
-    for (const d of rootDirs) {
-      const p = resolve(rootDir, d.name);
-      try {
-        const st = statSync(p);
-        if (!latestAt || st.mtime.toISOString() > latestAt) {
-          latestAt = st.mtime.toISOString();
-        }
-        backupCount++;
-      } catch { /* skip */ }
+    } catch {
+      scanFailed = true;
     }
-  } catch { /* skip */ }
+  }
 
   const ageHours = hoursAgo(latestAt);
-
-  if (latestAt && ageHours !== null && ageHours <= 24) {
-    checks.push({
-      id: "backup.recent", label: "Recent backup exists",
-      category: "Backup", status: "pass", severity: "high",
-      message: `Latest backup ${ageHours}h ago. ${backupCount} total backups.`,
+  if (scanFailed && backupCount === 0) {
+    addUnknown(checks, REQUIRED_CHECKS[12]!, "Backup locations could not be scanned completely.");
+  } else if (ageHours !== null && ageHours <= 24) {
+    addCheck(checks, {
+      id: "backup.recent", label: "Recent backup exists", category: "Backup",
+      status: "pass", severity: "high", message: `Latest backup is ${ageHours}h old (${backupCount} found).`,
     });
-  } else if (latestAt && ageHours !== null) {
-    checks.push({
-      id: "backup.recent", label: "Recent backup exists",
-      category: "Backup", status: "warn", severity: "high",
-      message: `Latest backup ${ageHours}h ago (>24h). ${backupCount} total backups. Take a fresh backup before going live.`,
-      action: "Run backup via Admin Tools or manual db backup.",
+  } else if (ageHours !== null) {
+    addCheck(checks, {
+      id: "backup.recent", label: "Recent backup exists", category: "Backup",
+      status: "warn", severity: "high", message: `Latest backup is ${ageHours}h old (${backupCount} found).`,
     });
   } else {
-    checks.push({
-      id: "backup.recent", label: "Recent backup exists",
-      category: "Backup", status: "fail", severity: "critical",
-      message: "NO BACKUPS FOUND. Critical safety requirement not met.",
-      action: "Run a full backup (DB + session) before going live. Use Admin Tools.",
+    addCheck(checks, {
+      id: "backup.recent", label: "Recent backup exists", category: "Backup",
+      status: "fail", severity: "high", message: "No backup evidence was found in configured backup locations.",
     });
   }
 
-  // DB size check
-  try {
-    const dbPath = resolve(process.cwd(), "packages", "backend", "prisma", "dev.db");
-    if (existsSync(dbPath)) {
-      const sizeMb = Math.round(statSync(dbPath).size / (1024 * 1024) * 10) / 10;
-      if (sizeMb > 100) {
-        checks.push({
-          id: "backup.dbSize", label: "Database size",
-          category: "Backup", status: "warn", severity: "low",
-          message: `DB size: ${sizeMb} MB (>100 MB). Consider pruning old messages or archiving.`,
-        });
+  const databasePath = resolveConfiguredDatabasePath();
+  if (!databasePath) {
+    addUnknown(checks, REQUIRED_CHECKS[13]!, "Configured database is not a measurable SQLite file.");
+  } else {
+    try {
+      if (!existsSync(databasePath)) {
+        addUnknown(checks, REQUIRED_CHECKS[13]!, "The configured SQLite database file does not exist at the resolved path.");
       } else {
-        checks.push({
-          id: "backup.dbSize", label: "Database size",
-          category: "Backup", status: "pass", severity: "low",
-          message: `DB size: ${sizeMb} MB — normal.`,
+        const sizeMb = Math.round(statSync(databasePath).size / (1024 * 1024) * 10) / 10;
+        addCheck(checks, {
+          id: "backup.dbSize", label: "Database size", category: "Backup",
+          status: sizeMb > 100 ? "warn" : "pass", severity: "low",
+          message: `Configured database size is ${sizeMb} MB.`,
         });
       }
+    } catch {
+      addUnknown(checks, REQUIRED_CHECKS[13]!, "Configured database size could not be read.");
     }
-  } catch {
-    checks.push({
-      id: "backup.dbSize", label: "Database size",
-      category: "Backup", status: "warn", severity: "low",
-      message: "Could not check DB size.",
-    });
   }
 
-  // Session backup if Zalo connected
   try {
     const { getZaloGateway } = await import("./zalo-gateway.service.js");
-    const gw = getZaloGateway();
-    if (gw.isConnected()) {
-      const sessionPath = resolve(config.zalo.sessionDir, "zalo-session.json");
-      const sessionExists = existsSync(sessionPath);
-      if (sessionExists) {
-        checks.push({
-          id: "backup.session", label: "Zalo session file exists",
-          category: "Backup", status: "pass", severity: "medium",
-          message: `Session file at ${maskSessionPath(sessionPath)} (${statSync(sessionPath).mtime.toISOString()}).`,
-        });
-      } else if (config.zalo.dryRun) {
-        checks.push({
-          id: "backup.session", label: "Zalo session file",
-          category: "Backup", status: "pass", severity: "low",
-          message: "Dry-run mode — session file not needed.",
-        });
-      } else {
-        checks.push({
-          id: "backup.session", label: "Zalo session file missing",
-          category: "Backup", status: "fail", severity: "high",
-          message: "Connected WITHOUT session file! If disconnected, QR re-login required.",
-          action: "Ensure session file is properly saved and backed up.",
-        });
-      }
+    const connected = getZaloGateway().isConnected();
+    const sessionPath = resolve(config.zalo.sessionDir, "zalo-session.json");
+    if (!connected) {
+      addUnknown(checks, REQUIRED_CHECKS[14]!, "Zalo is disconnected, so session persistence cannot be verified for a controlled live test.");
+    } else if (!existsSync(sessionPath)) {
+      addCheck(checks, {
+        id: "backup.session", label: "Zalo session persistence", category: "Backup",
+        status: "fail", severity: "high", message: "Zalo is connected but the persisted session file is missing.",
+      });
+    } else {
+      addCheck(checks, {
+        id: "backup.session", label: "Zalo session persistence", category: "Backup",
+        status: "pass", severity: "high",
+        message: `Persisted session evidence exists at ${maskSessionPath(sessionPath)} (${statSync(sessionPath).mtime.toISOString()}).`,
+      });
     }
-  } catch { /* skip */ }
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[14]!, "Zalo session persistence evidence could not be read.");
+  }
 }
-
-// ── Security Checks ──────────────────────────────────────────────────
 
 function checkSecurityGroup(checks: ReadinessCheck[]): void {
-  // Admin password check
-  const pwd = config.security.adminPassword;
-  if (isPlaceholder(pwd)) {
-    checks.push({
-      id: "security.adminPassword", label: "Admin password is default",
-      category: "Security", status: "fail", severity: "critical",
-      message: "ADMIN_PASSWORD is set to a default/placeholder value. Change immediately!",
-      action: "Set ADMIN_PASSWORD to a strong value in .env.",
-    });
-  } else {
-    checks.push({
-      id: "security.adminPassword", label: "Admin password set",
-      category: "Security", status: "pass", severity: "high",
-      message: "Admin password is not a default value.",
-    });
-  }
-
-  // No secret in runtime config visible
-  checks.push({
-    id: "security.noSecrets", label: "No secrets in API responses",
-    category: "Security", status: "pass", severity: "high",
-    message: "All secrets (API keys, passwords, tokens) are masked in API responses.",
-  });
-
-  // Session path not exposed in URLs
-  checks.push({
-    id: "security.sessionPath", label: "Session path not exposed",
-    category: "Security", status: "pass", severity: "medium",
-    message: "Session file content and path are masked in all endpoints.",
+  const placeholder = isPlaceholder(config.security.adminPassword);
+  addCheck(checks, {
+    id: "security.adminPassword",
+    label: "Admin password",
+    category: "Security",
+    status: placeholder ? "fail" : "pass",
+    severity: "critical",
+    message: placeholder
+      ? "ADMIN_PASSWORD is missing or uses a known placeholder value."
+      : "ADMIN_PASSWORD is present and is not a known placeholder value.",
   });
 }
-
-// ── Rules Checks ─────────────────────────────────────────────────────
 
 async function checkRulesGroup(checks: ReadinessCheck[]): Promise<void> {
   try {
-    const enabledCount = await prisma.rule.count({ where: { enabled: true } });
-    const totalCount = await prisma.rule.count();
-
-    if (enabledCount === 0) {
-      checks.push({
-        id: "rules.enabled", label: "Enabled rules",
-        category: "Rules", status: "pass", severity: "low",
-        message: "No rules enabled — auto-reply uses Hermes AI directly.",
-      });
-    } else {
-      checks.push({
-        id: "rules.enabled", label: "Enabled rules",
-        category: "Rules", status: "pass", severity: "medium",
-        message: `${enabledCount} rule(s) enabled (${totalCount} total).`,
-      });
-
-      // Check for fixed_reply rules with potentially risky targets
-      const fixedReplyRules = await prisma.rule.findMany({
+    const [enabledCount, fixedReplyRules] = await Promise.all([
+      prisma.rule.count({ where: { enabled: true } }),
+      prisma.rule.findMany({
         where: { enabled: true, actionType: "fixed_reply" },
-        select: { id: true, name: true, targetThreadIds: true, actionConfig: true },
-      });
+        select: { targetThreadIds: true },
+      }),
+    ]);
 
-      if (fixedReplyRules.length > 0) {
-        const rulesWithBroadTargets = fixedReplyRules.filter(r => !r.targetThreadIds || (r.targetThreadIds as any)?.length === 0);
-        if (rulesWithBroadTargets.length > 0) {
-          checks.push({
-            id: "rules.fixedReplyScope", label: "Fixed-reply rules scope",
-            category: "Rules", status: "warn", severity: "medium",
-            message: `${rulesWithBroadTargets.length} fixed_reply rule(s) have no target thread restriction — applies to all threads.`,
-            action: "Add targetThreadIds to fixed_reply rules to limit their scope.",
-          });
-        } else {
-          checks.push({
-            id: "rules.fixedReplyScope", label: "Fixed-reply rules scope",
-            category: "Rules", status: "pass", severity: "low",
-            message: `${fixedReplyRules.length} fixed_reply rule(s) have target thread restrictions.`,
-          });
-        }
+    const broadFixedReplies = fixedReplyRules.filter((rule) => {
+      if (!rule.targetThreadIds) return true;
+      try {
+        const parsed = JSON.parse(rule.targetThreadIds);
+        return !Array.isArray(parsed) || parsed.length === 0;
+      } catch {
+        return true;
       }
+    }).length;
 
-      // Check for ignore rules (might inadvertently block messages)
-      const ignoreRules = await prisma.rule.count({
-        where: { enabled: true, actionType: "ignore" },
-      });
-      if (ignoreRules > 0) {
-        checks.push({
-          id: "rules.ignoreWarning", label: "Ignore rules active",
-          category: "Rules", status: "warn", severity: "medium",
-          message: `${ignoreRules} rule(s) set to "ignore" — messages matching these rules will be silently dropped.`,
-          action: "Review ignore rules at /rules to ensure they don't block important messages.",
-        });
-      }
-    }
-
-    // Rules don't bypass safety gates (architectural guarantee)
-    checks.push({
-      id: "rules.safetyBypass", label: "Rules cannot bypass safety gates",
-      category: "Rules", status: "pass", severity: "high",
-      message: "Rule engine runs AFTER all safety gates (allowlist, cooldown, group gate). Cannot bypass.",
+    addCheck(checks, {
+      id: "rules.status",
+      label: "Rule configuration",
+      category: "Rules",
+      status: broadFixedReplies > 0 ? "warn" : "pass",
+      severity: "medium",
+      message: broadFixedReplies > 0
+        ? `${broadFixedReplies} enabled fixed-reply rule(s) lack a valid thread scope.`
+        : `${enabledCount} rule(s) enabled; no unscoped fixed-reply rule detected.`,
     });
   } catch {
-    checks.push({
-      id: "rules.enabled", label: "Rules check",
-      category: "Rules", status: "warn", severity: "low",
-      message: "Could not query rules (DB unavailable?).",
-    });
+    addUnknown(checks, REQUIRED_CHECKS[16]!, "Rule configuration could not be queried.");
   }
 }
 
-// ── Documents Checks ─────────────────────────────────────────────────
-
 async function checkDocumentsGroup(checks: ReadinessCheck[]): Promise<void> {
   if (!config.document.enabled) {
-    checks.push({
-      id: "docs.disabled", label: "Document ingestion disabled",
-      category: "Documents", status: "pass", severity: "low",
-      message: "Document ingestion is disabled. No document-related concerns.",
+    addCheck(checks, {
+      id: "docs.status", label: "Document service status", category: "Documents",
+      status: "pass", severity: "medium", message: "Document ingestion is disabled by configuration.",
     });
     return;
   }
 
-  // Check for stuck jobs
-  const stuckCutoff = new Date(Date.now() - 30 * 60_000); // 30 minutes
   try {
-    const stuckJobs = await prisma.documentIngestionJob.count({
-      where: { status: "processing", startedAt: { lt: stuckCutoff } },
+    const since24h = new Date(Date.now() - 24 * 3600_000);
+    const stuckCutoff = new Date(Date.now() - 30 * 60_000);
+    const [stuckJobs, failedDocuments] = await Promise.all([
+      prisma.documentIngestionJob.count({ where: { status: "processing", startedAt: { lt: stuckCutoff } } }),
+      prisma.document.count({ where: { status: "failed", createdAt: { gte: since24h } } }),
+    ]);
+    const status: CheckStatus = stuckJobs > 0 ? "fail" : failedDocuments > 0 ? "warn" : "pass";
+    addCheck(checks, {
+      id: "docs.status", label: "Document service status", category: "Documents",
+      status, severity: "medium",
+      message: `${stuckJobs} stuck ingestion job(s); ${failedDocuments} failed document(s) in 24h.`,
     });
-    if (stuckJobs > 0) {
-      checks.push({
-        id: "docs.stuckJobs", label: "Stuck document jobs",
-        category: "Documents", status: "warn", severity: "medium",
-        message: `${stuckJobs} document job(s) stuck in "processing" > 30 min.`,
-        action: "The document worker may need restart. Check PM2 status for hermes-document-worker.",
-      });
-    } else {
-      checks.push({
-        id: "docs.stuckJobs", label: "No stuck document jobs",
-        category: "Documents", status: "pass", severity: "low",
-        message: "No stuck document ingestion jobs.",
-      });
-    }
-
-    // Failed docs: classify as document limitation vs system crash
-    const failedDocs = await prisma.document.findMany({
-      where: { status: "failed", createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } },
-      select: { errorCode: true, errorMessage: true },
-    });
-
-    const criticalCodes = ["DOCLING_TIMEOUT", "DOCLING_SPAWN_ERROR", "DOCLING_POSTPROCESS_FAILED", "DOCUMENT_NOT_FOUND"];
-    const criticalFails = failedDocs.filter(d => d.errorCode && criticalCodes.includes(d.errorCode));
-    const docLimits = failedDocs.filter(d => !d.errorCode || !criticalCodes.includes(d.errorCode));
-
-    if (criticalFails.length > 0) {
-      checks.push({
-        id: "docs.criticalFails", label: "Critical document failures",
-        category: "Documents", status: "fail", severity: "high",
-        message: `${criticalFails.length} critical doc failure(s) in 24h — possible system issue.`,
-        action: "Check document worker logs and infrastructure.",
-      });
-    } else if (docLimits.length > 0) {
-      checks.push({
-        id: "docs.docLimits", label: "Document limitations (non-critical)",
-        category: "Documents", status: "warn", severity: "low",
-        message: `${docLimits.length} doc failure(s) due to document limitations (unsupported format, no OCR). Not a system issue.`,
-      });
-    } else {
-      checks.push({
-        id: "docs.noFailures", label: "No document failures",
-        category: "Documents", status: "pass", severity: "low",
-        message: "No failed document ingestion jobs in 24h.",
-      });
-    }
   } catch {
-    checks.push({
-      id: "docs.status", label: "Document service status",
-      category: "Documents", status: "warn", severity: "low",
-      message: "Could not check document service (DB unavailable?).",
-    });
+    addUnknown(checks, REQUIRED_CHECKS[17]!, "Document service evidence could not be queried.");
   }
 }
 
-// ── Error Checks ─────────────────────────────────────────────────────
-
 async function checkErrorsGroup(checks: ReadinessCheck[]): Promise<void> {
   const since24h = new Date(Date.now() - 24 * 3600_000);
+  try {
+    const failedTasks = await prisma.agentTask.count({ where: { status: "failed", createdAt: { gte: since24h } } });
+    addCheck(checks, {
+      id: "errors.agentTasks", label: "Failed agent tasks (24h)", category: "Errors",
+      status: failedTasks === 0 ? "pass" : failedTasks <= 5 ? "warn" : "fail",
+      severity: "high", message: `${failedTasks} failed agent task(s) in 24h.`,
+    });
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[18]!, "Failed-agent-task evidence could not be queried.");
+  }
 
   try {
-    // Critical errors = failed agent tasks
-    const failedTasks24h = await prisma.agentTask.count({
-      where: { status: "failed", createdAt: { gte: since24h } },
+    const failedExecutions = await prisma.scheduleExecution.count({ where: { status: "failed", createdAt: { gte: since24h } } });
+    addCheck(checks, {
+      id: "errors.executions", label: "Failed schedule executions (24h)", category: "Errors",
+      status: failedExecutions === 0 ? "pass" : failedExecutions <= 3 ? "warn" : "fail",
+      severity: "high", message: `${failedExecutions} failed schedule execution(s) in 24h.`,
     });
+  } catch {
+    addUnknown(checks, REQUIRED_CHECKS[19]!, "Failed-schedule evidence could not be queried.");
+  }
 
-    if (failedTasks24h === 0) {
-      checks.push({
-        id: "errors.agentTasks", label: "Failed agent tasks (24h)",
-        category: "Errors", status: "pass", severity: "high",
-        message: "0 failed agent tasks in 24h.",
+  try {
+    const heartbeats = await getHeartbeatSummary();
+    const critical = [heartbeats.backend, heartbeats.zaloConnection];
+    if (critical.some((heartbeat) => !heartbeat?.lastBeatAt)) {
+      addUnknown(checks, REQUIRED_CHECKS[20]!, "One or more critical heartbeat records are missing.");
+    } else if (critical.some((heartbeat) => heartbeat?.status === "down")) {
+      addCheck(checks, {
+        id: "errors.heartbeats", label: "Critical heartbeat state", category: "Errors",
+        status: "fail", severity: "critical", message: "At least one critical heartbeat reports down.",
       });
-    } else if (failedTasks24h <= 5) {
-      checks.push({
-        id: "errors.agentTasks", label: "Failed agent tasks (24h)",
-        category: "Errors", status: "warn", severity: "medium",
-        message: `${failedTasks24h} failed agent task(s) in 24h.`,
+    } else if (critical.some((heartbeat) => heartbeat?.status === "stale")) {
+      addCheck(checks, {
+        id: "errors.heartbeats", label: "Critical heartbeat state", category: "Errors",
+        status: "warn", severity: "critical", message: "At least one critical heartbeat is stale.",
+      });
+    } else if (critical.every((heartbeat) => heartbeat?.status === "ok")) {
+      addCheck(checks, {
+        id: "errors.heartbeats", label: "Critical heartbeat state", category: "Errors",
+        status: "pass", severity: "critical", message: "All critical heartbeats report OK.",
       });
     } else {
-      checks.push({
-        id: "errors.agentTasks", label: "Failed agent tasks (24h)",
-        category: "Errors", status: "fail", severity: "high",
-        message: `${failedTasks24h} failed agent task(s) in 24h (>5). Investigate the cause.`,
-        action: "Check /errors dashboard for failure patterns.",
-      });
-    }
-
-    // Failed executions
-    const failedExecs24h = await prisma.scheduleExecution.count({
-      where: { status: "failed", createdAt: { gte: since24h } },
-    });
-
-    if (failedExecs24h === 0) {
-      checks.push({
-        id: "errors.executions", label: "Failed schedule executions (24h)",
-        category: "Errors", status: "pass", severity: "high",
-        message: "0 failed executions in 24h.",
-      });
-    } else if (failedExecs24h <= 3) {
-      checks.push({
-        id: "errors.executions", label: "Failed schedule executions (24h)",
-        category: "Errors", status: "warn", severity: "medium",
-        message: `${failedExecs24h} failed execution(s) in 24h.`,
-      });
-    } else {
-      checks.push({
-        id: "errors.executions", label: "Failed schedule executions (24h)",
-        category: "Errors", status: "fail", severity: "high",
-        message: `${failedExecs24h} failed execution(s) in 24h (>3). Scheduled messages may be missed.`,
-        action: "Check /errors dashboard and schedule status.",
-      });
-    }
-
-    // Stale heartbeats (critical ones)
-    const hbSummary = await getHeartbeatSummary();
-    const criticalKeys = ["backend", "zaloConnection"];
-    const staleCritical = criticalKeys.filter(k => hbSummary[k]?.status === "stale");
-    const downCritical = criticalKeys.filter(k => hbSummary[k]?.status === "down");
-
-    if (downCritical.length > 0) {
-      checks.push({
-        id: "errors.heartbeats", label: "Critical heartbeats down",
-        category: "Errors", status: "fail", severity: "critical",
-        message: `Critical component(s) DOWN: ${downCritical.join(", ")}.`,
-        action: "Restart the affected components immediately.",
-      });
-    } else if (staleCritical.length > 0) {
-      checks.push({
-        id: "errors.heartbeats", label: "Critical heartbeats stale",
-        category: "Errors", status: "warn", severity: "high",
-        message: `Stale heartbeats: ${staleCritical.join(", ")}.`,
-      });
-    } else {
-      checks.push({
-        id: "errors.heartbeats", label: "No stale critical heartbeats",
-        category: "Errors", status: "pass", severity: "high",
-        message: "All critical heartbeats are OK.",
-      });
+      addUnknown(checks, REQUIRED_CHECKS[20]!, "A critical heartbeat has an unrecognized state.");
     }
   } catch {
-    checks.push({
-      id: "errors.status", label: "Error check",
-      category: "Errors", status: "warn", severity: "medium",
-      message: "Could not complete error checks (DB unavailable?).",
-    });
+    addUnknown(checks, REQUIRED_CHECKS[20]!, "Critical heartbeat evidence could not be read.");
   }
 }
 
@@ -766,14 +681,10 @@ async function checkErrorsGroup(checks: ReadinessCheck[]): Promise<void> {
 export async function getProductionReadiness(): Promise<ReadinessResult> {
   const checks: ReadinessCheck[] = [];
 
-  // Gather data in parallel where possible
-  const configResult = runConfigChecks();
-
-  // Run all check groups
-  await Promise.all([
+  await Promise.allSettled([
     checkZaloGroup(checks),
     checkSafetyGroup(checks),
-    Promise.resolve(checkConfigGroup(checks, configResult)),
+    checkConfigGroup(checks),
     checkHealthGroup(checks),
     checkBackupGroup(checks),
     Promise.resolve(checkSecurityGroup(checks)),
@@ -782,35 +693,34 @@ export async function getProductionReadiness(): Promise<ReadinessResult> {
     checkErrorsGroup(checks),
   ]);
 
-  // Compute summary
+  const normalizedChecks = normalizeRequiredChecks(checks);
   const summary: ReadinessSummary = {
-    pass: checks.filter(c => c.status === "pass").length,
-    warn: checks.filter(c => c.status === "warn").length,
-    fail: checks.filter(c => c.status === "fail").length,
-    criticalFail: checks.filter(c => c.status === "fail" && c.severity === "critical").length,
-    highFail: checks.filter(c => c.status === "fail" && c.severity === "high").length,
+    pass: normalizedChecks.filter((check) => check.status === "pass").length,
+    warn: normalizedChecks.filter((check) => check.status === "warn").length,
+    fail: normalizedChecks.filter((check) => check.status === "fail").length,
+    unknown: normalizedChecks.filter((check) => check.status === "unknown").length,
+    criticalFail: normalizedChecks.filter((check) =>
+      (check.status === "fail" || check.status === "unknown") && check.severity === "critical"
+    ).length,
+    highFail: normalizedChecks.filter((check) =>
+      (check.status === "fail" || check.status === "unknown") && check.severity === "high"
+    ).length,
   };
 
-  // Verdict logic
-  let verdict: Verdict;
-  if (summary.criticalFail > 0 || summary.highFail > 0) {
-    verdict = "NOT_READY";
-  } else if (summary.warn > 0 || summary.fail > 0) {
-    verdict = "WARNING_ONLY";
-  } else {
-    verdict = "READY_FOR_LIVE";
-  }
-
-  // Score: 100 - (critical*30 + high*15 + warn*5)
-  const score = Math.max(0,
-    100 - (summary.criticalFail * 30 + summary.highFail * 15 + summary.warn * 5),
-  );
+  const dataQuality: DataQuality = summary.unknown === 0 ? "complete" : "incomplete";
+  const verdict: Verdict = dataQuality === "incomplete" || summary.fail > 0
+    ? "NOT_READY"
+    : summary.warn > 0 ? "WARNING_ONLY" : "READY_FOR_LIVE";
+  const score = dataQuality === "complete"
+    ? Math.max(0, 100 - (summary.criticalFail * 30 + summary.highFail * 15 + summary.fail * 10 + summary.warn * 5))
+    : null;
 
   return {
     verdict,
     score,
+    dataQuality,
     timestamp: new Date().toISOString(),
-    checks,
+    checks: normalizedChecks,
     summary,
   };
 }

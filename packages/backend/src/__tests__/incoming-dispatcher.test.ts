@@ -4,6 +4,25 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+const mockHeartbeatOk = vi.fn().mockResolvedValue(undefined);
+vi.mock("../services/heartbeat.service.js", () => ({
+  heartbeatOk: (...args: unknown[]) => mockHeartbeatOk(...args),
+}));
+
+const mockAnswerRetrieval = vi.fn();
+vi.mock("../services/retrieval-answer.service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/retrieval-answer.service.js")>();
+  return {
+    ...actual,
+    answerRetrieval: (...args: unknown[]) => mockAnswerRetrieval(...args),
+  };
+});
+
+const mockShouldSendLiveForThread = vi.fn().mockResolvedValue({ live: false });
+vi.mock("../services/live-test.service.js", () => ({
+  shouldSendLiveForThread: (...args: unknown[]) => mockShouldSendLiveForThread(...args),
+}));
+
 vi.mock("../config.js", () => ({
   config: {
     autoReply: {
@@ -35,6 +54,11 @@ vi.mock("../config.js", () => ({
 const mockPrismaFindFirst = vi.fn().mockResolvedValue(null);
 const mockPrismaFindMany = vi.fn().mockResolvedValue([]);
 const mockScheduleFindMany = vi.fn().mockResolvedValue([]);
+const mockMessageCreate = vi.fn().mockResolvedValue({ id: "assistant-1" });
+const mockMessageFindUnique = vi.fn().mockResolvedValue({ metadata: "{}" });
+const mockMessageFindMany = vi.fn().mockResolvedValue([]);
+const mockMessageUpdate = vi.fn().mockResolvedValue({});
+const mockDbTransaction = vi.fn();
 vi.mock("../db.js", () => {
   // Inline to avoid hoisting issues with vitest
   const tcd = {
@@ -52,11 +76,33 @@ vi.mock("../db.js", () => {
       schedule: {
         findMany: (...args: unknown[]) => mockScheduleFindMany(...args),
       },
+      message: {
+        create: (...args: unknown[]) => mockMessageCreate(...args),
+        findUnique: (...args: unknown[]) => mockMessageFindUnique(...args),
+        findMany: (...args: unknown[]) => mockMessageFindMany(...args),
+        update: (...args: unknown[]) => mockMessageUpdate(...args),
+      },
       threadCooldown: tcd,
-      $transaction: (fn: any) => fn({ threadCooldown: tcd }),
+      $transaction: (...args: unknown[]) => mockDbTransaction(tcd, ...args),
     },
   };
 });
+
+const mockResolvePrincipal = vi.fn();
+vi.mock("../services/principal.service.js", () => ({
+  resolvePrincipal: (...args: unknown[]) => mockResolvePrincipal(...args),
+  isBlocked: (status: string) => status === "blocked",
+  checkPermission: vi.fn().mockReturnValue({ allowed: true, currentRole: "advanced" }),
+  logPermissionDecision: vi.fn(),
+}));
+
+const mockBridgeRun = vi.fn();
+const mockGetAgentBridge = vi.fn(() => ({
+  run: (...args: unknown[]) => mockBridgeRun(...args),
+}));
+vi.mock("../services/agent-bridge/index.js", () => ({
+  getAgentBridge: () => mockGetAgentBridge(),
+}));
 
 const mockSendMessage = vi.fn();
 vi.mock("../services/zalo-message-sender.js", () => ({
@@ -122,6 +168,7 @@ vi.mock("../services/conversation-context.service.js", () => ({
 }));
 
 const mockSaveOutboundRecord = vi.fn().mockResolvedValue(undefined);
+const mockFindOutboundByIdempotencyKey = vi.fn().mockResolvedValue(null);
 const mockReserveOutboundRecord = vi.fn().mockResolvedValue("reserved-record-001");
 const mockUpdateOutboundRecordById = vi.fn().mockResolvedValue(undefined);
 vi.mock("../services/outbound-guardrails.service.js", () => ({
@@ -129,7 +176,7 @@ vi.mock("../services/outbound-guardrails.service.js", () => ({
   getRecentSentContext: vi.fn().mockResolvedValue([]),
   splitLongMessage: vi.fn().mockImplementation((s: string) => [s]),
   sanitizeOutbound: vi.fn().mockImplementation((s: string) => s),
-  findOutboundByIdempotencyKey: vi.fn().mockResolvedValue(null),
+  findOutboundByIdempotencyKey: (...args: unknown[]) => mockFindOutboundByIdempotencyKey(...args),
   reserveOutboundRecord: (...args: unknown[]) => mockReserveOutboundRecord(...args),
   updateOutboundRecordById: (...args: unknown[]) => mockUpdateOutboundRecordById(...args),
   isUniqueViolation: vi.fn().mockReturnValue(false),
@@ -151,10 +198,12 @@ import {
   getAutoReplyStatus,
   resetAutoReplyCooldowns,
 } from "../services/incoming-dispatcher.service.js";
+import { config } from "../config.js";
 import type { NormalizedMessage } from "../services/zalo-receive.js";
 
 const baseMsg = (overrides: Partial<NormalizedMessage> = {}): NormalizedMessage => ({
   zaloMessageId: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+  dbMessageId: `db-msg-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
   threadId: "thread-allowed",
   threadType: "user",
   senderId: "sender-1",
@@ -164,6 +213,10 @@ const baseMsg = (overrides: Partial<NormalizedMessage> = {}): NormalizedMessage 
   rawMetadata: "{}",
   ...overrides,
 });
+
+async function flushAsyncImports(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -175,7 +228,37 @@ beforeEach(async () => {
   mockPrismaFindFirst.mockResolvedValue(null);
   mockPrismaFindMany.mockResolvedValue([]);
   mockScheduleFindMany.mockResolvedValue([]);
+  mockMessageCreate.mockResolvedValue({ id: "assistant-1" });
+  mockMessageFindUnique.mockResolvedValue({ metadata: "{}" });
+  mockMessageFindMany.mockResolvedValue([]);
+  mockMessageUpdate.mockResolvedValue({});
+  mockDbTransaction.mockImplementation((threadCooldown, fn) => fn({ threadCooldown }));
   mockSaveOutboundRecord.mockResolvedValue(undefined);
+  mockFindOutboundByIdempotencyKey.mockResolvedValue(null);
+  mockReserveOutboundRecord.mockResolvedValue("reserved-record-001");
+  mockUpdateOutboundRecordById.mockResolvedValue(undefined);
+  mockResolvePrincipal.mockResolvedValue({
+    principal: { principalId: "principal-db-default" },
+    role: "advanced",
+    status: "active",
+    fromDb: true,
+  });
+  mockBridgeRun.mockResolvedValue({
+    text: "Structured reply",
+    confidence: 0.9,
+    usedFallback: false,
+    rounds: 1,
+    toolResults: [],
+  });
+  mockAnswerRetrieval.mockResolvedValue({
+    status: "found",
+    answerText: "Legacy retrieval result",
+    evidence: [{ messageId: "retrieval-evidence-1" }],
+    confidence: "high",
+  });
+  mockShouldSendLiveForThread.mockResolvedValue({ live: false });
+  config.hermesAgentBridge.enabled = false;
+  config.retrieval.dispatcherDryRunEnabled = false;
 });
 
 describe("IncomingDispatcher", () => {
@@ -231,6 +314,370 @@ describe("IncomingDispatcher", () => {
         }),
       }),
     );
+  });
+
+  it("uses exact internal message/task/principal IDs for structured evidence and outbound linkage", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockResolvePrincipal.mockResolvedValueOnce({
+      principal: { principalId: "principal-db-42" },
+      role: "advanced",
+      status: "active",
+      fromDb: true,
+    });
+
+    await handleIncomingMessage(baseMsg({
+      zaloMessageId: "zalo-external-42",
+      dbMessageId: "message-db-42",
+      senderId: "sender-external-42",
+    }));
+
+    expect(mockCreateTask).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: "message-db-42",
+    }));
+    expect(mockBridgeRun).toHaveBeenCalledWith(expect.objectContaining({
+      agentTaskId: "task-1",
+      relatedMessageId: "message-db-42",
+      principalId: "principal-db-42",
+      role: "advanced",
+      principalBlocked: false,
+    }));
+    expect(mockReserveOutboundRecord).toHaveBeenCalledWith(expect.objectContaining({
+      inboundMessageId: "message-db-42",
+    }));
+    expect(mockCreateTask.mock.calls[0]?.[0]?.messageId).not.toBe("zalo-external-42");
+    expect(mockBridgeRun.mock.calls[0]?.[0]?.relatedMessageId).not.toBe("zalo-external-42");
+  });
+
+  it("fails closed before principal/task/provider work when structured input lacks internal Message.id", async () => {
+    config.hermesAgentBridge.enabled = true;
+    config.retrieval.dispatcherDryRunEnabled = true;
+
+    const result = await handleIncomingMessage(baseMsg({
+      dbMessageId: undefined,
+      content: "gửi tôi xyz-khong-ton-tai-999",
+    }));
+    await flushAsyncImports();
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "agent_bridge_internal_message_id_missing",
+    });
+    expect(mockHeartbeatOk).not.toHaveBeenCalled();
+    expect(mockResolvePrincipal).not.toHaveBeenCalled();
+    expect(mockCreateTask).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+    expect(mockAnswerRetrieval).not.toHaveBeenCalled();
+    expect(mockShouldSendLiveForThread).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before provider work for an incomplete structured reservation", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockFindOutboundByIdempotencyKey.mockResolvedValueOnce({
+      id: "reserved-incomplete",
+      decision: "allow",
+      dryRun: true,
+      sentMessageId: null,
+      reason: "reserved",
+    });
+
+    const result = await handleIncomingMessage(baseMsg({ dbMessageId: "structured-reserved" }));
+    await flushAsyncImports();
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "outbound_idempotency_incomplete",
+    });
+    expect(mockHeartbeatOk).not.toHaveBeenCalled();
+    expect(mockResolvePrincipal).not.toHaveBeenCalled();
+    expect(mockCreateTask).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before provider work when finalized outbound lacks assistant evidence", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockFindOutboundByIdempotencyKey.mockResolvedValueOnce({
+      id: "outbound-without-assistant",
+      decision: "allow",
+      dryRun: true,
+      sentMessageId: "dry-run-finalized",
+      reason: "dry_run",
+    });
+    mockMessageFindMany.mockResolvedValueOnce([]);
+
+    const result = await handleIncomingMessage(baseMsg({ dbMessageId: "structured-no-assistant" }));
+    await flushAsyncImports();
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "outbound_idempotency_incomplete",
+    });
+    expect(mockHeartbeatOk).not.toHaveBeenCalled();
+    expect(mockResolvePrincipal).not.toHaveBeenCalled();
+    expect(mockCreateTask).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+  });
+
+  it("skips a finalized structured replay only when linked assistant evidence exists", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockFindOutboundByIdempotencyKey.mockResolvedValueOnce({
+      id: "outbound-finalized",
+      decision: "allow",
+      dryRun: true,
+      sentMessageId: "dry-run-finalized",
+      reason: "dry_run",
+    });
+    mockMessageFindMany.mockResolvedValueOnce([{
+      id: "assistant-finalized",
+      metadata: JSON.stringify({
+        outboundRecordId: "outbound-finalized",
+        sentMessageId: "dry-run-finalized",
+        status: "dryRun",
+      }),
+    }]);
+
+    const result = await handleIncomingMessage(baseMsg({ dbMessageId: "structured-finalized" }));
+    await flushAsyncImports();
+
+    expect(result).toEqual({ dispatched: false, reason: "duplicate_idempotency" });
+    expect(mockHeartbeatOk).not.toHaveBeenCalled();
+    expect(mockResolvePrincipal).not.toHaveBeenCalled();
+    expect(mockCreateTask).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+  });
+
+  it("lets structured AgentBridge exclusively own a retrieval-shaped turn when both flags are on", async () => {
+    config.hermesAgentBridge.enabled = true;
+    config.retrieval.dispatcherDryRunEnabled = true;
+
+    const result = await handleIncomingMessage(baseMsg({
+      zaloMessageId: "structured-retrieval-zalo",
+      dbMessageId: "structured-retrieval-db",
+      content: "gửi tôi xyz-khong-ton-tai-999",
+    }));
+
+    expect(result).toEqual({ dispatched: true });
+    expect(mockAnswerRetrieval).not.toHaveBeenCalled();
+    expect(mockBridgeRun).toHaveBeenCalledTimes(1);
+    expect(mockBridgeRun).toHaveBeenCalledWith(expect.objectContaining({
+      content: "gửi tôi xyz-khong-ton-tai-999",
+      relatedMessageId: "structured-retrieval-db",
+      agentTaskId: "task-1",
+    }));
+    expect(mockReserveOutboundRecord).toHaveBeenCalledWith(expect.objectContaining({
+      inboundMessageId: "structured-retrieval-db",
+      source: "agent_tool",
+      dryRun: true,
+    }));
+    expect(mockUpdateOutboundRecordById).toHaveBeenCalledWith(
+      "reserved-record-001",
+      expect.objectContaining({ reason: "dry_run" }),
+      { throwOnError: true },
+    );
+    expect(mockShouldSendLiveForThread).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legacy retrieval owner when structured AgentBridge is off", async () => {
+    config.hermesAgentBridge.enabled = false;
+    config.retrieval.dispatcherDryRunEnabled = true;
+
+    const result = await handleIncomingMessage(baseMsg({
+      zaloMessageId: "legacy-retrieval-zalo",
+      dbMessageId: "legacy-retrieval-db",
+      content: "gửi tôi xyz-khong-ton-tai-999",
+    }));
+
+    expect(result).toEqual({ dispatched: true, reason: "retrieval_found" });
+    expect(mockAnswerRetrieval).toHaveBeenCalledTimes(1);
+    expect(mockGetAgentBridge).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+    expect(mockMessageCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        content: "Legacy retrieval result",
+        metadata: expect.stringContaining("outbound_retrieval"),
+      }),
+    }));
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the text-only path and never constructs AgentBridge when the flag is off", async () => {
+    const result = await handleIncomingMessage(baseMsg({ zaloMessageId: "flag-off-zalo", dbMessageId: "flag-off-db" }));
+    expect(result).toEqual({ dispatched: true });
+    expect(mockGetAgentBridge).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+    expect(mockGenerateReply).toHaveBeenCalledTimes(1);
+    expect(mockReserveOutboundRecord).toHaveBeenCalledWith(expect.objectContaining({ inboundMessageId: "flag-off-db", source: "auto_reply" }));
+  });
+
+  it("uses only structured AgentBridge success and preserves round/tool evidence metadata", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockBridgeRun.mockResolvedValueOnce({
+      text: "Structured evidence reply", confidence: 0.82, usedFallback: false, rounds: 2,
+      toolResults: [{
+        toolName: "memory.getRecentMessages", kind: "read", executionStatus: "success",
+        deliveryStatus: "not_applicable", result: { messages: [] }, toolCallRecordId: "tool-call-42",
+        links: { agentTaskId: "task-1", relatedMessageId: "structured-db-42" },
+      }],
+    });
+    const result = await handleIncomingMessage(baseMsg({ zaloMessageId: "structured-zalo-42", dbMessageId: "structured-db-42" }));
+    expect(result).toEqual({ dispatched: true });
+    expect(mockGetAgentBridge).toHaveBeenCalledTimes(1);
+    expect(mockBridgeRun).toHaveBeenCalledTimes(1);
+    expect(mockGenerateReply).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).toHaveBeenCalledWith(expect.objectContaining({ inboundMessageId: "structured-db-42", source: "agent_tool", dryRun: true }));
+    expect(mockComplete).toHaveBeenCalledWith("task-1", expect.objectContaining({ confidence: 0.82, rounds: 2, toolEvidenceIds: ["tool-call-42"], dryRun: true }));
+    expect(mockComplete).toHaveBeenCalledWith("task-1", expect.objectContaining({
+      outboundRecordId: "reserved-record-001",
+      assistantMessageId: "assistant-1",
+    }));
+  });
+
+  it("fails closed when structured outbound evidence persistence fails", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockBridgeRun.mockResolvedValueOnce({
+      text: "Structured evidence reply",
+      confidence: 0.82,
+      usedFallback: false,
+      rounds: 2,
+      toolResults: [{
+        toolName: "memory.getRecentMessages",
+        kind: "read",
+        executionStatus: "success",
+        deliveryStatus: "not_applicable",
+        result: { messages: [] },
+        toolCallRecordId: "tool-call-persist-failure",
+        links: { agentTaskId: "task-1", relatedMessageId: "structured-persist-failure" },
+      }],
+    });
+    mockUpdateOutboundRecordById.mockRejectedValueOnce(new Error("raw outbound persistence failure"));
+
+    const result = await handleIncomingMessage(
+      baseMsg({ dbMessageId: "structured-persist-failure" }),
+    );
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "outbound_evidence_persistence_failed",
+    });
+    expect(mockFail).toHaveBeenCalledWith("task-1", "outbound_evidence_persistence_failed");
+    expect(mockComplete).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a structured tool result without successful linked evidence", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockBridgeRun.mockResolvedValueOnce({
+      text: "Untrusted structured reply",
+      confidence: 0.82,
+      usedFallback: false,
+      rounds: 1,
+      toolResults: [{
+        toolName: "memory.getRecentMessages",
+        kind: "read",
+        executionStatus: "failed",
+        deliveryStatus: "not_applicable",
+        result: { messages: [] },
+      }],
+    });
+
+    const result = await handleIncomingMessage(
+      baseMsg({ dbMessageId: "structured-invalid-tool-result" }),
+    );
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "agent_bridge_malformed_response",
+    });
+    expect(mockFail).toHaveBeenCalledWith("task-1", "agent_bridge_malformed_response");
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects structured tool evidence linked to a different task or inbound message", async () => {
+    config.hermesAgentBridge.enabled = true;
+    mockBridgeRun.mockResolvedValueOnce({
+      text: "Untrusted structured linkage",
+      confidence: 0.82,
+      usedFallback: false,
+      rounds: 1,
+      toolResults: [{
+        toolName: "memory.getRecentMessages",
+        kind: "read",
+        executionStatus: "success",
+        deliveryStatus: "not_applicable",
+        result: { messages: [] },
+        toolCallRecordId: "tool-call-wrong-link",
+        links: {
+          agentTaskId: "different-task",
+          relatedMessageId: "different-message",
+        },
+      }],
+    });
+
+    const result = await handleIncomingMessage(
+      baseMsg({ dbMessageId: "structured-linkage-input" }),
+    );
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "agent_bridge_malformed_response",
+    });
+    expect(mockFail).toHaveBeenCalledWith("task-1", "agent_bridge_malformed_response");
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["malformed", { text: "unsafe partial response" }, undefined, "agent_bridge_malformed_response", "unsafe partial response"],
+    ["timeout", { text: "fallback", confidence: 0, usedFallback: true, rounds: 1, toolResults: [], reason: "total_timeout" }, undefined, "agent_bridge_total_timeout", "fallback"],
+    ["blocked", { text: "fallback", confidence: 0, usedFallback: true, rounds: 1, toolResults: [], reason: "adapter_safety" }, undefined, "agent_bridge_adapter_safety", "fallback"],
+    ["usedFallback", { text: "provider secret", confidence: 0, usedFallback: true, rounds: 1, toolResults: [], reason: "raw-provider-secret" }, undefined, "agent_bridge_fallback", "raw-provider-secret"],
+    ["throw", undefined, new Error("raw-provider-token"), "agent_bridge_error", "raw-provider-token"],
+  ])("fails closed for structured %s without text fallback or outbound", async (_caseName, bridgeResult, bridgeError, expectedReason, rawDetail) => {
+    config.hermesAgentBridge.enabled = true;
+    if (bridgeError) mockBridgeRun.mockRejectedValueOnce(bridgeError);
+    else mockBridgeRun.mockResolvedValueOnce(bridgeResult);
+    const result = await handleIncomingMessage(baseMsg());
+    expect(result).toEqual({ dispatched: false, reason: expectedReason });
+    expect(mockGenerateReply).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockFail).toHaveBeenCalledWith("task-1", expectedReason);
+    expect(JSON.stringify(mockFail.mock.calls)).not.toContain(rawDetail);
+  });
+
+  it("redacts an unexpected post-bridge structured failure before persisting task state", async () => {
+    config.hermesAgentBridge.enabled = true;
+    const rawDetail = "raw-structured-evidence-secret-sk-test-1234567890";
+    mockBridgeRun.mockResolvedValueOnce({
+      text: "Structured reply",
+      confidence: 0.9,
+      usedFallback: false,
+      rounds: 0,
+      toolResults: [],
+    });
+    mockDbTransaction.mockRejectedValueOnce(new Error(rawDetail));
+
+    const result = await handleIncomingMessage(baseMsg());
+
+    expect(result).toEqual({ dispatched: false, reason: "agent_bridge_error" });
+    expect(mockComplete).not.toHaveBeenCalled();
+    expect(mockFail).toHaveBeenCalledWith("task-1", "agent_bridge_error");
+    expect(JSON.stringify([mockComplete.mock.calls, mockFail.mock.calls])).not.toContain(rawDetail);
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when principal resolution throws", async () => {
+    mockResolvePrincipal.mockRejectedValueOnce(new Error("raw principal DB failure"));
+
+    const result = await handleIncomingMessage(baseMsg());
+
+    expect(result).toEqual({ dispatched: false, reason: "principal_resolution_failed" });
+    expect(mockCreateTask).not.toHaveBeenCalled();
+    expect(mockBridgeRun).not.toHaveBeenCalled();
+    expect(mockReserveOutboundRecord).not.toHaveBeenCalled();
   });
 
   it("marks AgentTask failed if adapter throws", async () => {
@@ -587,7 +1034,7 @@ describe("IncomingDispatcher", () => {
       mockUpdateOutboundRecordById.mockClear();
 
       // Fresh message after reset: should dispatch. Phase 4A: a hermes text reply
-      // WITH relatedMessageId (baseMsg always sets zaloMessageId) takes the
+      // WITH relatedMessageId (baseMsg always sets dbMessageId) takes the
       // write-ahead reservation path — one reserved row, updated with reason
       // "dry_run" — not saveOutboundRecord.
       await handleIncomingMessage(baseMsg({ zaloMessageId: "multi-3" }));
