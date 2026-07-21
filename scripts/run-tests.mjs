@@ -17,13 +17,20 @@ import { fileURLToPath } from "node:url";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const VITEST_CLI = require.resolve("vitest/vitest.mjs");
+const TSC_CLI = require.resolve("typescript/bin/tsc");
 const env = {
   ...process.env,
   NODE_ENV: "test",
   DATABASE_URL: "file:./test.db",
+  ZALO_DRY_RUN: "false",
 };
 
 const steps = [
+  {
+    cmd: process.execPath,
+    args: [TSC_CLI, "--project", "./packages/shared/tsconfig.json"],
+    label: "shared build prerequisite",
+  },
   {
     cmd: process.execPath,
     args: ["packages/backend/scripts/run-tests.mjs"],

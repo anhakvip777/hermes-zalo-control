@@ -88,4 +88,15 @@ describe("backend test runner filesystem safety", () => {
     expect(backupSource.indexOf("loadEnv();")).toBeLessThan(backupSource.indexOf("const BACKUP_ROOT"));
     expect(guardSource.indexOf("loadEnv();")).toBeLessThan(guardSource.indexOf("const BACKUP_DIR"));
   });
+  it("builds shared before backend tests and fixes Zalo dry-run semantics for child tests", () => {
+    const source = readBackendFile("../../scripts/run-tests.mjs");
+    const sharedBuildIndex = source.indexOf('label: "shared build prerequisite"');
+    const backendIndex = source.indexOf('label: "backend (isolated test DB)"');
+
+    expect(source).toContain('require.resolve("typescript/bin/tsc")');
+    expect(sharedBuildIndex).toBeGreaterThanOrEqual(0);
+    expect(backendIndex).toBeGreaterThanOrEqual(0);
+    expect(sharedBuildIndex).toBeLessThan(backendIndex);
+    expect(source).toContain('ZALO_DRY_RUN: "false"');
+  });
 });
