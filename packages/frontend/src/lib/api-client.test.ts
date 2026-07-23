@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { adminCredentials } from "./admin-auth";
 import {
+  cancelZaloLogin,
   getConfigCheck,
   getErrorSummary,
   getHealthDetail,
@@ -10,8 +11,11 @@ import {
   getRecentEvents,
   getRuntimeConfig,
   getThreadSettings,
+  getZaloLoginQR,
+  getZaloLoginStatus,
   getZaloOpsStatus,
   listMessages,
+  startZaloLogin,
   type HealthDetailResponse,
   type ReadinessResult,
 } from "./api-client";
@@ -27,6 +31,16 @@ function jsonResponse(body: unknown) {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 const HEALTH_HEARTBEAT_NAMES = [
@@ -232,6 +246,29 @@ function validZaloOpsStatus() {
     outbound24h: 0,
     failedTasks24h: 0,
   };
+}
+
+function validZaloLoginStatus() {
+  return {
+    connected: false,
+    connectionStatus: "connecting",
+    dryRun: false,
+    selfUserId: null,
+    selfDisplayName: null,
+    listenerActive: false,
+    qrAvailable: false,
+    qrUpdatedAt: null,
+    lastConnectedAt: null,
+    lastError: null,
+  };
+}
+
+function validZaloLoginStartResponse(status = "connecting") {
+  return { data: { status, qrImage: "Login started." } };
+}
+
+function validZaloLoginQrResponse() {
+  return { qrDataURL: "data:image/png;base64,ZmFrZS1xci1pbWFnZQ==", updatedAt: null };
 }
 
 function validMessageItem() {
@@ -975,6 +1012,199 @@ describe("critical dashboard response validation", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
 
     await expect(getZaloOpsStatus()).resolves.toEqual(payload);
+  });
+
+  it.each([
+    ["blocked", "login_safety_blocked", "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED"],
+    ["expired", "expired", null],
+  ] as const)("accepts a coherent Zalo status %s", async (connectionStatus, connectionDetail, lastError) => {
+    const payload = {
+      ...validZaloOpsStatus(),
+      connectionStatus,
+      connectionDetail,
+      lastError,
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloOpsStatus()).resolves.toEqual(payload);
+  });
+
+  it.each([
+    ["blocked", "qr_required"],
+    ["expired", "qr_required"],
+    ["disconnected", "login_safety_blocked"],
+    ["disconnected", "expired"],
+  ] as const)(
+    "rejects contradictory terminal Zalo status %s/%s before the QR card can mount",
+    async (connectionStatus, connectionDetail) => {
+      const payload = {
+        ...validZaloOpsStatus(),
+        connectionStatus,
+        connectionDetail,
+        lastError: connectionStatus === "blocked"
+          ? "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED"
+          : null,
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+      await expect(getZaloOpsStatus()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    },
+  );
+
+  it("rejects a blocked Zalo status that still advertises a QR artifact", async () => {
+    const base = validZaloOpsStatus();
+    const payload = {
+      ...base,
+      connectionStatus: "blocked",
+      connectionDetail: "login_safety_blocked",
+      lastError: "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED",
+      session: {
+        ...base.session,
+        qrAvailable: true,
+        qrUpdatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloOpsStatus()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("accepts the backend-real safety-blocked ops status and preserves its reason", async () => {
+    const payload = {
+      ...validZaloOpsStatus(),
+      connected: false,
+      connectionStatus: "blocked",
+      connectionDetail: "login_safety_blocked",
+      lastError: "LOGIN_SAFETY_BLOCKED:OUTBOUND_DRY_RUN_REQUIRED",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloOpsStatus()).resolves.toEqual(payload);
+  });
+
+  it("rejects an unknown Zalo connection status", async () => {
+    const payload = { ...validZaloOpsStatus(), connectionStatus: "invented" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloOpsStatus()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects an unknown Zalo login connection status", async () => {
+    const payload = { ...validZaloLoginStatus(), connectionStatus: "invented" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloLoginStatus()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects an unknown login-start status", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(
+      validZaloLoginStartResponse("invented"),
+    )));
+
+    await expect(startZaloLogin()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("accepts only stable successful login-start statuses", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(validZaloLoginStartResponse("connecting")))
+      .mockResolvedValueOnce(jsonResponse(validZaloLoginStartResponse("connected")))
+      .mockResolvedValueOnce(jsonResponse(validZaloLoginStartResponse("already_connected")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startZaloLogin()).resolves.toEqual(validZaloLoginStartResponse("connecting"));
+    await expect(startZaloLogin()).resolves.toEqual(validZaloLoginStartResponse("connected"));
+    await expect(startZaloLogin()).resolves.toEqual(validZaloLoginStartResponse("already_connected"));
+  });
+
+  it("rejects malformed login-start envelopes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ data: { status: "connecting", extra: true } })));
+
+    await expect(startZaloLogin()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects a malformed login QR payload", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...validZaloLoginQrResponse(),
+      qrDataURL: "not-a-data-url",
+    })));
+
+    await expect(getZaloLoginQR()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it.each([
+    "data:text/plain;base64,ZmFrZQ==",
+    "data:image/jpeg;base64,ZmFrZQ==",
+    "data:image/png;base64,",
+    "data:image/png;base64,not valid base64",
+  ])("rejects a non-PNG or malformed login QR data URL: %s", async (qrDataURL) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...validZaloLoginQrResponse(),
+      qrDataURL,
+    })));
+
+    await expect(getZaloLoginQR()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("accepts a login QR payload with a valid nullable timestamp", async () => {
+    const payload = {
+      ...validZaloLoginQrResponse(),
+      updatedAt: "2026-07-22T00:00:00.000Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloLoginQR()).resolves.toEqual(payload);
+  });
+
+  it.each(["blocked", "expired"] as const)("accepts a Zalo login status of %s", async (connectionStatus) => {
+    const payload = { ...validZaloLoginStatus(), connectionStatus };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(getZaloLoginStatus()).resolves.toEqual(payload);
+  });
+
+  it("accepts the exact login-cancel response envelope", async () => {
+    const payload = { data: { cancelled: true, message: "Login cancelled" } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(cancelZaloLogin()).resolves.toEqual(payload);
+  });
+
+  it.each([
+    { data: { cancelled: true, message: "Login cancelled", extra: true } },
+    { data: { cancelled: "yes", message: "Login cancelled" } },
+    { data: { cancelled: false, message: "" } },
+    { data: { cancelled: true } },
+    { data: { cancelled: true, message: "Login cancelled" }, extra: true },
+  ])("rejects a malformed login-cancel response envelope", async (payload) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    await expect(cancelZaloLogin()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("forwards AbortSignal to each Zalo login request", async () => {
+    const requests = [
+      (signal: AbortSignal) => startZaloLogin(signal),
+      (signal: AbortSignal) => getZaloLoginStatus(signal),
+      (signal: AbortSignal) => getZaloLoginQR(signal),
+      (signal: AbortSignal) => cancelZaloLogin(signal),
+    ];
+
+    for (const request of requests) {
+      const response = deferred<Response>();
+      const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response.promise);
+      vi.stubGlobal("fetch", fetchMock);
+      const controller = new AbortController();
+      const pending = request(controller.signal);
+
+      await Promise.resolve();
+      const requestSignal = (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.signal;
+      controller.abort();
+      response.resolve(jsonResponse({ data: {} }));
+      await pending.catch(() => undefined);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(requestSignal?.aborted).toBe(true);
+    }
   });
 
   it("rejects extra keys at every Zalo status object layer", async () => {

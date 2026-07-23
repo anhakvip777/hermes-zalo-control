@@ -49,6 +49,7 @@ const mockConfig = vi.hoisted(() => ({
 
 const mockGateway = vi.hoisted(() => ({
   getStatus: vi.fn(() => ({ ...S3.gw })),
+  enforceLoginSafety: vi.fn(() => ({ allowed: true, reason: null })),
   isConnected: vi.fn(() => S3.gw.connected),
   isListenerActive: vi.fn(() => S3.gw.connected),
   restoreSession: vi.fn(async () => S3.gw.connected),

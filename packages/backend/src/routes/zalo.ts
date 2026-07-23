@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { existsSync, readFileSync } from "node:fs";
 import { resolve, normalize, relative, sep } from "node:path";
 import { SendMessageSchema } from "@hermes/shared";
 import { getZaloGateway } from "../services/zalo-gateway.service.js";
@@ -48,7 +47,19 @@ export async function zaloRoutes(app: FastifyInstance) {
   // GET /api/zalo/status
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/status", async () => {
-    return getZaloGateway().getStatus();
+    const gateway = getZaloGateway();
+    const safetyDecision = gateway.enforceLoginSafety();
+    const status = gateway.getStatus();
+    if (!status.connected && !safetyDecision.allowed) {
+      return {
+        ...status,
+        connectionStatus: "blocked" as const,
+        lastError: `LOGIN_SAFETY_BLOCKED:${safetyDecision.reason}`,
+        qrAvailable: false,
+        qrUpdatedAt: null,
+      };
+    }
+    return status;
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -57,6 +68,11 @@ export async function zaloRoutes(app: FastifyInstance) {
   app.post("/zalo/login/start", async (request, reply) => {
     try {
       const result = await getZaloGateway().startLogin();
+      if (result.status === "blocked") {
+        return reply.status(409).send({
+          error: { code: "LOGIN_SAFETY_BLOCKED", message: result.reason },
+        });
+      }
       if (result.status === "already_in_progress") {
         return reply.status(409).send({
           error: { code: "LOGIN_ALREADY_IN_PROGRESS", message: result.qrImage },
@@ -77,8 +93,25 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   app.get("/zalo/login/status", async () => {
     // Merge runtime dryRun (may differ from static config.zalo.dryRun)
-    const status = getZaloGateway().getStatus();
-    return { ...status, dryRun: getCurrentEffectiveDryRun() };
+    const gateway = getZaloGateway();
+    const safetyDecision = gateway.enforceLoginSafety();
+    const status = gateway.getStatus();
+    if (!status.connected && !safetyDecision.allowed) {
+      return {
+        ...status,
+        connectionStatus: "blocked" as const,
+        lastError: `LOGIN_SAFETY_BLOCKED:${safetyDecision.reason}`,
+        qrAvailable: false,
+        qrUpdatedAt: null,
+        dryRun: getCurrentEffectiveDryRun(),
+        listenerActive: gateway.isListenerActive(),
+      };
+    }
+    return {
+      ...status,
+      dryRun: getCurrentEffectiveDryRun(),
+      listenerActive: gateway.isListenerActive(),
+    };
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -111,26 +144,27 @@ export async function zaloRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // GET /api/zalo/login/qr
   // ═════════════════════════════════════════════════════════════════
-  app.get("/zalo/login/qr", async (request, reply) => {
+  app.get("/zalo/login/qr", async (_request, reply) => {
     // Admin-only: enforced by global adminAuth preHandler in app.ts
 
-    // Gateway stores QR at sessionDir/qr-current.png
-    const qrPath = resolve(config.zalo.sessionDir, "qr-current.png");
-
-    if (!existsSync(qrPath)) {
-      return reply.status(404).send({ error: { code: "QR_NOT_FOUND", message: "QR code not yet generated or expired. Call POST /api/zalo/login/start first." } });
+    const result = await getZaloGateway().readCurrentQr();
+    if (result.status === "blocked") {
+      return reply.status(409).send({
+        error: { code: "LOGIN_SAFETY_BLOCKED", message: result.reason },
+      });
+    }
+    if (result.status === "not_found") {
+      return reply.status(404).send({
+        error: {
+          code: "QR_NOT_FOUND",
+          message: "QR code not yet generated, is stale, or has expired. Call POST /api/zalo/login/start first.",
+        },
+      });
     }
 
-    // Check file is recent enough (not expired — gateway sets qrUpdatedAt=null on expire)
-    const status = getZaloGateway().getStatus();
-    if (!status.qrAvailable) {
-      return reply.status(404).send({ error: { code: "QR_EXPIRED", message: "QR code has expired. Call POST /api/zalo/login/start to generate a new one." } });
-    }
-
-    const data = readFileSync(qrPath);
     // Return as base64 data URL so frontend can display inline without extra auth headers
-    const b64 = data.toString("base64");
-    return { qrDataURL: `data:image/png;base64,${b64}`, updatedAt: status.qrUpdatedAt };
+    const b64 = result.data.toString("base64");
+    return { qrDataURL: `data:image/png;base64,${b64}`, updatedAt: result.updatedAt };
   });
 
   // ═════════════════════════════════════════════════════════════════

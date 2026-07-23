@@ -1262,11 +1262,21 @@ export function deleteDocument(id: string) {
 
 export interface ZaloOpsStatus {
   connected: boolean;
-  connectionStatus: "disconnected" | "connecting" | "waiting_qr_scan" | "connected" | "error";
+  connectionStatus: ZaloConnectionStatus;
   /** ZR2: single source of truth for "what should the operator do next".
    *  "connected" | "session_present" | "backup_available" | "restore_failed"
-   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress" */
-  connectionDetail: "connected" | "session_present" | "backup_available" | "restore_failed" | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress";
+   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress"
+   *  | "login_safety_blocked" | "expired" */
+  connectionDetail:
+    | "connected"
+    | "session_present"
+    | "backup_available"
+    | "restore_failed"
+    | "qr_required"
+    | "waiting_qr_scan"
+    | "reconnect_in_progress"
+    | "login_safety_blocked"
+    | "expired";
   selfUserId: string | null;
   selfDisplayName: string | null;
   lastConnectedAt: string | null;
@@ -1364,7 +1374,68 @@ function isHeartbeatStatus(value: unknown): boolean {
     isNullableNonNegativeInteger(value.ageSeconds);
 }
 
-const ZALO_CONNECTION_STATUSES = ["disconnected", "connecting", "waiting_qr_scan", "connected", "error"] as const;
+function isZaloOpsTerminalStateCoherent(
+  value: Record<string, unknown>,
+  session: Record<string, unknown>,
+): boolean {
+  const blockedByStatus = value.connectionStatus === "blocked";
+  const blockedByDetail = value.connectionDetail === "login_safety_blocked";
+  if (blockedByStatus !== blockedByDetail) return false;
+  if (blockedByStatus) {
+    const hasStableReason =
+      value.lastError === "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED" ||
+      value.lastError === "LOGIN_SAFETY_BLOCKED:OUTBOUND_DRY_RUN_REQUIRED";
+    if (value.connected !== false || session.qrAvailable !== false || session.qrUpdatedAt !== null || !hasStableReason) {
+      return false;
+    }
+  }
+
+  const expiredByStatus = value.connectionStatus === "expired";
+  const expiredByDetail = value.connectionDetail === "expired";
+  if (expiredByStatus !== expiredByDetail) return false;
+  if (expiredByStatus && (value.connected !== false || session.qrAvailable !== false || session.qrUpdatedAt !== null)) {
+    return false;
+  }
+
+  return true;
+}
+
+export type ZaloConnectionStatus =
+  | "disconnected"
+  | "connecting"
+  | "waiting_qr_scan"
+  | "connected"
+  | "expired"
+  | "blocked"
+  | "error";
+
+const ZALO_CONNECTION_STATUSES = [
+  "disconnected",
+  "connecting",
+  "waiting_qr_scan",
+  "connected",
+  "expired",
+  "blocked",
+  "error",
+] as const satisfies readonly ZaloConnectionStatus[];
+const ZALO_LOGIN_STATUS_KEYS = [
+  "connected",
+  "connectionStatus",
+  "dryRun",
+  "selfUserId",
+  "selfDisplayName",
+  "listenerActive",
+  "qrAvailable",
+  "qrUpdatedAt",
+  "lastConnectedAt",
+  "lastError",
+] as const;
+const ZALO_LOGIN_START_STATUSES = ["connecting", "connected", "already_connected"] as const;
+const ZALO_LOGIN_START_KEYS = ["data"] as const;
+const ZALO_LOGIN_START_DATA_KEYS = ["status", "qrImage", "reason"] as const;
+const ZALO_LOGIN_QR_KEYS = ["qrDataURL", "updatedAt"] as const;
+const ZALO_LOGIN_CANCEL_KEYS = ["data"] as const;
+const ZALO_LOGIN_CANCEL_DATA_KEYS = ["cancelled", "message"] as const;
 const ZALO_CONNECTION_DETAILS = [
   "connected",
   "session_present",
@@ -1373,6 +1444,8 @@ const ZALO_CONNECTION_DETAILS = [
   "qr_required",
   "waiting_qr_scan",
   "reconnect_in_progress",
+  "login_safety_blocked",
+  "expired",
 ] as const;
 const ZALO_SESSION_WARNINGS = [
   "NO_SESSION_FILE",
@@ -1447,7 +1520,8 @@ function isZaloOpsStatus(value: unknown): value is ZaloOpsStatus {
   const session = value.session;
   const heartbeats = value.heartbeats;
   const recovery = value.recovery;
-  return typeof value.connected === "boolean" &&
+  return isZaloOpsTerminalStateCoherent(value, session) &&
+    typeof value.connected === "boolean" &&
     ZALO_CONNECTION_STATUSES.includes(value.connectionStatus as typeof ZALO_CONNECTION_STATUSES[number]) &&
     ZALO_CONNECTION_DETAILS.includes(value.connectionDetail as typeof ZALO_CONNECTION_DETAILS[number]) &&
     isNullableString(value.selfUserId) &&
@@ -1816,7 +1890,8 @@ export function listAudit(params: Record<string, string> = {}) {
 
 export interface LoginStatusOutput {
   connected: boolean;
-  connectionStatus: string;
+  connectionStatus: ZaloConnectionStatus;
+  dryRun: boolean;
   selfUserId: string | null;
   selfDisplayName: string | null;
   listenerActive: boolean;
@@ -1826,9 +1901,24 @@ export interface LoginStatusOutput {
   lastError: string | null;
 }
 
+function isZaloLoginStatus(value: unknown): value is LoginStatusOutput {
+  if (!isRecord(value) || !hasExactKeys(value, ZALO_LOGIN_STATUS_KEYS)) return false;
+  return typeof value.connected === "boolean" &&
+    ZALO_CONNECTION_STATUSES.includes(value.connectionStatus as typeof ZALO_CONNECTION_STATUSES[number]) &&
+    typeof value.dryRun === "boolean" &&
+    isNullableString(value.selfUserId) &&
+    isNullableString(value.selfDisplayName) &&
+    typeof value.listenerActive === "boolean" &&
+    typeof value.qrAvailable === "boolean" &&
+    isNullableTimestamp(value.qrUpdatedAt) &&
+    isNullableTimestamp(value.lastConnectedAt) &&
+    isNullableString(value.lastError);
+}
+
 export interface LoginStartResult {
-  status: string;
+  status: typeof ZALO_LOGIN_START_STATUSES[number];
   qrImage?: string;
+  reason?: string;
 }
 
 export interface LoginCancelResult {
@@ -1841,20 +1931,64 @@ export interface QRImageResult {
   updatedAt: string | null;
 }
 
-export function startZaloLogin() {
-  return apiFetch<{ data: LoginStartResult }>("/api/zalo/login/start", { method: "POST", body: JSON.stringify({}) });
+function isZaloLoginStartResponse(value: unknown): value is { data: LoginStartResult } {
+  if (!isRecord(value) || !hasExactKeys(value, ZALO_LOGIN_START_KEYS) ||
+      !isRecord(value.data) || !hasOnlyKeys(value.data, ZALO_LOGIN_START_DATA_KEYS)) {
+    return false;
+  }
+  const data = value.data;
+  return ZALO_LOGIN_START_STATUSES.includes(data.status as typeof ZALO_LOGIN_START_STATUSES[number]) &&
+    (!Object.prototype.hasOwnProperty.call(data, "qrImage") || isNonEmptyString(data.qrImage)) &&
+    (!Object.prototype.hasOwnProperty.call(data, "reason") || isNonEmptyString(data.reason));
 }
 
-export function getZaloLoginStatus() {
-  return apiFetch<LoginStatusOutput>("/api/zalo/login/status");
+function isNonEmptyPngDataUrl(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  const prefix = "data:image/png;base64,";
+  if (!value.startsWith(prefix)) return false;
+  const payload = value.slice(prefix.length);
+  return payload.length > 0 && payload.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(payload);
 }
 
-export function getZaloLoginQR() {
-  return apiFetch<QRImageResult>("/api/zalo/login/qr");
+function isZaloLoginQrResult(value: unknown): value is QRImageResult {
+  if (!isRecord(value) || !hasExactKeys(value, ZALO_LOGIN_QR_KEYS)) return false;
+  return isNonEmptyPngDataUrl(value.qrDataURL) && isNullableTimestamp(value.updatedAt);
 }
 
-export function cancelZaloLogin() {
-  return apiFetch<{ data: LoginCancelResult }>("/api/zalo/login/cancel", { method: "POST" });
+function isZaloLoginCancelResponse(value: unknown): value is { data: LoginCancelResult } {
+  if (!isRecord(value) || !hasExactKeys(value, ZALO_LOGIN_CANCEL_KEYS) ||
+      !isRecord(value.data) || !hasExactKeys(value.data, ZALO_LOGIN_CANCEL_DATA_KEYS)) {
+    return false;
+  }
+  return typeof value.data.cancelled === "boolean" && isNonEmptyString(value.data.message);
+}
+
+export async function startZaloLogin(signal?: AbortSignal) {
+  const result = await apiFetch<unknown>("/api/zalo/login/start", {
+    method: "POST",
+    body: JSON.stringify({}),
+    signal,
+  });
+  if (!isZaloLoginStartResponse(result)) invalidResponse("/api/zalo/login/start", result);
+  return result;
+}
+
+export async function getZaloLoginStatus(signal?: AbortSignal) {
+  const result = await apiFetch<unknown>("/api/zalo/login/status", { signal });
+  if (!isZaloLoginStatus(result)) invalidResponse("/api/zalo/login/status", result);
+  return result;
+}
+
+export async function getZaloLoginQR(signal?: AbortSignal) {
+  const result = await apiFetch<unknown>("/api/zalo/login/qr", { signal });
+  if (!isZaloLoginQrResult(result)) invalidResponse("/api/zalo/login/qr", result);
+  return result;
+}
+
+export async function cancelZaloLogin(signal?: AbortSignal) {
+  const result = await apiFetch<unknown>("/api/zalo/login/cancel", { method: "POST", signal });
+  if (!isZaloLoginCancelResponse(result)) invalidResponse("/api/zalo/login/cancel", result);
+  return result;
 }
 
 // =============================================================================

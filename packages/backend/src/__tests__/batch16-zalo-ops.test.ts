@@ -78,6 +78,8 @@ const mockGatewayStatus = vi.hoisted(() => ({
 
 const mockGateway = vi.hoisted(() => ({
   getStatus: vi.fn(() => mockGatewayStatus),
+  getLoginSafetyDecision: vi.fn(() => ({ allowed: true, reason: null })),
+  enforceLoginSafety: vi.fn(() => ({ allowed: true, reason: null })),
   isConnected: vi.fn(() => true),
   restoreSession: vi.fn(async () => true),
   startLogin: vi.fn(async () => ({ status: "connected" })),
@@ -161,6 +163,8 @@ describe("Batch 16 — Zalo Ops Dashboard", () => {
       qrAvailable: false,
       qrUpdatedAt: null,
     });
+    mockGateway.getStatus.mockImplementation(() => mockGatewayStatus);
+    mockGateway.enforceLoginSafety.mockReturnValue({ allowed: true, reason: null });
   });
 
   // ── Test 1: status returns connected/listener/session without secrets ──
@@ -263,6 +267,103 @@ describe("Batch 16 — Zalo Ops Dashboard", () => {
   });
 
   // ── Test 7: Test DM blocked when dryRun=false ──
+  it.each([
+    ["blocked", "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED"],
+    ["expired", "QR_EXPIRED"],
+  ] as const)("getQRStatus preserves terminal %s state", async (connectionStatus, lastError) => {
+    mockGateway.getStatus.mockReturnValue({
+      ...mockGatewayStatus,
+      connected: false,
+      connectionStatus,
+      lastError,
+      qrAvailable: false,
+      qrUpdatedAt: null,
+    });
+    try {
+      const { getQRStatus } = await import("../services/zalo-ops.service.js");
+      expect(getQRStatus()).toMatchObject({
+        qrAvailable: false,
+        status: connectionStatus,
+        message: lastError,
+      });
+    } finally {
+      mockGateway.getStatus.mockImplementation(() => mockGatewayStatus);
+    }
+  });
+
+  it("enforces the login safety gate before classifying a fresh QR status", async () => {
+    const { existsSync } = await import("node:fs");
+    (existsSync as any).mockReturnValue(false);
+    mockGateway.isConnected = vi.fn(() => false);
+    mockGateway.getStatus.mockReturnValue({
+      ...mockGatewayStatus,
+      connected: false,
+      connectionStatus: "disconnected",
+      lastError: null,
+      qrAvailable: false,
+      qrUpdatedAt: null,
+    });
+    mockGateway.enforceLoginSafety.mockReturnValue({
+      allowed: false,
+      reason: "STATIC_DRY_RUN_ENABLED",
+    });
+
+    const { getQRStatus } = await import("../services/zalo-ops.service.js");
+    expect(getQRStatus()).toMatchObject({
+      qrAvailable: false,
+      status: "blocked",
+      message: "LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED",
+    });
+    expect(mockGateway.enforceLoginSafety).toHaveBeenCalledOnce();
+  });
+
+  it("uses one enforced gateway snapshot after awaited and session inspection work", async () => {
+    const waitingStatus = {
+      ...mockGatewayStatus,
+      connected: false,
+      connectionStatus: "waiting_qr_scan",
+      lastConnectedAt: null,
+      lastError: null,
+      selfUserId: null,
+      selfDisplayName: null,
+      qrAvailable: true,
+      qrUpdatedAt: "2026-07-22T04:00:00.000Z",
+    };
+    Object.assign(mockGatewayStatus, waitingStatus);
+    mockGateway.getStatus.mockImplementation(() => ({ ...mockGatewayStatus }));
+
+    const { prisma } = await import("../db.js");
+    (prisma.message.findFirst as any).mockImplementationOnce(async () => {
+      Object.assign(mockGatewayStatus, {
+        connected: false,
+        connectionStatus: "blocked",
+        lastError: "LOGIN_SAFETY_BLOCKED:OUTBOUND_DRY_RUN_REQUIRED",
+        qrAvailable: false,
+        qrUpdatedAt: null,
+      });
+      return null;
+    });
+    mockGateway.enforceLoginSafety.mockReturnValue({
+      allowed: false,
+      reason: "OUTBOUND_DRY_RUN_REQUIRED",
+    });
+
+    const { getZaloOpsStatus } = await import("../services/zalo-ops.service.js");
+    const result = await getZaloOpsStatus();
+
+    expect(mockGateway.enforceLoginSafety).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      connected: false,
+      connectionStatus: "blocked",
+      connectionDetail: "login_safety_blocked",
+      lastError: "LOGIN_SAFETY_BLOCKED:OUTBOUND_DRY_RUN_REQUIRED",
+      session: {
+        qrAvailable: false,
+        qrUpdatedAt: null,
+      },
+    });
+  });
+
   it("7. testDM blocked when dryRun=false", async () => {
     const { getCurrentEffectiveDryRun } = await import("../services/runtime-config.service.js");
     (getCurrentEffectiveDryRun as any).mockReturnValue(false);

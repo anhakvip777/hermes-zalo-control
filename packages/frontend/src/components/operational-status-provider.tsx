@@ -31,6 +31,7 @@ interface OperationalStatusContextValue {
   zalo: RemoteDataState<ZaloOpsStatus>;
   liveTest: RemoteDataState<LiveTestStatusResult>;
   refresh(): Promise<void>;
+  refreshAfterMutation(): Promise<void>;
 }
 
 const OperationalStatusContext = createContext<OperationalStatusContextValue | null>(null);
@@ -77,13 +78,20 @@ export function OperationalStatusProvider({ children }: { children: ReactNode })
     }));
 
   const refresh = useCallback(() => coordinator.refresh(), [coordinator]);
+  const refreshAfterMutation = useCallback(
+    () => coordinator.refreshAfterMutation(),
+    [coordinator],
+  );
 
   useEffect(() => {
     coordinator.start();
     return () => coordinator.stop();
   }, [coordinator]);
 
-  const value = useMemo(() => ({ zalo, liveTest, refresh }), [zalo, liveTest, refresh]);
+  const value = useMemo(
+    () => ({ zalo, liveTest, refresh, refreshAfterMutation }),
+    [zalo, liveTest, refresh, refreshAfterMutation],
+  );
   return (
     <OperationalStatusContext.Provider value={value}>{children}</OperationalStatusContext.Provider>
   );

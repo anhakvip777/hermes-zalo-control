@@ -16,7 +16,8 @@ import { normalizeThreadId } from "./thread-id.js";
 
 export interface ZaloOpsStatus {
   connected: boolean;
-  connectionStatus: string;
+  /** Gateway lifecycle, including terminal login states "blocked" and "expired". */
+  connectionStatus: ZaloGatewayStatus["connectionStatus"];
   selfUserId: string | null;
   selfDisplayName: string | null;
   lastConnectedAt: string | null;
@@ -49,8 +50,11 @@ export interface ZaloOpsStatus {
 
   /** ZR2: single enum summarizing exactly what reconnect will do next.
    *  "connected" | "session_present" | "backup_available" | "restore_failed"
-   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress" */
-  connectionDetail: string;
+   *  | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress"
+   *  | "login_safety_blocked" | "expired" */
+  connectionDetail: "connected" | "session_present" | "backup_available" | "restore_failed"
+    | "qr_required" | "waiting_qr_scan" | "reconnect_in_progress"
+    | "login_safety_blocked" | "expired";
 
   heartbeats: {
     zaloConnection: { status: string; lastBeatAt: string | null; ageSeconds: number | null };
@@ -76,8 +80,9 @@ export interface ZaloOpsStatus {
 export interface ReconnectResult {
   success: boolean;
   /** ZR2: "already_connected" | "reconnect_in_progress" | "restored" | "restored_from_backup"
-   *  | "qr_required" | "restore_failed" | "error" (legacy "needs_qr" kept as alias of qr_required) */
-  status: string;
+   *  | "qr_required" | "restore_failed" | "connected" | "login_safety_blocked" | "error" */
+  status: "already_connected" | "reconnect_in_progress" | "restored" | "restored_from_backup"
+    | "qr_required" | "restore_failed" | "connected" | "login_safety_blocked" | "error";
   message: string;
   auditId?: string;
 }
@@ -91,7 +96,8 @@ export interface DisconnectResult {
 export interface QRStatus {
   qrAvailable: boolean;
   qrUpdatedAt: string | null;
-  status: string; // "connected" | "needs_qr" | "connecting" | "error"
+  /** Includes terminal QR states "blocked" and "expired". */
+  status: "connected" | "needs_qr" | "needs_reconnect" | "connecting" | "waiting_qr_scan" | "blocked" | "expired" | "error";
   message: string;
 }
 
@@ -129,7 +135,10 @@ export interface RecentEventsResponse {
 const SESSION_FILE = "zalo-session.json";
 const SESSION_DIR = config.zalo.sessionDir;
 
-function getSessionInfo(): ZaloOpsStatus["session"] {
+type SessionFileInfo = Omit<ZaloOpsStatus["session"], "qrAvailable" | "qrUpdatedAt" | "warning">;
+type GatewayOpsSnapshot = ZaloGatewayStatus & { qrAvailable: boolean; qrUpdatedAt: string | null };
+
+function inspectSessionFiles(): SessionFileInfo {
   const sessionPath = resolve(SESSION_DIR, SESSION_FILE);
   const exists = existsSync(sessionPath);
   let age: string | null = null;
@@ -165,19 +174,6 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
   const parts = sessionPath.split(/[\\/]+/).filter(Boolean);
   const maskedPath = parts.length >= 2 ? `…/${parts.slice(-2).join("/")}` : "…/session";
 
-  const gw = getZaloGateway();
-  const gwStatus = gw.getStatus();
-
-  // S3: Determine warning based on connected state + file existence
-  let warning: ZaloOpsStatus["session"]["warning"] = null;
-  if (gwStatus.connected && !exists) {
-    warning = "CONNECTED_BUT_SESSION_NOT_PERSISTED";
-  } else if (!exists) {
-    warning = "NO_SESSION_FILE";
-  } else if (quarantinedFiles.length > 0) {
-    warning = "SESSION_QUARANTINED";
-  }
-
   // ZR2: only relevant to check when primary is missing — avoids an extra fs scan
   // on the common "connected, session present" path.
   const backupAvailable = !exists && findLatestSessionBackup() !== null;
@@ -187,25 +183,43 @@ function getSessionInfo(): ZaloOpsStatus["session"] {
     age,
     ageSeconds,
     path: maskedPath,
-    qrAvailable: gwStatus.qrAvailable,
-    qrUpdatedAt: gwStatus.qrUpdatedAt,
     fileSize,
     updatedAt,
     quarantinedFiles,
-    warning,
     backupAvailable,
   };
+}
+
+function sessionInfoFromSnapshot(
+  files: SessionFileInfo,
+  gwStatus: GatewayOpsSnapshot,
+): ZaloOpsStatus["session"] {
+  let warning: ZaloOpsStatus["session"]["warning"] = null;
+  if (gwStatus.connected && !files.exists) {
+    warning = "CONNECTED_BUT_SESSION_NOT_PERSISTED";
+  } else if (!files.exists) {
+    warning = "NO_SESSION_FILE";
+  } else if (files.quarantinedFiles.length > 0) {
+    warning = "SESSION_QUARANTINED";
+  }
+
+  return {
+    ...files,
+    qrAvailable: gwStatus.qrAvailable,
+    qrUpdatedAt: gwStatus.qrUpdatedAt,
+    warning,
+  };
+}
+
+function getSessionInfo(gwStatus?: GatewayOpsSnapshot): ZaloOpsStatus["session"] {
+  const files = inspectSessionFiles();
+  return sessionInfoFromSnapshot(files, gwStatus ?? getZaloGateway().getStatus());
 }
 
 // ── Get ops status ───────────────────────────────────────────────────
 
 export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
   const gw = getZaloGateway();
-  const gwStatus = gw.getStatus();
-
-  // This observational endpoint must not write heartbeat evidence. The
-  // gateway lifecycle is the producer of connection/listener heartbeats.
-  const listenerIsActive = gw.isListenerActive();
 
   // Last message timestamp
   const lastMessage = await prisma.message.findFirst({
@@ -235,11 +249,24 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
     ? (() => { try { const v = JSON.parse(allowedThreadsSetting.value); return Array.isArray(v) ? v : []; } catch { return []; } })()
     : config.autoReply.allowedThreads;
 
-  const sessionInfo = getSessionInfo();
+  // Inspect non-gateway state first, then enforce policy and capture exactly
+  // one final gateway snapshot. All gateway-derived response fields below use
+  // this snapshot so a late safety block cannot leak stale waiting/QR state.
+  const sessionFiles = inspectSessionFiles();
+  gw.enforceLoginSafety();
+  const gwStatus = gw.getStatus();
+  const listenerIsActive = gw.isListenerActive();
+  const recoveryStatus = gw.getRecoveryStatus();
+  const reconnectInProgress = gw.isReconnectInProgress();
+  const sessionInfo = sessionInfoFromSnapshot(sessionFiles, gwStatus);
 
   // ZR2: connectionDetail — single source of truth for "what should the operator do next"
-  let connectionDetail: string;
-  if (gw.isReconnectInProgress()) {
+  let connectionDetail: ZaloOpsStatus["connectionDetail"];
+  if (gwStatus.connectionStatus === "blocked") {
+    connectionDetail = "login_safety_blocked";
+  } else if (gwStatus.connectionStatus === "expired") {
+    connectionDetail = "expired";
+  } else if (reconnectInProgress) {
     connectionDetail = "reconnect_in_progress";
   } else if (gwStatus.connected) {
     connectionDetail = "connected";
@@ -289,17 +316,14 @@ export async function getZaloOpsStatus(): Promise<ZaloOpsStatus> {
         : { status: "down", lastBeatAt: null, ageSeconds: null },
     },
 
-    recovery: (() => {
-      const r = gw.getRecoveryStatus();
-      return {
-        recoveryState: r.recoveryState,
-        reconnectAttempts: r.reconnectAttempts,
-        maxReconnectAttempts: r.maxReconnectAttempts,
-        lastReconnectAt: r.lastReconnectAt,
-        lastReconnectError: r.lastReconnectError,
-        listenerHeartbeatAgeSeconds: r.listenerHeartbeatAgeSeconds,
-      };
-    })(),
+    recovery: {
+      recoveryState: recoveryStatus.recoveryState,
+      reconnectAttempts: recoveryStatus.reconnectAttempts,
+      maxReconnectAttempts: recoveryStatus.maxReconnectAttempts,
+      lastReconnectAt: recoveryStatus.lastReconnectAt,
+      lastReconnectError: recoveryStatus.lastReconnectError,
+      listenerHeartbeatAgeSeconds: recoveryStatus.listenerHeartbeatAgeSeconds,
+    },
 
     inbound24h,
     outbound24h,
@@ -334,6 +358,12 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
 
   // 2) ZR2: reconnect mutex — refuse a second concurrent reconnect instead of racing
   // two restore/login attempts against the same session file.
+  const decision = gw.enforceLoginSafety();
+  if (!decision.allowed) {
+    await createAudit("zalo.reconnect", `login_safety_blocked:${decision.reason}`, userId);
+    return { success: false, status: "login_safety_blocked", message: decision.reason };
+  }
+
   if (!gw.beginReconnect()) {
     return {
       success: false,
@@ -351,6 +381,11 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
     if (sessionInfo.exists || sessionInfo.backupAvailable) {
       try {
         const restored = await gw.restoreSession({ startListener: true });
+        const decisionAfterRestore = gw.enforceLoginSafety();
+        if (!decisionAfterRestore.allowed) {
+          await createAudit("zalo.reconnect", `login_safety_blocked:${decisionAfterRestore.reason}`, userId);
+          return { success: false, status: "login_safety_blocked", message: decisionAfterRestore.reason };
+        }
         if (restored) {
           const usedBackup = gw.getLastRestoreSource() === "backup";
           await createAudit("zalo.reconnect", usedBackup ? "restored_from_backup" : "restored", userId);
@@ -370,6 +405,11 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
           message: "Session restore failed (invalid or expired credentials). QR login required.",
         };
       } catch (err: unknown) {
+        const decisionAfterError = gw.enforceLoginSafety();
+        if (!decisionAfterError.allowed) {
+          await createAudit("zalo.reconnect", `login_safety_blocked:${decisionAfterError.reason}`, userId);
+          return { success: false, status: "login_safety_blocked", message: decisionAfterError.reason };
+        }
         const msg = err instanceof Error ? err.message : String(err);
         await createAudit("zalo.reconnect", "restore_failed", userId);
         return {
@@ -383,6 +423,16 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
     // 5) No primary session and no backup — QR login is the only path left.
     try {
       const result = await gw.startLogin();
+      const decisionAfterStart = gw.enforceLoginSafety();
+      if (!decisionAfterStart.allowed) {
+        await createAudit("zalo.reconnect", `login_safety_blocked:${decisionAfterStart.reason}`, userId);
+        return { success: false, status: "login_safety_blocked", message: decisionAfterStart.reason };
+      }
+      if (result.status === "blocked") {
+        const reason = result.reason ?? "unknown";
+        await createAudit("zalo.reconnect", `login_safety_blocked:${reason}`, userId);
+        return { success: false, status: "login_safety_blocked", message: reason };
+      }
       await createAudit("zalo.reconnect", result.status === "connected" ? "started_dry" : "started_login", userId);
 
       if (result.status === "connected") {
@@ -396,6 +446,11 @@ export async function reconnectZalo(userId?: string): Promise<ReconnectResult> {
         message: "No saved session or backup found. QR login started — scan QR code to connect.",
       };
     } catch (err: unknown) {
+      const decisionAfterError = gw.enforceLoginSafety();
+      if (!decisionAfterError.allowed) {
+        await createAudit("zalo.reconnect", `login_safety_blocked:${decisionAfterError.reason}`, userId);
+        return { success: false, status: "login_safety_blocked", message: decisionAfterError.reason };
+      }
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, status: "error", message: msg };
     }
@@ -422,10 +477,31 @@ export async function disconnectZalo(userId?: string): Promise<DisconnectResult>
 
 export function getQRStatus(): QRStatus {
   const gw = getZaloGateway();
+  const safetyDecision = gw.enforceLoginSafety();
   const gwStatus = gw.getStatus();
 
   if (gwStatus.connected) {
     return { qrAvailable: false, qrUpdatedAt: null, status: "connected", message: "Already connected." };
+  }
+
+  if (!safetyDecision.allowed) {
+    return {
+      qrAvailable: false,
+      qrUpdatedAt: null,
+      status: "blocked",
+      message: `LOGIN_SAFETY_BLOCKED:${safetyDecision.reason}`,
+    };
+  }
+
+  if (gwStatus.connectionStatus === "blocked" || gwStatus.connectionStatus === "expired") {
+    return {
+      qrAvailable: false,
+      qrUpdatedAt: null,
+      status: gwStatus.connectionStatus,
+      message: gwStatus.lastError ?? (gwStatus.connectionStatus === "blocked"
+        ? "LOGIN_SAFETY_BLOCKED"
+        : "QR_EXPIRED"),
+    };
   }
 
   if (gwStatus.connectionStatus === "waiting_qr_scan" && gwStatus.qrAvailable) {
@@ -440,7 +516,7 @@ export function getQRStatus(): QRStatus {
     return { qrAvailable: false, qrUpdatedAt: null, status: "error", message: gwStatus.lastError ?? "Connection error." };
   }
 
-  const sessionInfo = getSessionInfo();
+  const sessionInfo = getSessionInfo(gwStatus);
   if (sessionInfo.exists) {
     return { qrAvailable: false, qrUpdatedAt: null, status: "needs_reconnect", message: "Session exists but not connected. Try Reconnect." };
   }

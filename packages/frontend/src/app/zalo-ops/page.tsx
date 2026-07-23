@@ -7,6 +7,8 @@ import {
 } from "../../lib/api-client";
 import { formatVnTime } from "../../components/ui/TimeText";
 import { useOperationalStatus } from "../../components/operational-status-provider";
+import { ZaloLoginCard } from "../../components/zalo-login-card";
+import { getZaloLoginCardReconcileKey } from "../../lib/zalo-login-polling";
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 function Card({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) {
@@ -52,13 +54,15 @@ function Hb({ label, status, ageSeconds }: { label: string; status: string; ageS
 /* ── ZR2: connectionDetail → operator-facing label + color ─────── */
 const CONNECTION_DETAIL_META: Record<string, { label: string; cls: string }> = {
   connected: { label: "● Đã kết nối", cls: "bg-green-950 text-green-400 border-green-800" },
-  session_present: { label: "◐ Có session — bấm Reconnect", cls: "bg-blue-950 text-blue-400 border-blue-800" },
+  session_present: { label: "◐ Có session — reconnect status-only", cls: "bg-blue-950 text-blue-400 border-blue-800" },
   backup_available: { label: "⟲ Có backup — có thể khôi phục", cls: "bg-cyan-950 text-cyan-400 border-cyan-800" },
   restored_from_backup: { label: "⟲ Đã khôi phục từ backup", cls: "bg-cyan-950 text-cyan-400 border-cyan-800" },
   restore_failed: { label: "✕ Khôi phục thất bại — cần QR", cls: "bg-red-950 text-red-400 border-red-800" },
   qr_required: { label: "▣ Cần đăng nhập QR", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" },
   waiting_qr_scan: { label: "▣ Đang chờ quét QR", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" },
   reconnect_in_progress: { label: "⏳ Đang kết nối lại…", cls: "bg-slate-800 text-slate-300 border-slate-600" },
+  login_safety_blocked: { label: "⚠ QR bị chặn an toàn", cls: "bg-red-950 text-red-400 border-red-800" },
+  expired: { label: "⏱ QR đã hết hạn", cls: "bg-yellow-950 text-yellow-400 border-yellow-800" },
 };
 
 function ConnectionDetailBadge({ detail }: { detail: string | undefined }) {
@@ -73,7 +77,7 @@ function ConnectionDetailBadge({ detail }: { detail: string | undefined }) {
 
 /* ── Page ─────────────────────────────────────────────────────── */
 export default function ZaloOpsPage() {
-  const { zalo, refresh: refreshOperational } = useOperationalStatus();
+  const { zalo, refresh: refreshOperational, refreshAfterMutation } = useOperationalStatus();
   const status = zalo.status === "ready" ? zalo.data : null;
   const [events, setEvents] = useState<RecentEventsResponse | null>(null);
   const [eventsLoading, setEventsLoading] = useState(true);
@@ -135,14 +139,20 @@ export default function ZaloOpsPage() {
 
       {zalo.status === "unknown" && <div className="rounded-md border border-red-800 bg-red-950/40 px-4 py-2.5 text-sm text-red-300">Zalo runtime UNKNOWN — {zalo.error}</div>}
       {eventsError && <div className="rounded-md border border-red-800 bg-red-950/40 px-4 py-2.5 text-sm text-red-300">Recent events UNKNOWN — {eventsError}</div>}
-      <div className="rounded-md border border-blue-800 bg-blue-950/30 px-4 py-2.5 text-sm text-blue-300">Zalo operations đang ở chế độ status-only. QR, reconnect, disconnect và test-DM không được gọi từ dashboard remediation.</div>
+      <div className="rounded-md border border-blue-800 bg-blue-950/30 px-4 py-2.5 text-sm text-blue-300">Chỉ Controlled QR Login được mở trong dashboard. Reconnect, disconnect và test-DM vẫn ở chế độ status-only.</div>
 
       {/* Runtime status is unknown until a complete response exists. */}
       {!status && <div className="rounded-md border border-slate-700 bg-slate-900/50 px-4 py-3 text-sm text-slate-400">Runtime status UNKNOWN — không suy luận disconnected, dry-run hoặc empty events.</div>}
 
-      {status?.session.qrAvailable && <div className="rounded-md border border-yellow-800 bg-yellow-950/40 px-4 py-3 text-sm text-yellow-400">QR metadata có sẵn từ backend nhưng không có thao tác quét QR trên trang này.</div>}
-
-      {/* No login card or mutation controls in remediation. */}
+      {status && (
+        <section aria-label="Controlled QR Login">
+          <ZaloLoginCard
+            key={getZaloLoginCardReconcileKey(status)}
+            backupAvailable={status.session.backupAvailable}
+            onConnected={() => { void refreshAfterMutation(); }}
+          />
+        </section>
+      )}
 
 
       {/* Connection */}

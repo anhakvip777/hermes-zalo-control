@@ -1,5 +1,33 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+const zcaBoundary = vi.hoisted(() => {
+  const login = vi.fn();
+
+  class FakeZalo {
+    constructor(_options: unknown) {}
+
+    login(credentials: unknown) {
+      return login(credentials);
+    }
+  }
+
+  const projectRequire = vi.fn((moduleId: string) => {
+    if (moduleId !== "zca-js") throw new Error(`Unexpected projectRequire call: ${moduleId}`);
+    return { Zalo: FakeZalo };
+  });
+
+  return {
+    login,
+    projectRequire,
+    createRequire: vi.fn(() => projectRequire),
+  };
+});
+
+vi.mock("node:module", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:module")>();
+  return { ...actual, createRequire: zcaBoundary.createRequire };
+});
+
 // =============================================================================
 // ZR1: Auto-reconnect + WS disconnect event wiring tests
 // Pattern: unit-test ZaloGatewayService private methods directly via (gw as any)
@@ -128,6 +156,7 @@ function makeMockApi(listener: ReturnType<typeof makeMockListener>) {
 describe("ZR1 auto-reconnect — WS event wiring", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    zcaBoundary.login.mockReset();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -264,51 +293,40 @@ describe("ZR1 auto-reconnect — WS event wiring", () => {
   // ── ZR1-T7: valid session → restoreSession true ───────────────────────────
   it("ZR1-T7: valid session file → restoreSession returns true (no QR needed)", async () => {
     const fs = await import("node:fs");
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+    const sessionJson = JSON.stringify({
       selfUserId: "uid-test",
       selfDisplayName: "Test Bot",
       savedAt: String(Date.now()),
       credentials: { imei: "test-imei", cookie: [], userAgent: "test-ua", language: "vi" },
+    });
+    const writes = new Map<string, string>();
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockImplementation((path) => (writes.get(String(path)) ?? sessionJson) as any);
+    vi.mocked(fs.writeFileSync).mockImplementation((path, data) => {
+      writes.set(String(path), String(data));
+    });
+    vi.mocked(fs.statSync).mockImplementation((path) => ({
+      size: (writes.get(String(path)) ?? sessionJson).length,
     }) as any);
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      const data = writes.get(String(from));
+      if (data !== undefined) {
+        writes.set(String(to), data);
+        writes.delete(String(from));
+      }
+    });
 
     const { ZaloGatewayService } = await import("../services/zalo-gateway.service.js") as any;
     const gw = new ZaloGatewayService();
 
     const mockApi = makeMockApi(makeMockListener());
 
-    // restoreSession calls projectRequire("zca-js") → new zca.Zalo() → this.zalo.login()
-    // We cannot mock CJS require, so we intercept by patching setConnected flow:
-    // Override the real zalo.login by injecting AFTER Zalo() is instantiated.
-    // Strategy: mock persistSession + startListener, then intercept zalo instance
-    // by spying on Object.setPrototypeOf or using a beforeEach hook.
-    // Simplest: use vi.spyOn on the internal method that wraps zca-js login.
-    // Since projectRequire resolves to real zca-js, we mock the Zalo class ctor:
-    vi.spyOn(gw as any, "persistSession").mockResolvedValue({ ok: true, message: "saved" });
-    vi.spyOn(gw as any, "startListener").mockResolvedValue(undefined);
-
-    // Intercept: after projectRequire("zca-js") runs and sets this.zalo,
-    // we replace login before it's called by patching the prototype chain.
-    // Use a getter spy on gw to intercept this.zalo assignment:
-    let capturedZalo: any = null;
-    const originalDescriptor = Object.getOwnPropertyDescriptor(gw as any, "zalo");
-    Object.defineProperty(gw as any, "zalo", {
-      set(val: any) {
-        // Intercept: replace login with mock
-        if (val && typeof val.login === "function") {
-          val.login = vi.fn(async () => mockApi);
-        }
-        capturedZalo = val;
-        Object.defineProperty(gw, "zalo", { value: val, writable: true, configurable: true });
-      },
-      get() { return capturedZalo; },
-      configurable: true,
-    });
+    zcaBoundary.login.mockResolvedValueOnce(mockApi);
 
     const result = await (gw as any).restoreSession({ startListener: false });
 
     expect(result).toBe(true);
-    expect(capturedZalo?.login).toHaveBeenCalledOnce();
+    expect(zcaBoundary.login).toHaveBeenCalledOnce();
     expect((gw as any).status.connected).toBe(true);
   });
 
@@ -340,6 +358,7 @@ describe("ZR1 auto-reconnect — WS event wiring", () => {
     (gw as any).zalo = {
       login: vi.fn(async () => { throw new Error("Đăng nhập thất bại"); }),
     };
+    zcaBoundary.login.mockRejectedValueOnce(new Error("restore login failed"));
 
     const result = await (gw as any).restoreSession({ startListener: false });
 
@@ -349,7 +368,7 @@ describe("ZR1 auto-reconnect — WS event wiring", () => {
   });
 
   // ── ZR1-T10: dryRun=true → restoreSession returns true without FS ─────────
-  it("ZR1-T10: dryRun=true → restoreSession is stub (always true)", async () => {
+  it("ZR1-T10: static dryRun blocks restore before synthetic connection", async () => {
     const fs = await import("node:fs");
     vi.mocked(fs.existsSync).mockReturnValue(false);
     mockConfig.zalo.dryRun = true;
@@ -357,13 +376,16 @@ describe("ZR1 auto-reconnect — WS event wiring", () => {
     const { ZaloGatewayService } = await import("../services/zalo-gateway.service.js") as any;
     const gw = new ZaloGatewayService();
 
-    const result = await (gw as any).restoreSession({ startListener: false });
+    try {
+      const result = await (gw as any).restoreSession({ startListener: false });
 
-    expect(result).toBe(true);
-    expect((gw as any).status.connected).toBe(true);
-    expect((gw as any).status.selfUserId).toBe("dry-run-user");
-
-    mockConfig.zalo.dryRun = false; // restore
+      expect(result).toBe(false);
+      expect((gw as any).status.connected).toBe(false);
+      expect((gw as any).status.connectionStatus).toBe("blocked");
+      expect((gw as any).status.lastError).toBe("LOGIN_SAFETY_BLOCKED:STATIC_DRY_RUN_ENABLED");
+    } finally {
+      mockConfig.zalo.dryRun = false;
+    }
   });
 
   // ── ZR1-T11: getStatus() never leaks credentials ─────────────────────────

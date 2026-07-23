@@ -8,6 +8,7 @@ export interface OperationalStatusCoordinatorOptions<T> {
 export interface OperationalStatusCoordinator {
   start(): void;
   refresh(): Promise<void>;
+  refreshAfterMutation(): Promise<void>;
   stop(): void;
 }
 
@@ -19,6 +20,10 @@ export function createOperationalStatusCoordinator<T>(
   let nextId = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
   let active: { id: number; promise: Promise<void>; controller: AbortController } | null = null;
+
+  function isStopped(): boolean {
+    return phase === "stopped";
+  }
 
   function isCurrent(id: number, controller: AbortController): boolean {
     return phase !== "stopped" && !controller.signal.aborted && active?.id === id;
@@ -57,6 +62,15 @@ export function createOperationalStatusCoordinator<T>(
     return request;
   }
 
+  async function refreshAfterMutation(): Promise<void> {
+    if (phase === "stopped") return;
+    while (active) {
+      await active.promise;
+      if (isStopped()) return;
+    }
+    await refresh();
+  }
+
   function start(): void {
     if (phase === "running") return;
     phase = "running";
@@ -77,5 +91,5 @@ export function createOperationalStatusCoordinator<T>(
     current?.controller.abort();
   }
 
-  return { start, refresh, stop };
+  return { start, refresh, refreshAfterMutation, stop };
 }

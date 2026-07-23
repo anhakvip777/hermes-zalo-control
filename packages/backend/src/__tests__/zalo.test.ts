@@ -600,6 +600,10 @@ describe("ZaloGatewayService — QR login flow", () => {
     mkdirSync(testDir, { recursive: true });
     const qrPath = join(testDir, "qr-current.png");
     writeFileSync(qrPath, Buffer.alloc(1000, 0xff));
+    (gw as any).loginInProgress = true;
+    (gw as any).loginGeneration = 1;
+    (gw as any).activeLoginGeneration = 1;
+    (gw as any).qrUpdatedAt = new Date().toISOString();
     try {
       const status = gw.getStatus();
       expect(status.qrAvailable).toBe(true);

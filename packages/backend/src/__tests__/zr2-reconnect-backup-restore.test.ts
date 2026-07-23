@@ -64,7 +64,7 @@ vi.mock("../services/heartbeat.service.js", () => ({
 
 // ── Mock runtime-config ──────────────────────────────────────────────
 vi.mock("../services/runtime-config.service.js", () => ({
-  getCurrentEffectiveDryRun: vi.fn(async () => true),
+  getCurrentEffectiveDryRun: vi.fn(() => true),
   getEffectiveCooldownSeconds: vi.fn(async () => 10),
   getAllRuntimeSettings: vi.fn(async () => []),
   SETTING_META: {},
@@ -142,6 +142,7 @@ const mockGateway = vi.hoisted(() => ({
     qrAvailable: gwState.qrAvailable,
     qrUpdatedAt: null,
   })),
+  enforceLoginSafety: vi.fn(() => ({ allowed: true, reason: null as string | null })),
   isConnected: vi.fn(() => gwState.connected),
   listenerActive: false,
   getApi: vi.fn(() => null),
@@ -238,6 +239,8 @@ describe("ZR2 — reconnect / backup restore", () => {
   beforeEach(() => {
     resetState();
     vi.clearAllMocks();
+    mockGateway.enforceLoginSafety.mockReset();
+    mockGateway.enforceLoginSafety.mockReturnValue({ allowed: true, reason: null });
   });
 
   it("1. already_connected → no-op, never touches the session file", async () => {
@@ -255,6 +258,29 @@ describe("ZR2 — reconnect / backup restore", () => {
     expect(sideEffects.quarantined).toHaveLength(0);
     expect(mockGateway.restoreSession).not.toHaveBeenCalled();
     expect(mockGateway.beginReconnect).not.toHaveBeenCalled();
+  });
+
+  it("blocks reconnect before claiming the mutex or starting restore/login", async () => {
+    vfs.set(SESSION_PATH, VALID_SESSION);
+    mockGateway.enforceLoginSafety.mockReturnValueOnce({
+      allowed: false,
+      reason: "STATIC_DRY_RUN_ENABLED",
+    });
+
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    const r = await reconnectZalo("admin");
+
+    expect(r).toMatchObject({
+      success: false,
+      status: "login_safety_blocked",
+      message: "STATIC_DRY_RUN_ENABLED",
+    });
+    expect(mockGateway.beginReconnect).not.toHaveBeenCalled();
+    expect(mockGateway.restoreSession).not.toHaveBeenCalled();
+    expect(mockGateway.startLogin).not.toHaveBeenCalled();
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("login_safety_blocked:STATIC_DRY_RUN_ENABLED") }) }),
+    );
   });
 
   it("2. double-submit → second concurrent reconnect returns reconnect_in_progress", async () => {
@@ -281,10 +307,18 @@ describe("ZR2 — reconnect / backup restore", () => {
     expect(gwState.reconnectInProgress).toBe(false);
   });
 
-  it("3. primary missing + backup exists → copy backup → restored_from_backup", async () => {
-    // no primary, but a backup on disk
+  it("3. gateway backup restore → ops reports restored_from_backup", async () => {
+    // Session inventory selects the restore branch; gateway outcome remains an
+    // explicit contract stub rather than reimplementing filesystem restore.
     vfs.set(BACKUP_PATH, VALID_SESSION);
-    expect(vfs.has(SESSION_PATH)).toBe(false);
+    mockGateway.restoreSession.mockImplementationOnce(async () => {
+      gwState.connected = true;
+      gwState.connectionStatus = "connected";
+      gwState.lastError = null;
+      gwState.lastRestoreSource = "backup";
+      (mockGateway as any).listenerActive = true;
+      return true;
+    });
 
     const { reconnectZalo } = await import("../services/zalo-ops.service.js");
     const r = await reconnectZalo("admin");
@@ -293,10 +327,7 @@ describe("ZR2 — reconnect / backup restore", () => {
     expect(r.success).toBe(true);
     expect(gwState.connected).toBe(true);
     expect((mockGateway as any).listenerActive).toBe(true);
-    // backup copied into primary path
-    expect(vfs.has(SESSION_PATH)).toBe(true);
-    // backup preserved (not moved/deleted)
-    expect(vfs.has(BACKUP_PATH)).toBe(true);
+    expect(mockGateway.restoreSession).toHaveBeenCalledOnce();
     expect(auditCreate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("restored_from_backup") }) }),
     );
@@ -332,17 +363,98 @@ describe("ZR2 — reconnect / backup restore", () => {
     expect(vfs.get(sideEffects.quarantined[0])).toBe(INVALID_SESSION);
   });
 
-  it("6. QR login/persist success → primary + backup both written", async () => {
-    // Model persistSession writing both primary and a timestamped backup copy.
-    const persist = async () => {
-      vfs.set(SESSION_PATH, VALID_SESSION);
-      vfs.set(BACKUP_PATH, VALID_SESSION); // backup copy alongside primary
-    };
-    await persist();
+  it("returns login_safety_blocked when policy blocks while restore is pending", async () => {
+    vfs.set(SESSION_PATH, VALID_SESSION);
+    mockGateway.enforceLoginSafety
+      .mockReturnValueOnce({ allowed: true, reason: null })
+      .mockReturnValue({ allowed: false, reason: "OUTBOUND_DRY_RUN_REQUIRED" });
+    mockGateway.restoreSession.mockResolvedValueOnce(false);
 
-    expect(vfs.has(SESSION_PATH)).toBe(true);
-    expect(vfs.has(BACKUP_PATH)).toBe(true);
-    expect(vfs.get(BACKUP_PATH)).toBe(vfs.get(SESSION_PATH));
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    const r = await reconnectZalo("admin");
+
+    expect(r).toMatchObject({
+      success: false,
+      status: "login_safety_blocked",
+      message: "OUTBOUND_DRY_RUN_REQUIRED",
+    });
+    expect(mockGateway.beginReconnect).toHaveBeenCalledOnce();
+    expect(mockGateway.restoreSession).toHaveBeenCalledOnce();
+    expect(mockGateway.startLogin).not.toHaveBeenCalled();
+    expect(mockGateway.endReconnect).toHaveBeenCalledOnce();
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("login_safety_blocked:OUTBOUND_DRY_RUN_REQUIRED") }) }),
+    );
+  });
+
+  it("returns login_safety_blocked when startLogin blocks after preflight", async () => {
+    mockGateway.enforceLoginSafety.mockReturnValueOnce({ allowed: true, reason: null });
+    mockGateway.startLogin.mockResolvedValueOnce({
+      status: "blocked",
+      reason: "STATIC_DRY_RUN_ENABLED",
+    });
+
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    const r = await reconnectZalo("admin");
+
+    expect(r).toMatchObject({
+      success: false,
+      status: "login_safety_blocked",
+      message: "STATIC_DRY_RUN_ENABLED",
+    });
+    expect(mockGateway.beginReconnect).toHaveBeenCalledOnce();
+    expect(mockGateway.restoreSession).not.toHaveBeenCalled();
+    expect(mockGateway.startLogin).toHaveBeenCalledOnce();
+    expect(mockGateway.endReconnect).toHaveBeenCalledOnce();
+    expect(gwState.qrAvailable).toBe(false);
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("login_safety_blocked:STATIC_DRY_RUN_ENABLED") }) }),
+    );
+    expect(auditCreate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("started_login") }) }),
+    );
+  });
+
+  it("returns login_safety_blocked when restore throws after policy flips", async () => {
+    vfs.set(SESSION_PATH, VALID_SESSION);
+    mockGateway.enforceLoginSafety
+      .mockReturnValueOnce({ allowed: true, reason: null })
+      .mockReturnValue({ allowed: false, reason: "OUTBOUND_DRY_RUN_REQUIRED" });
+    mockGateway.restoreSession.mockRejectedValueOnce(new Error("restore exploded"));
+
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    const r = await reconnectZalo("admin");
+
+    expect(r).toMatchObject({
+      success: false,
+      status: "login_safety_blocked",
+      message: "OUTBOUND_DRY_RUN_REQUIRED",
+    });
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("login_safety_blocked:OUTBOUND_DRY_RUN_REQUIRED") }) }),
+    );
+    expect(auditCreate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: "restore_failed" }) }),
+    );
+  });
+
+  it("returns login_safety_blocked when startLogin throws after policy flips", async () => {
+    mockGateway.enforceLoginSafety
+      .mockReturnValueOnce({ allowed: true, reason: null })
+      .mockReturnValue({ allowed: false, reason: "STATIC_DRY_RUN_ENABLED" });
+    mockGateway.startLogin.mockRejectedValueOnce(new Error("login exploded"));
+
+    const { reconnectZalo } = await import("../services/zalo-ops.service.js");
+    const r = await reconnectZalo("admin");
+
+    expect(r).toMatchObject({
+      success: false,
+      status: "login_safety_blocked",
+      message: "STATIC_DRY_RUN_ENABLED",
+    });
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ details: expect.stringContaining("login_safety_blocked:STATIC_DRY_RUN_ENABLED") }) }),
+    );
   });
 
   it("7. auto restore after init/restart with a valid session → no QR needed", async () => {
